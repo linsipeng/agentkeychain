@@ -3,7 +3,7 @@
  */
 import sodium from 'libsodium-wrappers-sumo';
 import { Database } from "bun:sqlite";
-import { generateKeypair, encryptPrivKey, PRIV_BYTES } from "./crypto/keys.ts";
+import { generateKeypair, encryptPrivKey } from "./crypto/keys.ts";
 
 let initPromise: Promise<void> | null = null;
 async function ensureSodium(): Promise<typeof sodium> {
@@ -53,9 +53,6 @@ export async function createIdentity(
 ): Promise<Identity> {
   const id = await generateAgentId();
   const { publicKey, privateKey } = await generateKeypair();
-  if (privateKey.length !== PRIV_BYTES) {
-    throw new Error("unexpected private key length");
-  }
   const { ciphertext, nonce } = await encryptPrivKey(privateKey, args.kek);
 
   const now = Date.now();
@@ -95,6 +92,38 @@ export function loadIdentity(db: Database, id: string): Identity | null {
        FROM identities WHERE id = ? AND revoked_at IS NULL`
     )
     .get(id) as
+    | {
+        id: string;
+        name: string;
+        public_key: Uint8Array;
+        scopes: string;
+        parent_id: string | null;
+        created_at: number;
+        expires_at: number | null;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    publicKey: row.public_key,
+    scopes: JSON.parse(row.scopes) as string[],
+    parentId: row.parent_id,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+  };
+}
+
+/**
+ * Load identity by human-readable name (e.g. "default").
+ */
+export function loadIdentityByName(db: Database, name: string): Identity | null {
+  const row = db
+    .prepare(
+      `SELECT id, name, public_key, scopes, parent_id, created_at, expires_at
+       FROM identities WHERE name = ? AND revoked_at IS NULL`
+    )
+    .get(name) as
     | {
         id: string;
         name: string;

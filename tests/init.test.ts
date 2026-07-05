@@ -28,12 +28,10 @@ test("argon2 KEK differs for different passwords", async () => {
 });
 
 test("Ed25519 keypair generation produces correct sizes", async () => {
-  const { generateKeypair, PUB_BYTES, PRIV_BYTES } = await import(
-    "../src/crypto/keys.ts"
-  );
+  const { generateKeypair } = await import("../src/crypto/keys.ts");
   const kp = await generateKeypair();
-  expect(kp.publicKey.length).toBe(PUB_BYTES);
-  expect(kp.privateKey.length).toBe(PRIV_BYTES);
+  expect(kp.publicKey.length).toBe(32); // Ed25519 public key
+  expect(kp.privateKey.length).toBe(64); // Ed25519 private key (seed || public)
 });
 
 test("encrypt + decrypt private key round-trips", async () => {

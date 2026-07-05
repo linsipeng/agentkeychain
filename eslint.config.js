@@ -17,6 +17,13 @@ export default [
         process: "readonly",
         Bun: "readonly",
         Buffer: "readonly",
+        TextEncoder: "readonly",
+        TextDecoder: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+        setInterval: "readonly",
+        clearInterval: "readonly",
+        globalThis: "readonly",
       },
     },
     plugins: {

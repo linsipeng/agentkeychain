@@ -7,10 +7,6 @@
 import sodium from 'libsodium-wrappers-sumo';
 import { KEY_BYTES } from "./argon2.ts";
 
-const PUB_BYTES = sodium.crypto_sign_PUBLICKEYBYTES;
-const PRIV_BYTES = sodium.crypto_sign_SECRETKEYBYTES;
-const NONCE_BYTES = sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
-
 let initPromise: Promise<void> | null = null;
 async function ensureSodium(): Promise<typeof sodium> {
   if (!initPromise) initPromise = sodium.ready;
@@ -47,11 +43,11 @@ export async function encryptPrivKey(
   kek: Uint8Array
 ): Promise<EncryptedPrivKey> {
   const s = await ensureSodium();
-  const nonce = s.randombytes_buf(NONCE_BYTES);
+  const nonce = s.randombytes_buf(s.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
   const ciphertext = s.crypto_aead_xchacha20poly1305_ietf_encrypt(
     privateKey,
-    null,
-    null,
+    undefined,
+    undefined,
     nonce,
     kek
   );
@@ -68,12 +64,12 @@ export async function decryptPrivKey(
 ): Promise<Uint8Array> {
   const s = await ensureSodium();
   return s.crypto_aead_xchacha20poly1305_ietf_decrypt(
-    null,
+    undefined,
     ciphertext,
-    null,
+    undefined,
     nonce,
     kek
   );
 }
 
-export { PUB_BYTES, PRIV_BYTES, NONCE_BYTES, KEY_BYTES };
+export { KEY_BYTES };
