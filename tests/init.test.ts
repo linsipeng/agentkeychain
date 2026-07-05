@@ -49,8 +49,8 @@ test("encrypt + decrypt private key round-trips", async () => {
   expect(dec).toEqual(kp.privateKey);
 });
 
-test("vault db schema migration creates 4 tables", () => {
-  const { openDb } = require("../src/vault.ts");
+test("vault db schema migration creates 4 tables", async () => {
+  const { openDb } = await import("../src/vault.ts");
   const db = openDb();
   const tables = db
     .query<{ name: string }, []>(

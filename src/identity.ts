@@ -51,7 +51,6 @@ export async function createIdentity(
     expiresAt?: number;
   }
 ): Promise<Identity> {
-  const s = await ensureSodium();
   const id = await generateAgentId();
   const { publicKey, privateKey } = await generateKeypair();
   if (privateKey.length !== PRIV_BYTES) {
