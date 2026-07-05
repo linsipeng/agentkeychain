@@ -4,8 +4,9 @@
 import { Database } from "bun:sqlite";
 import { encrypt, decrypt } from "./crypto/xchacha.ts";
 import { checkScope } from "./auth/scope.ts";
-import { append } from "./audit.ts";
-import type { Identity } from "./identity.ts";
+import { append as auditAppend } from "./audit.ts";
+import { loadIdentityByName, type Identity } from "./identity.ts";
+import { decryptPrivKey } from "./crypto/keys.ts";
 
 export interface SecretMeta {
   name: string;
@@ -28,6 +29,20 @@ export class NotFoundError extends Error {
     super(message);
     this.name = "NotFoundError";
   }
+}
+
+async function unlockDefaultAgent(
+  db: Database,
+  kek: Uint8Array
+): Promise<{ identity: Identity; privateKey: Uint8Array } | null> {
+  const identity = loadIdentityByName(db, "default");
+  if (!identity) return null;
+  const row = db
+    .prepare(`SELECT encrypted_priv, priv_nonce FROM identities WHERE id = ?`)
+    .get(identity.id) as { encrypted_priv: Uint8Array; priv_nonce: Uint8Array } | undefined;
+  if (!row) return null;
+  const privateKey = await decryptPrivKey(row.encrypted_priv, row.priv_nonce, kek);
+  return { identity, privateKey };
 }
 
 export async function storeSecret(
@@ -76,12 +91,16 @@ export async function storeSecret(
     );
   }
 
-  append(db, {
-    agentId: args.agent.id,
-    action: "store",
-    target: args.name,
-    success: true,
-  });
+  const unlocked = await unlockDefaultAgent(db, args.kek);
+  if (unlocked) {
+    await auditAppend(db, {
+      agent: unlocked,
+      action: "store",
+      target: args.name,
+      success: true,
+      kek: args.kek,
+    });
+  }
 
   return {
     name: args.name,
@@ -109,24 +128,32 @@ export async function getSecret(
     | { ciphertext: Uint8Array; nonce: Uint8Array; scopes: string }
     | undefined;
 
+  const unlocked = await unlockDefaultAgent(db, args.kek);
+
   if (!row) {
-    append(db, {
-      agentId: args.agent.id,
-      action: "get",
-      target: args.name,
-      success: false,
-    });
+    if (unlocked) {
+      await auditAppend(db, {
+        agent: unlocked,
+        action: "get",
+        target: args.name,
+        success: false,
+        kek: args.kek,
+      });
+    }
     throw new NotFoundError(`secret not found: ${args.name}`);
   }
 
   const requiredScopes = JSON.parse(row.scopes) as string[];
   if (!checkScope(args.agent.scopes, requiredScopes)) {
-    append(db, {
-      agentId: args.agent.id,
-      action: "get",
-      target: args.name,
-      success: false,
-    });
+    if (unlocked) {
+      await auditAppend(db, {
+        agent: unlocked,
+        action: "get",
+        target: args.name,
+        success: false,
+        kek: args.kek,
+      });
+    }
     throw new ForbiddenError(
       `agent ${args.agent.id} lacks required scope for ${args.name}`
     );
@@ -134,12 +161,15 @@ export async function getSecret(
 
   const plaintext = await decrypt(row.ciphertext, row.nonce, args.kek);
 
-  append(db, {
-    agentId: args.agent.id,
-    action: "get",
-    target: args.name,
-    success: true,
-  });
+  if (unlocked) {
+    await auditAppend(db, {
+      agent: unlocked,
+      action: "get",
+      target: args.name,
+      success: true,
+      kek: args.kek,
+    });
+  }
 
   return new TextDecoder().decode(plaintext);
 }
@@ -174,6 +204,7 @@ export function deleteSecret(
   args: {
     name: string;
     agent: Identity;
+    kek?: Uint8Array;
   }
 ): boolean {
   const now = Date.now();
@@ -181,12 +212,18 @@ export function deleteSecret(
     .prepare(`UPDATE secrets SET deleted_at = ? WHERE name = ? AND deleted_at IS NULL`)
     .run(now, args.name);
 
-  append(db, {
-    agentId: args.agent.id,
-    action: "delete",
-    target: args.name,
-    success: result.changes > 0,
-  });
+  if (args.kek) {
+    // Best-effort audit (delete is sync but audit is async)
+    void (async () => {
+      const { append } = await import("./audit.ts");
+      await append(db, {
+        agent: { id: args.agent.id },
+        action: "delete",
+        target: args.name,
+        success: result.changes > 0,
+      });
+    })();
+  }
 
   return result.changes > 0;
 }

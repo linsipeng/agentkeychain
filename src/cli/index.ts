@@ -5,42 +5,48 @@
 import { VERSION } from "../index.ts";
 import { runInit } from "./init.ts";
 import { runStore } from "./store.ts";
+import { runGet } from "./get.ts";
+import { runList } from "./list.ts";
+import { runDelete } from "./delete.ts";
+import { runAudit } from "./audit.ts";
 import { redact } from "../util/redact.ts";
 
-type Command = "init" | "store" | "help" | "version";
+type Command =
+  | "init"
+  | "store"
+  | "get"
+  | "list"
+  | "delete"
+  | "audit"
+  | "help"
+  | "version";
 
 function parseArgs(argv: string[]): { command: Command; rest: string[] } {
   const first = argv[0] ?? "help";
   switch (first) {
-    case "init":
-      return { command: "init", rest: argv.slice(1) };
-    case "store":
-      return { command: "store", rest: argv.slice(1) };
-    case "--version":
-    case "-v":
-    case "version":
-      return { command: "version", rest: [] };
-    default:
-      return { command: "help", rest: [] };
+    case "init": return { command: "init", rest: argv.slice(1) };
+    case "store": return { command: "store", rest: argv.slice(1) };
+    case "get": return { command: "get", rest: argv.slice(1) };
+    case "list": return { command: "list", rest: argv.slice(1) };
+    case "delete": case "rm": return { command: "delete", rest: argv.slice(1) };
+    case "audit": return { command: "audit", rest: argv.slice(1) };
+    case "--version": case "-v": case "version": return { command: "version", rest: [] };
+    default: return { command: "help", rest: [] };
   }
 }
 
 function printHelp(): void {
   process.stdout.write(
-    `agentkeychain v${VERSION}
-
-` +
-      `Usage:
-` +
-      `  agentkeychain init                              Initialize vault
-` +
-      `  agentkeychain store <name> --value <v> --scopes ...   Store encrypted secret
-` +
-      `  agentkeychain --version                        Print version
-
-` +
-      `(More commands coming in F-3..F-7)
-`
+    `agentkeychain v${VERSION}\n\n` +
+      `Usage:\n` +
+      `  agentkeychain init                  Initialize vault\n` +
+      `  agentkeychain store <name> --value <v> --scopes "..."   Store encrypted secret\n` +
+      `  agentkeychain get <name> [--json]  Retrieve and decrypt\n` +
+      `  agentkeychain list [--json]        List all secrets (metadata only)\n` +
+      `  agentkeychain delete <name> [--yes]  Delete a secret\n` +
+      `  agentkeychain audit [--since 24h]  Show audit log\n` +
+      `  agentkeychain --version            Print version\n\n` +
+      `(MCP server coming in next commit)\n`
   );
 }
 
@@ -48,13 +54,14 @@ export async function main(): Promise<number> {
   const { command, rest } = parseArgs(process.argv.slice(2));
   try {
     switch (command) {
-      case "init":
-        return runInit();
-      case "store":
-        return runStore(rest);
+      case "init": return runInit();
+      case "store": return runStore(rest);
+      case "get": return runGet(rest);
+      case "list": return runList(rest);
+      case "delete": return runDelete(rest);
+      case "audit": return runAudit(rest);
       case "version":
-        process.stdout.write(`agentkeychain v${VERSION}
-`);
+        process.stdout.write(`agentkeychain v${VERSION}\n`);
         return 0;
       case "help":
       default:
@@ -63,8 +70,7 @@ export async function main(): Promise<number> {
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`error: ${redact(msg)}
-`);
+    process.stderr.write(`error: ${redact(msg)}\n`);
     return 1;
   }
 }
