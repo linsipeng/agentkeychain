@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+.bun/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Database (vault data, NEVER commit)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Secrets
+.env
+.env.local
+*.key
+*.pem
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Test output
+coverage/
+*.log
+
+# Codex / agent scratch
+.AGENTS.md.bak

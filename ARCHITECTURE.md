@@ -1,0 +1,64 @@
+# Architecture
+
+> See `产品定义-agentkeychain.md` for full PRD. This file explains *why*, not *what*.
+
+## Threat Model
+
+**T1: Local disk theft** — Attacker reads `~/.agentkeychain/vault.db`. We mitigate with Argon2id master-password-derived KEK (memory=64MB, iterations=3, parallelism=4). Disk-only attacker without master password cannot decrypt secrets.
+
+**T2: Memory dump** — Attacker dumps process memory while `get` is executing. We mitigate by (a) zeroing plaintext buffers immediately after use, (b) keeping decrypted plaintext in stack-allocated arrays only.
+
+**T3: Prompt injection on Agent** — Attacker tricks the Agent into leaking credentials via crafted user input. We mitigate with (a) Scope-by-agent enforcement (Agent X cannot read secret Y unless X has scope), (b) full audit log of every read.
+
+**T4: Compromised sub-agent** — Attacker controls a delegated sub-agent token. We mitigate with (a) TTL on all delegate tokens, (b) scopes cannot escalate, (c) audit chain detects unusual access patterns.
+
+**T5: Audit log tampering** — Attacker modifies audit_log to hide their tracks. We mitigate with (a) Ed25519 signature on every row, (b) prev_hash chaining (modifying row N requires rewriting N+1..M), (c) integrity verified on every startup.
+
+## Tech Choices
+
+**Why Bun**: MCP official SDK is first-class in Bun/Node. Faster cold start than Node. Built-in SQLite (`bun:sqlite`) eliminates a dependency.
+
+**Why libsodium-wrappers**: Battle-tested cryptography. Used by 1Password, Bitwarden, Signal. Argon2id is OWASP-recommended for password-based KDF. XChaCha20-Poly1305 is AEAD mainstream (extended nonce prevents reuse). Ed25519 is fast and small.
+
+**Why local SQLite first**: Zero dependencies, zero cloud lock-in for v0.1. Cloud sync is v0.2 (CF D1 + E2EE).
+
+**Why no Web UI**: Scope creep. CLI + MCP is enough for Agent + developer. Web UI doubles the attack surface and maintenance burden.
+
+## vs Competitors
+
+| Dimension | 1Password | Bitwarden | Infisical agent-vault | **agentkeychain** |
+|---|---|---|---|---|
+| Target user | Human | Human | Agent (proxy mode) | **Agent (identity mode)** |
+| Agent gets plaintext key | N/A | N/A | ❌ never | ✅ with scope |
+| Agent identity | ❌ | ❌ | ❌ | ✅ Ed25519 per vault |
+| Scope-by-agent | ❌ | ❌ | ⚠️ egress filter | ✅ JSON scopes |
+| Cross-agent delegation | ❌ | ❌ | ❌ | ✅ signed tokens + TTL |
+| MCP native | ❌ | ❌ | ⚠️ partial | ✅ from v0.1 |
+| Audit log | ⚠️ paid | ⚠️ paid | ✅ | ✅ signed chain |
+| Open source | ❌ | ✅ AGPL | ✅ MIT | ✅ MIT |
+| Cloud dependency | ✅ | optional | ✅ required | ❌ local-first |
+
+## File Layout
+
+```
+agentkeychain/
+├── bin/agentkeychain          # CLI entry (bun shebang)
+├── src/
+│   ├── crypto/                # argon2, xchacha, ed25519 wrappers
+│   ├── db/                    # schema, migrations
+│   ├── auth/                  # scope, delegate
+│   ├── cli/                   # command implementations
+│   ├── mcp/                   # MCP server
+│   ├── audit.ts               # append + query
+│   ├── identity.ts            # agent identity gen
+│   ├── secrets.ts             # store / get / list / delete
+│   ├── util/                  # redact, errors
+│   └── index.ts               # main exports
+├── tests/                     # bun:test
+├── docs/
+│   ├── SECURITY.md            # threat model deep-dive
+│   └── PLAN.md                # what's next
+├── package.json
+├── tsconfig.json
+└── README.md
+```
