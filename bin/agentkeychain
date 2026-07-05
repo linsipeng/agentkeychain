@@ -1,0 +1,5 @@
+#!/usr/bin/env bun
+// Bun shebang — re-exec the CLI entry point with all args.
+import { main } from "../src/cli/index.ts";
+
+main();
