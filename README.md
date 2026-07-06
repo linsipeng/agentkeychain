@@ -109,10 +109,14 @@ bun run build   # produces bin/agentkeychain-bin
 ```bash
 agentkeychain init
 # Master password: ********      (≥8 chars, never stored)
-# Confirm: ********
 # → vault initialized at ~/.agentkeychain/
 # → default identity: ak_xxx ("default")
+# → ✓ master password saved to OS keychain (you'll never be asked again)
 ```
+
+**That's the only time you type the password.** From now on, every
+`agentkeychain store / get / list / delete / audit` command reads the password
+transparently from your OS keychain. Zero prompts, forever.
 
 ### Use the CLI
 
