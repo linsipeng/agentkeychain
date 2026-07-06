@@ -5,19 +5,8 @@ import { loadIdentityByName } from "../identity.ts";
 import { openDb, vaultDir } from "../vault.ts";
 import { storeSecret } from "../secrets.ts";
 import { deriveKEK } from "../crypto/argon2.ts";
-import { createInterface } from "node:readline/promises";
-import { stdin, stdout } from "node:process";
+import { readPassword, readLine } from "../util/prompt.ts";
 import { parseScopes } from "../auth/scope.ts";
-
-async function promptUnlockPassword(): Promise<string> {
-  const rl = createInterface({ input: stdin, output: stdout });
-  try {
-    process.stdout.write("Master password: ");
-    return await rl.question("");
-  } finally {
-    rl.close();
-  }
-}
 
 function parseStoreArgs(argv: string[]): {
   name: string | null;
@@ -49,13 +38,7 @@ export async function runStore(argv: string[]): Promise<number> {
     return 1;
   }
   if (value === null) {
-    const rl = createInterface({ input: stdin, output: stdout });
-    try {
-      process.stdout.write("Value: ");
-      value = await rl.question("");
-    } finally {
-      rl.close();
-    }
+    value = await readLine("Value: ");
   }
   if (scopes.length === 0) {
     process.stderr.write('error: --scopes required (e.g. --scopes "openai:chat")\n');
@@ -77,7 +60,7 @@ export async function runStore(argv: string[]): Promise<number> {
     return 4;
   }
 
-  const password = await promptUnlockPassword();
+  const password = await readPassword("Master password: ");
   const kek = await deriveKEK(password, metaRow.argon2_salt);
 
   try {

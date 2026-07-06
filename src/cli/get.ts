@@ -1,22 +1,11 @@
 /**
  * `agentkeychain get <name> [--json]` command.
  */
-import { createInterface } from "node:readline/promises";
-import { stdin, stdout } from "node:process";
 import { openDb } from "../vault.ts";
 import { loadIdentityByName } from "../identity.ts";
 import { getSecret } from "../secrets.ts";
 import { deriveKEK } from "../crypto/argon2.ts";
-
-async function promptUnlock(): Promise<string> {
-  const rl = createInterface({ input: stdin, output: stdout });
-  try {
-    process.stdout.write("Master password: ");
-    return await rl.question("");
-  } finally {
-    rl.close();
-  }
-}
+import { readPassword } from "../util/prompt.ts";
 
 export async function runGet(argv: string[]): Promise<number> {
   const name = argv[0];
@@ -38,7 +27,7 @@ export async function runGet(argv: string[]): Promise<number> {
     process.stderr.write("vault corrupted\n");
     return 4;
   }
-  const password = await promptUnlock();
+  const password = await readPassword("Master password: ");
   const kek = await deriveKEK(password, meta.argon2_salt);
   try {
     const value = await getSecret(db, { name, kek, agent });

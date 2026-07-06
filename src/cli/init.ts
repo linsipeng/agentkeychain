@@ -1,8 +1,7 @@
 /**
  * `agentkeychain init` — initialize vault.
  */
-import { createInterface } from "node:readline/promises";
-import { stdin, stdout } from "node:process";
+import { readPassword } from "../util/prompt.ts";
 import {
   ARGON2_PARAMS,
   deriveKEK,
@@ -11,43 +10,20 @@ import {
 } from "../crypto/argon2.ts";
 import { openDb, vaultExists, vaultDir } from "../vault.ts";
 import { createIdentity } from "../identity.ts";
+import type { Database } from "bun:sqlite";
 
-async function promptPassword(confirm = false): Promise<string> {
-  const rl = createInterface({ input: stdin, output: stdout });
-  try {
-    process.stdout.write("Master password: ");
-    const pw = await rl.question("");
-    if (confirm) {
-      process.stdout.write("Confirm: ");
-      const pw2 = await rl.question("");
-      if (pw !== pw2) {
-        throw new Error("passwords do not match");
-      }
-    }
-    if (pw.length < 8) {
-      throw new Error("password must be at least 8 characters");
-    }
-    return pw;
-  } finally {
-    rl.close();
-  }
-}
-
-export async function runInit(): Promise<number> {
-  if (vaultExists()) {
-    process.stderr.write(
-      `vault already exists at ${vaultDir()}\n` +
-        `to reinitialize, remove ${vaultDir()} manually\n`
-    );
-    return 1;
-  }
-
-  const password = await promptPassword(true);
+/**
+ * Pure init logic — write KEK meta + default identity, no I/O.
+ * Used by `agentkeychain init` CLI and by tests.
+ */
+export async function initVault(db: Database, password: string): Promise<{
+  identityId: string;
+  salt: Uint8Array;
+}> {
   const salt = await generateSalt();
   const kek = await deriveKEK(password, salt);
   const kekHash = await hashKEK(kek);
 
-  const db = openDb();
   const now = Date.now();
   db.prepare(
     `INSERT INTO kek_meta
@@ -68,13 +44,31 @@ export async function runInit(): Promise<number> {
   });
 
   kek.fill(0);
+  return { identityId: identity.id, salt };
+}
+
+export async function runInit(): Promise<number> {
+  if (vaultExists()) {
+    process.stderr.write(
+      `vault already exists at ${vaultDir()}\n` +
+        `to reinitialize, remove ${vaultDir()} manually\n`
+    );
+    return 1;
+  }
+
+  const password = await readPassword("Master password (min 8 chars): ");
+  if (password.length < 8) {
+    throw new Error("password must be at least 8 characters");
+  }
+  const db = openDb();
+  const { identityId, salt } = await initVault(db, password);
 
   process.stdout.write(
     `vault initialized at ${vaultDir()}\n` +
-      `default identity: ${identity.id} ("${identity.name}")\n` +
+      `default identity: ${identityId} ("default")\n` +
       `Argon2id: memory=${ARGON2_PARAMS.memory / 1024 / 1024}MB, ` +
-      `iterations=${ARGON2_PARAMS.iterations}, ` +
-      `parallelism=${ARGON2_PARAMS.parallelism}\n`
+      `iterations=${ARGON2_PARAMS.iterations}\n` +
+      `salt: ${Buffer.from(salt).toString("hex").slice(0, 16)}...\n`
   );
 
   return 0;
