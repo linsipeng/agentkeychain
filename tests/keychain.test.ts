@@ -51,15 +51,17 @@ esac
 exit 1
 `;
     writeFileSync(join(fakeBinDir, "security"), securityStub, { mode: 0o755 });
-    writeFileSync(join(fakeBinDir, "secret-tool"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    writeFileSync(join(fakeBinDir, "secret-tool"), "#!/bin/sh\n# stub for tests\nif [ -n \"$AKC_STUB_OUT\" ]; then echo \"$AKC_STUB_OUT\"; else cat >/dev/null; fi\nexit 0\n", { mode: 0o755 });
     process.env["PATH"] = fakeBinDir + ":" + (savedPath ?? "");
     delete process.env["AKC_STUB_OUT"];
     delete process.env["AKC_STUB_FAIL"];
   });
 
-  test("detectBackend returns macos-keychain on darwin", async () => {
+  test("detectBackend returns platform-appropriate backend", async () => {
     const { detectBackend } = await import("../src/util/keychain.ts");
-    expect(detectBackend()).toBe("macos-keychain");
+    const p = process.platform;
+    const expected = p === "darwin" ? "macos-keychain" : p === "linux" ? "linux-libsecret" : "unsupported";
+    expect(detectBackend()).toBe(expected);
   });
 
   test("resolvePassword returns AKC_PASSWORD env var when set", async () => {
