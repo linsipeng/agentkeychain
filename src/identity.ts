@@ -3,7 +3,7 @@
  */
 import sodium from 'libsodium-wrappers-sumo';
 import { Database } from "bun:sqlite";
-import { generateKeypair, encryptPrivKey } from "./crypto/keys.ts";
+import { generateKeypair, encryptPrivKey, decryptPrivKey } from "./crypto/keys.ts";
 
 let initPromise: Promise<void> | null = null;
 async function ensureSodium(): Promise<typeof sodium> {
@@ -170,4 +170,26 @@ export function listIdentities(db: Database): Identity[] {
     createdAt: row.created_at,
     expiresAt: row.expires_at,
   }));
+}
+
+/**
+ * Decrypt and return the Ed25519 private key for an identity.
+ *
+ * Caller is responsible for zeroing the returned buffer (use `.fill(0)`)
+ * once finished — typically immediately after signing/verifying.
+ */
+export async function unlockIdentityPrivateKey(
+  db: Database,
+  identity: Identity,
+  kek: Uint8Array
+): Promise<Uint8Array> {
+  const row = db
+    .prepare(
+      `SELECT encrypted_priv, priv_nonce FROM identities WHERE id = ?`
+    )
+    .get(identity.id) as
+    | { encrypted_priv: Uint8Array; priv_nonce: Uint8Array }
+    | undefined;
+  if (!row) throw new Error(`identity '${identity.id}' not found in DB`);
+  return await decryptPrivKey(row.encrypted_priv, row.priv_nonce, kek);
 }
