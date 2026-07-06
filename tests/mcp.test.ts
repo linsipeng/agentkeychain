@@ -13,21 +13,20 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 let tmpDir: string;
-const ORIGINAL_HOME = process.env["HOME"];
-process.env["AKC_KEK_HEX"] = "00".repeat(32); // dummy KEK for env-var path
-
 type Handler = () => Promise<unknown>;
 
 beforeEach(async () => {
   await sodium.ready;
   tmpDir = mkdtempSync(join(tmpdir(), "akc-mcp-"));
-  process.env["HOME"] = tmpDir;
-  process.env["AKC_VAULT_DIR"] = tmpDir;
-  // Force fresh DB
-  const dbPath = join(tmpDir, "keychain.db");
-  if (existsSync(dbPath)) unlinkSync(dbPath);
-  const { runInit } = await import("../src/cli/init.ts");
-  await runInit();
+  process.env["AGENTKEYCHAIN_HOME"] = tmpDir;
+  for (const f of ["vault.db", "vault.db-journal", "vault.db-wal", "vault.db-shm"]) {
+    const p = join(tmpDir, f);
+    if (existsSync(p)) unlinkSync(p);
+  }
+  const { openDb } = await import("../src/vault.ts");
+  const { initVault } = await import("../src/cli/init.ts");
+  const db = openDb();
+  await initVault(db, "hunter2correct");
 });
 
 
@@ -122,9 +121,8 @@ test("akc_get with bad delegate token returns error", async () => {
   expect(result).toBeNull();
   expect(handlers.has("tools/call")).toBe(true);
 });
-
+// Cleanup after suite
 test("cleanup", () => {
-  if (ORIGINAL_HOME) process.env["HOME"] = ORIGINAL_HOME;
-  delete process.env["AKC_VAULT_DIR"];
+  delete process.env["AGENTKEYCHAIN_HOME"];
   if (tmpDir && existsSync(tmpDir)) rmSync(tmpDir, { recursive: true });
 });
