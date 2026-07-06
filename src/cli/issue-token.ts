@@ -15,6 +15,7 @@ import { loadIdentityByName, unlockIdentityPrivateKey } from "../identity.ts";
 import { openDb } from "../vault.ts";
 import { deriveKEK } from "../crypto/argon2.ts";
 import { signDelegateToken } from "../auth/delegate.ts";
+import { resolvePassword } from "../util/keychain.ts";
 
 function parseTtl(s: string): number {
   const m = /^(\d+)(s|m|h|d)$/.exec(s);
@@ -117,7 +118,7 @@ export async function runIssueToken(args: string[]): Promise<number> {
     return 4;
   }
 
-  const password = await promptUnlock();
+  const password = (await resolvePassword()) ?? (await promptUnlock());
   const kek = await deriveKEK(password, meta.argon2_salt);
 
   try {

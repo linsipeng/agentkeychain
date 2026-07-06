@@ -2,6 +2,7 @@
  * `agentkeychain init` — initialize vault.
  */
 import { readPassword } from "../util/prompt.ts";
+import { keychainSet, detectBackend } from "../util/keychain.ts";
 import {
   ARGON2_PARAMS,
   deriveKEK,
@@ -63,12 +64,28 @@ export async function runInit(): Promise<number> {
   const db = openDb();
   const { identityId, salt } = await initVault(db, password);
 
+  // Save password to OS keychain so the user never has to type it again.
+  // Hermes / agent callers can read it transparently via resolvePassword().
+  // The Keychain entry is per-user, so it follows the user across reboots.
+  let keychainNote = "";
+  if (process.env["AKC_PASSWORD"]) {
+    keychainNote = "  (AKC_PASSWORD env var is set — keychain not used)";
+  } else {
+    const saved = await keychainSet(password);
+    keychainNote = saved
+      ? "  ✓ master password saved to OS keychain (you'll never be asked again)"
+      : "  (could not save to OS keychain — you'll be asked for the password each time)";
+  }
+
   process.stdout.write(
     `vault initialized at ${vaultDir()}\n` +
       `default identity: ${identityId} ("default")\n` +
       `Argon2id: memory=${ARGON2_PARAMS.memory / 1024 / 1024}MB, ` +
       `iterations=${ARGON2_PARAMS.iterations}\n` +
-      `salt: ${Buffer.from(salt).toString("hex").slice(0, 16)}...\n`
+      `salt: ${Buffer.from(salt).toString("hex").slice(0, 16)}...\n` +
+      `keychain backend: ${detectBackend()}\n` +
+      keychainNote +
+      `\n`
   );
 
   return 0;

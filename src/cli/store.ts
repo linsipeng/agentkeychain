@@ -11,6 +11,7 @@ import { openDb, vaultDir } from "../vault.ts";
 import { storeSecret } from "../secrets.ts";
 import { deriveKEK } from "../crypto/argon2.ts";
 import { readPassword, readLines } from "../util/prompt.ts";
+import { resolvePassword } from "../util/keychain.ts";
 import { parseScopes } from "../auth/scope.ts";
 
 function parseStoreArgs(argv: string[]): {
@@ -65,18 +66,32 @@ export async function runStore(argv: string[]): Promise<number> {
     return 4;
   }
 
+  // Resolve master password from keychain (or AKC_PASSWORD env var) — falls
+  // back to a single prompt only if neither is available. This is the
+  // "type once, never again" path that makes Hermes-from-Telegram work.
+  const keychainPassword = await resolvePassword();
+
   // Human path: only ask for value if --value not provided.
-  // ASK FOR VALUE + MASTER PASSWORD in one batched read so piped stdin works:
-  //   printf 'myvalue\nmypassword\n' | akc store mykey
-  // reads both lines in a single readline session (otherwise the second
-  // prompt would race with stdin EOF and fail with "stdin closed").
+  // ASK FOR VALUE (+ PASSWORD if needed) in one batched read so piped stdin
+  // works: `printf 'myvalue\n' | akc store mykey` works when keychain has it.
   let password: string;
   if (value === null) {
-    const lines = await readLines(["Value: ", "Master password: "]);
-    value = lines[0]!;
-    password = lines[1]!;
+    if (keychainPassword) {
+      value = await readLines(["Value: "]).then(([v]) => {
+        if (v === undefined) throw new Error("no value provided");
+        return v;
+      });
+      password = keychainPassword;
+    } else {
+      const lines = await readLines(["Value: ", "Master password: "]);
+      value = lines[0];
+      password = lines[1];
+      if (value === undefined || password === undefined) {
+        throw new Error("stdin closed before all prompts answered");
+      }
+    }
   } else {
-    password = await readPassword("Master password: ");
+    password = keychainPassword ?? (await readPassword("Master password: "));
   }
 
   // Default to universal scope when user did not pass --scopes. Programmatic

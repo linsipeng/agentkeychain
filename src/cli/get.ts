@@ -6,6 +6,7 @@ import { loadIdentityByName } from "../identity.ts";
 import { getSecret } from "../secrets.ts";
 import { deriveKEK } from "../crypto/argon2.ts";
 import { readPassword } from "../util/prompt.ts";
+import { resolvePassword } from "../util/keychain.ts";
 
 export async function runGet(argv: string[]): Promise<number> {
   const name = argv[0];
@@ -27,7 +28,7 @@ export async function runGet(argv: string[]): Promise<number> {
     process.stderr.write("vault corrupted\n");
     return 4;
   }
-  const password = await readPassword("Master password: ");
+  const password = (await resolvePassword()) ?? (await readPassword("Master password: "));
   const kek = await deriveKEK(password, meta.argon2_salt);
   try {
     const value = await getSecret(db, { name, kek, agent });

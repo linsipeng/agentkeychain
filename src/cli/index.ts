@@ -11,10 +11,12 @@ import { runDelete } from "./delete.ts";
 import { runAudit } from "./audit.ts";
 import { runServe } from "./serve.ts";
 import { runIssueToken } from "./issue-token.ts";
+import { runSetup } from "./setup.ts";
 import { redact } from "../util/redact.ts";
 
 type Command =
   | "init"
+  | "setup"
   | "store"
   | "get"
   | "list"
@@ -29,6 +31,7 @@ function parseArgs(argv: string[]): { command: Command; rest: string[] } {
   const first = argv[0] ?? "help";
   switch (first) {
     case "init": return { command: "init", rest: argv.slice(1) };
+    case "setup": return { command: "setup", rest: argv.slice(1) };
     case "store": return { command: "store", rest: argv.slice(1) };
     case "get": return { command: "get", rest: argv.slice(1) };
     case "list": return { command: "list", rest: argv.slice(1) };
@@ -44,17 +47,23 @@ function parseArgs(argv: string[]): { command: Command; rest: string[] } {
 function printHelp(): void {
   process.stdout.write(
     `agentkeychain v${VERSION}\n\n` +
-      `Usage:\n` +
-      `  agentkeychain init                  Initialize vault\n` +
-      `  agentkeychain store <name> --value <v> --scopes "..."   Store encrypted secret\n` +
-      `  agentkeychain get <name> [--json]  Retrieve and decrypt\n` +
-      `  agentkeychain list [--json]        List all secrets (metadata only)\n` +
-      `  agentkeychain delete <name> [--yes]  Delete a secret\n` +
-      `  agentkeychain audit [--since 24h]  Show audit log\n` +
-      `  agentkeychain serve                Start MCP server (stdio transport)\n` +
+      `Setup (run once, never again):\n` +
+      `  agentkeychain init                  Initialize vault + save password to keychain\n` +
+      `  agentkeychain setup                 Bind existing vault to OS keychain\n\n` +
+      `Daily use (no password prompt when keychain is set):\n` +
+      `  agentkeychain store <name>          Store encrypted secret\n` +
+      `  agentkeychain get <name> [--json]   Retrieve and decrypt\n` +
+      `  agentkeychain list [--json]         List all secrets (metadata only)\n` +
+      `  agentkeychain delete <name> [--yes] Delete a secret\n` +
+      `  agentkeychain audit [--since 24h]   Show audit log\n\n` +
+      `Advanced (for agents / power users):\n` +
       `  agentkeychain issue-token --sub <id> --scopes "..." [--ttl 1h]\n` +
       `                                    Issue a cross-agent delegate token\n` +
-      `  agentkeychain --version            Print version\n\n`
+      `  agentkeychain serve                 Start MCP server (stdio transport)\n` +
+      `  agentkeychain --version             Print version\n\n` +
+      `Environment:\n` +
+      `  AKC_PASSWORD         Override keychain (CI / scripts)\n` +
+      `  AGENTKEYCHAIN_HOME   Override vault location (default: ~/.agentkeychain)\n\n`
   );
 }
 
@@ -63,6 +72,7 @@ export async function main(): Promise<number> {
   try {
     switch (command) {
       case "init": return runInit();
+      case "setup": return runSetup();
       case "store": return runStore(rest);
       case "get": return runGet(rest);
       case "list": return runList(rest);
