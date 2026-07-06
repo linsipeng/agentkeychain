@@ -5,7 +5,12 @@ node_modules/
 # Build output
 dist/
 build/
+bin/
 *.tsbuildinfo
+
+# Compiled binary
+agentkeychain-bin
+*.exe
 
 # Database (vault data, NEVER commit)
 *.db
