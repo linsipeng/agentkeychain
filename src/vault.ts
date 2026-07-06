@@ -18,8 +18,24 @@ export function dbPath(): string {
   return join(vaultDir(), DB_FILENAME);
 }
 
+/**
+ * True iff the vault file exists AND has been fully initialized
+ * (i.e. kek_meta row is present). A bare db file with just the schema
+ * from a prior failed init() is NOT a vault.
+ */
 export function vaultExists(): boolean {
-  return existsSync(dbPath());
+  const path = dbPath();
+  if (!existsSync(path)) return false;
+  try {
+    const db = new Database(path, { create: false, readonly: true });
+    const row = db
+      .prepare(`SELECT 1 AS x FROM kek_meta WHERE id = 1 LIMIT 1`)
+      .get() as { x: number } | undefined;
+    db.close();
+    return row !== undefined;
+  } catch {
+    return false;
+  }
 }
 
 export function ensureVaultDir(): void {

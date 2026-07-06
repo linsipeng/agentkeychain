@@ -1,21 +1,26 @@
 /**
  * `agentkeychain store <name> --value <value> --scopes "..."` command.
+ *
+ * Human-friendly default: when invoked interactively (no `--scopes` flag),
+ * the secret is stored with `["*"]` (universal scope) so the user doesn't
+ * have to invent scope strings. Programmatic callers should ALWAYS pass
+ * `--scopes` explicitly — this is the IAM contract.
  */
 import { loadIdentityByName } from "../identity.ts";
 import { openDb, vaultDir } from "../vault.ts";
 import { storeSecret } from "../secrets.ts";
 import { deriveKEK } from "../crypto/argon2.ts";
-import { readPassword, readLine } from "../util/prompt.ts";
+import { readPassword, readLines } from "../util/prompt.ts";
 import { parseScopes } from "../auth/scope.ts";
 
 function parseStoreArgs(argv: string[]): {
   name: string | null;
   value: string | null;
-  scopes: string[];
+  scopes: string[] | null; // null = user did not pass --scopes
 } {
   let name: string | null = null;
   let value: string | null = null;
-  let scopesRaw = "";
+  let scopesRaw: string | null = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--value" || a === "-v") {
@@ -26,22 +31,22 @@ function parseStoreArgs(argv: string[]): {
       name = a;
     }
   }
-  return { name, value, scopes: parseScopes(scopesRaw) };
+  return {
+    name,
+    value,
+    scopes: scopesRaw === null ? null : parseScopes(scopesRaw),
+  };
 }
 
 export async function runStore(argv: string[]): Promise<number> {
   const parsed = parseStoreArgs(argv);
-  const { name, scopes } = parsed;
+  const { name, scopes: scopesOrNull } = parsed;
   let value = parsed.value;
   if (!name) {
-    process.stderr.write('usage: agentkeychain store <name> --value <value> --scopes "..."\n');
-    return 1;
-  }
-  if (value === null) {
-    value = await readLine("Value: ");
-  }
-  if (scopes.length === 0) {
-    process.stderr.write('error: --scopes required (e.g. --scopes "openai:chat")\n');
+    process.stderr.write(
+      "usage (human):    agentkeychain store <name>\n" +
+        "usage (program):  agentkeychain store <name> --value <v> --scopes \"a:1,b:2\"\n"
+    );
     return 1;
   }
 
@@ -60,7 +65,30 @@ export async function runStore(argv: string[]): Promise<number> {
     return 4;
   }
 
-  const password = await readPassword("Master password: ");
+  // Human path: only ask for value if --value not provided.
+  // ASK FOR VALUE + MASTER PASSWORD in one batched read so piped stdin works:
+  //   printf 'myvalue\nmypassword\n' | akc store mykey
+  // reads both lines in a single readline session (otherwise the second
+  // prompt would race with stdin EOF and fail with "stdin closed").
+  let password: string;
+  if (value === null) {
+    const lines = await readLines(["Value: ", "Master password: "]);
+    value = lines[0]!;
+    password = lines[1]!;
+  } else {
+    password = await readPassword("Master password: ");
+  }
+
+  // Default to universal scope when user did not pass --scopes. Programmatic
+  // callers should ALWAYS pass --scopes explicitly — this is the IAM contract.
+  const scopes = scopesOrNull ?? ["*"];
+  if (scopes.length === 0) {
+    process.stderr.write(
+      "error: --scopes cannot be empty. Use --scopes \"*\" for universal, or omit the flag entirely.\n"
+    );
+    return 1;
+  }
+
   const kek = await deriveKEK(password, metaRow.argon2_salt);
 
   try {
@@ -71,15 +99,16 @@ export async function runStore(argv: string[]): Promise<number> {
       kek,
       agent,
     });
+    const scopeNote =
+      scopes[0] === "*"
+        ? "  (universal — any agent with access to this vault can read it)"
+        : `  scopes: ${meta.scopes.join(", ")}`;
     process.stdout.write(
-      `✓ encrypted and stored: ${meta.name}
-` +
-        `  scopes: ${meta.scopes.join(", ")}
-` +
-        `  version: ${meta.version}
-` +
-        `  vault: ${vaultDir()}
-`
+      `✓ encrypted and stored: ${meta.name}\n` +
+        scopeNote +
+        `\n` +
+        `  version: ${meta.version}\n` +
+        `  vault: ${vaultDir()}\n`
     );
     return 0;
   } finally {

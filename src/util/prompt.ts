@@ -2,8 +2,10 @@
  * Shared prompt helpers that work under both TTY and piped stdin.
  *
  * `node:readline/promises` `rl.question("")` hangs on piped stdin in
- * bun-compiled binaries, so we use `rl.once("line")` + `rl.once("close")`
- * which gives us a Promise that resolves on first line, or rejects on EOF.
+ * bun-compiled binaries. Using `rl.once("line")` per-prompt causes
+ * "stdin closed before input" on the SECOND read because the readline
+ * interface drains the input stream on close(). Solution: pass BOTH
+ * prompts up-front, consume lines as they arrive, in order, then close.
  */
 import { createInterface } from "node:readline/promises";
 import type { Readable, Writable } from "node:stream";
@@ -14,39 +16,68 @@ export interface PromptOptions {
 }
 
 /**
- * Read one line from stdin (the first line before EOF).
+ * Read N lines from stdin in order, with prompts interleaved.
  *
- * @param prompt - prompt text written to stdout before reading
- * @param opts - options
- * @returns the line, with trailing newline stripped
- * @throws Error if stdin closes before any line arrives
+ * Each line is collected as soon as it arrives; the readline interface stays
+ * open for the whole sequence so multiple prompts work under piped stdin.
+ *
+ * @param prompts - prompt texts, one per expected line
+ * @returns the N lines (without trailing newlines)
+ * @throws Error if stdin closes before all lines arrive
  */
-export async function readLine(
-  prompt: string,
-  opts: PromptOptions = {}
-): Promise<string> {
+export async function readLines(prompts: string[]): Promise<string[]> {
   const input: Readable = process.stdin;
   const output: Writable = process.stdout;
   const rl = createInterface({ input, output });
+  const lines: string[] = [];
   try {
-    if (prompt && !opts.silent) {
-      process.stdout.write(prompt);
-    }
-    const line = await new Promise<string>((resolve, reject) => {
-      rl.once("line", (l) => resolve(l));
-      rl.once("close", () => reject(new Error("stdin closed before input")));
+    await new Promise<void>((resolve, reject) => {
+      const queue = [...prompts];
+      const next = (): void => {
+        if (queue.length === 0) {
+          resolve();
+          return;
+        }
+        const prompt = queue.shift()!;
+        process.stdout.write(prompt);
+        rl.once("line", (line: string) => {
+          lines.push(line);
+          next();
+        });
+        rl.once("close", () => {
+          reject(
+            new Error(
+              `stdin closed before all ${prompts.length} prompt(s) answered (got ${lines.length})`
+            )
+          );
+        });
+      };
+      next();
     });
-    return line;
+    return lines;
   } finally {
     rl.close();
   }
 }
 
 /**
+ * Read a single line from stdin (helper for callers that only need one prompt).
+ */
+export async function readLine(
+  prompt: string
+): Promise<string> {
+  const [line] = await readLines([prompt]);
+  if (line === undefined) {
+    throw new Error("readLine: no line received");
+  }
+  return line;
+}
+
+/**
  * Read a password from stdin (silent, no echo).
  */
 export async function readPassword(prompt: string): Promise<string> {
-  return readLine(prompt, { silent: false });
+  return readLine(prompt);
 }
 
 /**
