@@ -7,8 +7,70 @@ agentkeychain treats agents as **first-class identities** with their own scopes,
 delegation, and tamper-evident audit — built on Argon2id, XChaCha20-Poly1305,
 and Ed25519.
 
-[![CI](https://github.com/linsipeng/agentkeychain/actions/workflows/ci.yml/badge.svg)](https://github.com/linsipeng/agentkeychain/actions/workflows/ci.yml)
+[![CI](https://github.com/linsipeng/agentkeychain/actions/workflows/ci.yml/badge.svg)](https://github.com/linsipeng/agentkeychain/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
+---
+
+## For Humans (the only section you need)
+
+**You only need 4 commands.** Everything else is for agents and power users.
+
+```bash
+agentkeychain init      # One-time: set a master password (8+ chars, remember it!)
+agentkeychain store     # Add a new secret (it asks you: name? value? scope?)
+agentkeychain get NAME  # Retrieve a secret (prompts for master password)
+agentkeychain list      # See all stored secrets (metadata only, NEVER values)
+```
+
+That's it. Everything below is optional.
+
+### Real-world usage
+
+```bash
+# Step 1: Initialize (do this ONCE per machine)
+$ agentkeychain init
+Master password (min 8 chars): ********
+✓ vault initialized
+
+# Step 2: Store your first secret (just follow the prompts)
+$ agentkeychain store
+Name: openai
+Value: ***(paste your key, input is hidden in real terminals)
+Scope: openai:chat
+✓ encrypted and stored: openai
+
+# Step 3: Retrieve it when you need it
+$ agentkeychain get openai
+Master password: ********
+***your key appears here***
+
+# Step 4: See what you have
+$ agentkeychain list
+NAME      VERSION  SCOPES       UPDATED
+openai    1        openai:chat  2026-07-06 04:56:24
+```
+
+### Talk to your agent instead
+
+**You don't even need to remember the commands.** Just tell your agent:
+
+- "I want to save this OpenAI key" → agent runs `agentkeychain store` for you
+- "Get my Cloudflare token" → agent runs `agentkeychain get cloudflare`
+- "Show me all my stored keys" → agent runs `agentkeychain list`
+- "Delete the old GitHub token" → agent runs `agentkeychain delete github`
+
+When the agent needs a credential to do work, it asks the vault, not you. You
+stay out of the loop.
+
+### What you NEVER do
+
+- ❌ Paste API keys into chat messages, emails, READMEs, or `.env` files you commit
+- ❌ Write keys in code comments
+- ❌ Screenshot a key and send it
+- ❌ Re-type the same key 50 times across different tools
+
+If you find yourself pasting a key anywhere, stop and run `agentkeychain store`.
 
 ---
 
