@@ -9,6 +9,7 @@ import { runGet } from "./get.ts";
 import { runList } from "./list.ts";
 import { runDelete } from "./delete.ts";
 import { runAudit } from "./audit.ts";
+import { runServe } from "./serve.ts";
 import { redact } from "../util/redact.ts";
 
 type Command =
@@ -18,6 +19,7 @@ type Command =
   | "list"
   | "delete"
   | "audit"
+  | "serve"
   | "help"
   | "version";
 
@@ -30,6 +32,7 @@ function parseArgs(argv: string[]): { command: Command; rest: string[] } {
     case "list": return { command: "list", rest: argv.slice(1) };
     case "delete": case "rm": return { command: "delete", rest: argv.slice(1) };
     case "audit": return { command: "audit", rest: argv.slice(1) };
+    case "serve": return { command: "serve", rest: argv.slice(1) };
     case "--version": case "-v": case "version": return { command: "version", rest: [] };
     default: return { command: "help", rest: [] };
   }
@@ -45,8 +48,8 @@ function printHelp(): void {
       `  agentkeychain list [--json]        List all secrets (metadata only)\n` +
       `  agentkeychain delete <name> [--yes]  Delete a secret\n` +
       `  agentkeychain audit [--since 24h]  Show audit log\n` +
-      `  agentkeychain --version            Print version\n\n` +
-      `(MCP server coming in next commit)\n`
+      `  agentkeychain serve                Start MCP server (stdio transport)\n` +
+      `  agentkeychain --version            Print version\n\n`
   );
 }
 
@@ -60,6 +63,7 @@ export async function main(): Promise<number> {
       case "list": return runList(rest);
       case "delete": return runDelete(rest);
       case "audit": return runAudit(rest);
+      case "serve": return runServe(rest);
       case "version":
         process.stdout.write(`agentkeychain v${VERSION}\n`);
         return 0;
