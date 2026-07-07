@@ -5,6 +5,7 @@
 
 [![CI](https://github.com/linsipeng/agentkeychain/actions/workflows/ci.yml/badge.svg)](https://github.com/linsipeng/agentkeychain/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![中文版](https://img.shields.io/badge/lang-中文-red.svg)](./README.zh-CN.md)
 
 ---
 
