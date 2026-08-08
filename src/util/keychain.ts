@@ -16,12 +16,41 @@
  *   - The keychain item is named with a fixed service+account tuple; we don't
  *     include vault path so the same master works for a moved vault.
  */
-import { exec, execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { platform } from "node:os";
 
 const execFileAsync = promisify(execFile);
-const execAsync = promisify(exec);
+
+function spawnWithInput(
+  command: string,
+  args: string[],
+  input: string,
+  timeoutMs: number
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["pipe", "ignore", "pipe"] });
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`${command} timed out`));
+    }, timeoutMs);
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(Object.assign(new Error(`${command} exited with code ${code}`), { stderr }));
+    });
+    child.stdin.end(input);
+  });
+}
 
 export const KEYCHAIN_SERVICE = "agentkeychain.vault";
 export const KEYCHAIN_ACCOUNT = "master-password";
@@ -111,16 +140,18 @@ export async function keychainSet(password: string): Promise<boolean> {
     }
     if (backend === "linux-libsecret") {
       // secret-tool doesn't have a "store or update" — store just overwrites.
-      // We use `exec` (not execFile) because secret-tool reads the secret
-      // value from stdin, which execFile doesn't support.
-      await execAsync(
-        "secret-tool store --label=" +
-          JSON.stringify(KEYCHAIN_LABEL) +
-          " service " +
-          KEYCHAIN_SERVICE +
-          " account " +
+      await spawnWithInput(
+        "secret-tool",
+        [
+          "store",
+          `--label=${KEYCHAIN_LABEL}`,
+          "service",
+          KEYCHAIN_SERVICE,
+          "account",
           KEYCHAIN_ACCOUNT,
-        { input: password, encoding: "utf8", timeout: 10_000 }
+        ],
+        password,
+        10_000
       );
       return true;
     }

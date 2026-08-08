@@ -24,6 +24,7 @@ function parseStoreArgs(argv: string[]): {
   let scopesRaw: string | null = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    if (a === undefined) continue;
     if (a === "--value" || a === "-v") {
       value = argv[++i] ?? null;
     } else if (a === "--scopes" || a === "-s") {
@@ -84,11 +85,13 @@ export async function runStore(argv: string[]): Promise<number> {
       password = keychainPassword;
     } else {
       const lines = await readLines(["Value: ", "Master password: "]);
-      value = lines[0];
-      password = lines[1];
-      if (value === undefined || password === undefined) {
+      const enteredValue = lines[0];
+      const enteredPassword = lines[1];
+      if (enteredValue === undefined || enteredPassword === undefined) {
         throw new Error("stdin closed before all prompts answered");
       }
+      value = enteredValue;
+      password = enteredPassword;
     }
   } else {
     password = keychainPassword ?? (await readPassword("Master password: "));
@@ -102,6 +105,10 @@ export async function runStore(argv: string[]): Promise<number> {
       "error: --scopes cannot be empty. Use --scopes \"*\" for universal, or omit the flag entirely.\n"
     );
     return 1;
+  }
+
+  if (value === null) {
+    throw new Error("no value provided");
   }
 
   const kek = await deriveKEK(password, metaRow.argon2_salt);

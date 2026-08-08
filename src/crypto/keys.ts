@@ -46,8 +46,8 @@ export async function encryptPrivKey(
   const nonce = s.randombytes_buf(s.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
   const ciphertext = s.crypto_aead_xchacha20poly1305_ietf_encrypt(
     privateKey,
-    undefined,
-    undefined,
+    null,
+    null,
     nonce,
     kek
   );
@@ -64,9 +64,9 @@ export async function decryptPrivKey(
 ): Promise<Uint8Array> {
   const s = await ensureSodium();
   return s.crypto_aead_xchacha20poly1305_ietf_decrypt(
-    undefined,
+    null,
     ciphertext,
-    undefined,
+    null,
     nonce,
     kek
   );

@@ -71,7 +71,7 @@ async function rowHash(args: {
   concat.set(payload, 0);
   concat.set(args.prevHash, payload.length);
   concat.set(args.sig, payload.length + args.prevHash.length);
-  return s.crypto_generichash(32, concat, undefined);
+  return s.crypto_generichash(32, concat, null);
 }
 
 /**

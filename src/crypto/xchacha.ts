@@ -47,9 +47,9 @@ export async function decrypt(
 ): Promise<Uint8Array> {
   const s = await ensureSodium();
   return s.crypto_aead_xchacha20poly1305_ietf_decrypt(
-    undefined,
+    null,
     ciphertext,
-    undefined,
+    null,
     nonce,
     key
   );

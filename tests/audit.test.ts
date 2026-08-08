@@ -114,7 +114,7 @@ test("audit chain verify: tampered signature fails verification", async () => {
     if (!row) throw new Error("no audit row");
     // Flip a byte in the signature
     const tamperedSig = new Uint8Array(row.sig);
-    tamperedSig[0] ^= 0xff;
+    tamperedSig[0] = (tamperedSig[0] ?? 0) ^ 0xff;
     db.prepare(`UPDATE audit_log SET sig = ? WHERE seq = ?`).run(tamperedSig, row.seq);
 
     const result = await verifyChain(db);

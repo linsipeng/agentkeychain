@@ -52,7 +52,8 @@ test("XChaCha20-Poly1305: tampered ciphertext throws", async () => {
   const salt = await generateSalt();
   const key = await deriveKEK("test-password-123", salt);
   const { ciphertext, nonce } = await encrypt("hello", key);
-  ciphertext[ciphertext.length - 1] ^= 0xff;
+  const lastIndex = ciphertext.length - 1;
+  ciphertext[lastIndex] = (ciphertext[lastIndex] ?? 0) ^ 0xff;
   expect(decrypt(ciphertext, nonce, key)).rejects.toThrow();
 });
 

@@ -64,5 +64,5 @@ export async function deriveKEK(
  */
 export async function hashKEK(kek: Uint8Array): Promise<Uint8Array> {
   const s = await ensureSodium();
-  return s.crypto_generichash(32, kek, undefined);
+  return s.crypto_generichash(32, kek, null);
 }
