@@ -14,7 +14,7 @@ Codex, custom agents).
        │ deriveKEK(pwd)                   │ encrypted
        ▼                                  │
 ┌──────────────┐  unlock + sign           │
-│ Hermes       │ ───────────────────────► │
+│ Agent        │ ───────────────────────► │
 │ (main agent) │                          │
 │ Ed25519 key  │                          │
 └──────┬───────┘                          │
@@ -29,27 +29,32 @@ Codex, custom agents).
 **Key insight:** Sub-agent verification is purely cryptographic. The main agent
 does not need to be online; the delegate token is self-contained.
 
+The master password is **resolved transparently from the OS keychain** after the
+initial `agentkeychain init`. No interactive prompts during agent workflows.
+
 ---
 
 ## Wire into Hermes (one-time setup)
 
-### Step 1: Build + install
+### Step 1: Install the binary
 
 ```bash
-git clone https://github.com/linsipeng/agentkeychain.git ~/projects/agentkeychain
-cd ~/projects/agentkeychain
-bun install
-bun run build
-ln -sf "$(pwd)/bin/agentkeychain-bin" /usr/local/bin/agentkeychain
+curl -L https://github.com/linsipeng/agentkeychain/releases/latest/download/agentkeychain-darwin-arm64 \
+  -o ~/.local/bin/agentkeychain
+chmod +x ~/.local/bin/agentkeychain
 ```
+
+`~/.local/bin` is already in PATH on macOS — no `sudo` needed.
 
 ### Step 2: Initialize vault
 
 ```bash
 agentkeychain init
 # Master password: ********
-# Confirm: ********
+# → ✓ master password saved to OS keychain
 ```
+
+Type your password once. That's the last time you'll ever need to.
 
 ### Step 3: Register the MCP server with Hermes
 
@@ -58,10 +63,8 @@ Add to `~/.hermes/config.yaml`:
 ```yaml
 mcp_servers:
   agentkeychain:
-    command: /usr/local/bin/agentkeychain
+    command: ~/.local/bin/agentkeychain
     args: ["serve"]
-    env:
-      AGENTKEYCHAIN_HOME: ~/.agentkeychain
 ```
 
 Restart Hermes. The 5 `akc_*` tools will appear in Hermes' tool list.
@@ -77,8 +80,8 @@ akc_list
 akc_audit
 ```
 
-Hermes will prompt for the master password the first time per session (via
-`AKC_KEK_HEX` env or a `shell` unlock command in a future version).
+**No password unblock needed.** The master password is auto-resolved from the
+OS keychain when `agentkeychain serve` starts.
 
 ---
 
@@ -89,7 +92,7 @@ needs scoped access to specific secrets:
 
 ```bash
 # In Hermes:
-TOKEN=*** agentkeychain issue-token \
+TOKEN=$(agentkeychain issue-token \
   --sub ak_subagent_$(uuidgen) \
   --scopes "openai:read,cloudflare:read" \
   --ttl 30m)
@@ -99,8 +102,8 @@ codex --prompt "fix the cloudflare worker" --env "AKC_DELEGATE_TOKEN=$TOKEN"
 ```
 
 The sub-agent verifies the token's Ed25519 signature against the main agent's
-public key (stored in the vault at `~/.agentkeychain/vault.db`) — no network
-call, no shared secret.
+public key (stored in `~/.agentkeychain/vault.db`) — no network call, no
+shared secret.
 
 ---
 
@@ -112,11 +115,8 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "agentkeychain": {
-      "command": "/usr/local/bin/agentkeychain",
-      "args": ["serve"],
-      "env": {
-        "AGENTKEYCHAIN_HOME": "/Users/you/.agentkeychain"
-      }
+      "command": "/Users/yourname/.local/bin/agentkeychain",
+      "args": ["serve"]
     }
   }
 }
@@ -129,7 +129,6 @@ Restart Claude Desktop. Tools appear as `mcp__agentkeychain__akc_*`.
 ## Use from a custom agent (programmatic)
 
 ```typescript
-import { createServer } from "agentkeychain/src/mcp/server.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -192,3 +191,8 @@ Not in v0.1. Roadmap item. For now, the master password is the only factor.
 Yes — but each gets its own Ed25519 identity. The vault stores all identities
 with their scopes. Sub-agents can be issued delegate tokens scoped to specific
 operations.
+
+### Do I need to type the master password every session?
+**No.** After `agentkeychain init`, the password is stored in the OS keychain
+(macOS Keychain / Linux libsecret) and auto-resolved by every CLI command and
+the MCP server.

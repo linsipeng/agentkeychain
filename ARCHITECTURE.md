@@ -42,23 +42,23 @@
 
 ```
 agentkeychain/
-├── bin/agentkeychain          # CLI entry (bun shebang)
 ├── src/
-│   ├── crypto/                # argon2, xchacha, ed25519 wrappers
-│   ├── db/                    # schema, migrations
-│   ├── auth/                  # scope, delegate
-│   ├── cli/                   # command implementations
-│   ├── mcp/                   # MCP server
-│   ├── audit.ts               # append + query
-│   ├── identity.ts            # agent identity gen
-│   ├── secrets.ts             # store / get / list / delete
-│   ├── util/                  # redact, errors
-│   └── index.ts               # main exports
-├── tests/                     # bun:test
-├── docs/
-│   ├── SECURITY.md            # threat model deep-dive
-│   └── PLAN.md                # what's next
+│   ├── cli/                   # init / store / get / list / delete / audit / serve / issue-token / setup
+│   ├── crypto/                # argon2, xchacha, ed25519 wrappers (libsodium-sumo)
+│   ├── auth/                  # scope parsing, delegate token issue + verify
+│   ├── mcp/                   # MCP server (5 tools via stdio transport)
+│   ├── db/                    # SQLite schema + migration
+│   ├── util/                  # prompt, keychain (macOS/Linux), redact
+│   ├── audit.ts               # append-only tamper-evident audit chain
+│   ├── identity.ts            # Ed25519 agent identity gen + load
+│   ├── secrets.ts             # store / get / list / delete logic
+│   ├── vault.ts               # sqlite3 DB bootstrap, openDb, vaultExists
+│   └── index.ts               # main exports, version
+├── tests/                     # 41 tests (bun:test)
 ├── package.json
 ├── tsconfig.json
-└── README.md
+├── eslint.config.js
+├── README.md
+├── INTEGRATION.md
+└── ARCHITECTURE.md
 ```
