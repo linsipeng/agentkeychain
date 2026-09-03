@@ -33,8 +33,18 @@ export async function readLines(prompts: string[]): Promise<string[]> {
   try {
     await new Promise<void>((resolve, reject) => {
       const queue = [...prompts];
+      let settled = false;
+      const onClose = (): void => {
+        if (settled) return; // all prompts already answered — ignore EOF
+        reject(
+          new Error(
+            `stdin closed before all ${prompts.length} prompt(s) answered (got ${lines.length})`
+          )
+        );
+      };
       const next = (): void => {
         if (queue.length === 0) {
+          settled = true;
           resolve();
           return;
         }
@@ -44,13 +54,7 @@ export async function readLines(prompts: string[]): Promise<string[]> {
           lines.push(line);
           next();
         });
-        rl.once("close", () => {
-          reject(
-            new Error(
-              `stdin closed before all ${prompts.length} prompt(s) answered (got ${lines.length})`
-            )
-          );
-        });
+        rl.once("close", onClose);
       };
       next();
     });

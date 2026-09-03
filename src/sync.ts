@@ -271,7 +271,6 @@ export async function syncPush(db: Database, password: string, config: SyncConfi
 
   let pushed = 0;
   let written = 0;
-  const nowSec = Math.floor(Date.now() / 1000);
 
   for (let i = 0; i < names.length; i += 100) {
     const batch = names.slice(i, i + 100);
@@ -296,7 +295,7 @@ export async function syncPush(db: Database, password: string, config: SyncConfi
     written += result.written ?? 0;
   }
 
-  config.lastPushAt = nowSec * 1000;
+  config.lastPushAt = Date.now(); // ms precision — truncating to seconds skips same-second rows
   saveSyncConfig(config);
   await auditSync(db, password, "sync_push", pushed);
   return { pushed, written };

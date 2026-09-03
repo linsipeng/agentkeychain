@@ -1,11 +1,11 @@
 name = "agentkeychain-sync"
 main = "src/index.ts"
 compatibility_date = "2026-08-01"
-account_id = "REPLACED_BY_SYNC_INIT"
+account_id = "9e4c54afc16642c3bc43bcfc7db733df"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "agentkeychain-sync"
-database_id = "REPLACED_BY_SYNC_INIT"
+database_id = "3c6918ac-8112-42b9-b46d-dc82144f925e"
 
 # SYNC_TOKEN is injected as a secret by `agentkeychain sync init` (wrangler secret put).

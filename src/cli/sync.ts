@@ -26,7 +26,7 @@ import {
   type SyncConfig,
 } from "../sync.ts";
 import { resolvePassword } from "../util/keychain.ts";
-import { readPassword, readLine } from "../util/prompt.ts";
+import { readPassword, readLines } from "../util/prompt.ts";
 import { redact } from "../util/redact.ts";
 
 const WORKER_DIR_NAME = "worker";
@@ -92,9 +92,18 @@ async function runInit(): Promise<number> {
   }
   const accountId: string = accountMatch[1];
 
-  // 2. create D1 database (idempotent)
+  // 2. inject account_id into wrangler.toml BEFORE any wrangler d1 command
+  //    (wrangler reads account_id from cwd's wrangler.toml and fails on placeholders).
+  //    Keyed regex replace (not placeholder text) so re-runs self-heal a corrupted toml.
+  const { writeFileSync } = await import("node:fs");
+  let toml = readFileSync(wranglerToml, "utf8");
+  toml = toml.replace(/^account_id\s*=\s*"[^"]*"/m, `account_id = "${accountId}"`);
+  writeFileSync(wranglerToml, toml);
+
+  // 3. create D1 database (idempotent)
   let dbId: string | null = null;
   const dbList = Bun.spawnSync(["wrangler", "d1", "list", "--json"], {
+    cwd: scriptDir,
     env: { ...process.env },
     stdout: "pipe",
     stderr: "pipe",
@@ -106,22 +115,16 @@ async function runInit(): Promise<number> {
     dbId = null;
   }
   if (!dbId) {
-    const create = Bun.spawnSync(["wrangler", "d1", "create", DB_NAME, "--json"], {
+    // wrangler d1 create has no --json flag (v4) — parse human output.
+    const create = Bun.spawnSync(["wrangler", "d1", "create", DB_NAME], {
+      cwd: scriptDir,
       env: { ...process.env },
       stdout: "pipe",
       stderr: "pipe",
     });
-    try {
-      const created = JSON.parse(create.stdout.toString()) as { uuid?: string };
-      dbId = created.uuid ?? null;
-    } catch {
-      dbId = null;
-    }
-    if (!dbId) {
-      // fallback: parse human output "database_id = xxx"
-      const m = /([a-f0-9-]{36})/.exec(create.stdout.toString() + create.stderr.toString());
-      dbId = m ? (m[1] ?? null) : null;
-    }
+    const out = create.stdout.toString() + create.stderr.toString();
+    const m = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/.exec(out);
+    dbId = m?.[1] ?? null;
   }
   if (dbId === null) {
     process.stderr.write("error: failed to create D1 database\n");
@@ -129,22 +132,22 @@ async function runInit(): Promise<number> {
   }
   process.stdout.write(`✓ D1 database: ${DB_NAME} (${dbId})\n`);
 
-  // 3. fill wrangler.toml
-  let toml = readFileSync(wranglerToml, "utf8");
-  toml = toml.replace("REPLACED_BY_SYNC_INIT", accountId);
-  toml = toml.replace("REPLACED_BY_SYNC_INIT", dbId);
-  // write back so future deploys are already bound
-  const { writeFileSync } = await import("node:fs");
+  // 3b. bind database_id into wrangler.toml (keyed replace, self-healing)
+  toml = readFileSync(wranglerToml, "utf8");
+  toml = toml.replace(/^(\s*database_id\s*=\s*)"[^"]*"/m, `$1"${dbId}"`);
   writeFileSync(wranglerToml, toml);
 
-  // 4. apply schema
+  // 4. apply schema (--file: multi-statement SQL with comments)
   const schemaPath = join(scriptDir, "schema.sql");
-  const schema = readFileSync(schemaPath, "utf8");
-  const apply = Bun.spawnSync(["wrangler", "d1", "execute", DB_NAME, "--remote", "--command", schema], {
-    env: { ...process.env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const apply = Bun.spawnSync(
+    ["wrangler", "d1", "execute", DB_NAME, "--remote", "--file", schemaPath, "-y"],
+    {
+      cwd: scriptDir,
+      env: { ...process.env },
+      stdout: "pipe",
+      stderr: "pipe",
+    }
+  );
   if (apply.exitCode !== 0) {
     process.stderr.write(
       `warning: schema apply reported issues (may already exist): ${redact(apply.stderr.toString().slice(0, 200))}\n`
@@ -207,13 +210,18 @@ async function runConnect(): Promise<number> {
   const db = requireVault();
   if (!db) return 1;
 
-  const urlLine = await readLine("Sync URL (https://…workers.dev): ");
-  const url = urlLine.trim();
+  // Batch BOTH prompts into one readLines call — sequential single-prompt
+  // readline interfaces race stdin EOF under piped input (see util/prompt.ts notes).
+  const [urlLine, tokenLine] = await readLines([
+    "Sync URL (https://…workers.dev): ",
+    "Sync token: ",
+  ]);
+  const url = (urlLine ?? "").trim();
   if (!/^https:\/\/[a-z0-9.-]+$/.test(url)) {
     process.stderr.write("error: invalid URL\n");
     return 1;
   }
-  const token = (await readLine("Sync token: ")).trim();
+  const token = (tokenLine ?? "").trim();
   if (token.length < 20) {
     process.stderr.write("error: token looks too short\n");
     return 1;
