@@ -57,7 +57,11 @@ export async function runInit(): Promise<number> {
     return 1;
   }
 
-  const password = await readPassword("Master password (min 8 chars): ");
+  // AKC_PASSWORD env var wins (CI / scripts / agent callers) — no prompt.
+  const envPassword = process.env["AKC_PASSWORD"];
+  const password = envPassword && envPassword.length > 0
+    ? envPassword
+    : await readPassword("Master password (min 8 chars): ");
   if (password.length < 8) {
     throw new Error("password must be at least 8 characters");
   }

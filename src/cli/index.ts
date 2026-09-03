@@ -12,6 +12,8 @@ import { runAudit } from "./audit.ts";
 import { runServe } from "./serve.ts";
 import { runIssueToken } from "./issue-token.ts";
 import { runSetup } from "./setup.ts";
+import { runExport } from "./export.ts";
+import { runImport } from "./import.ts";
 import { redact } from "../util/redact.ts";
 
 type Command =
@@ -24,6 +26,8 @@ type Command =
   | "audit"
   | "serve"
   | "issue-token"
+  | "export"
+  | "import"
   | "help"
   | "version";
 
@@ -39,6 +43,8 @@ function parseArgs(argv: string[]): { command: Command; rest: string[] } {
     case "audit": return { command: "audit", rest: argv.slice(1) };
     case "serve": return { command: "serve", rest: argv.slice(1) };
     case "issue-token": return { command: "issue-token", rest: argv.slice(1) };
+    case "export": return { command: "export", rest: argv.slice(1) };
+    case "import": return { command: "import", rest: argv.slice(1) };
     case "--version": case "-v": case "version": return { command: "version", rest: [] };
     default: return { command: "help", rest: [] };
   }
@@ -56,6 +62,10 @@ function printHelp(): void {
       `  agentkeychain list [--json]         List all secrets (metadata only)\n` +
       `  agentkeychain delete <name> [--yes] Delete a secret\n` +
       `  agentkeychain audit [--since 24h]   Show audit log\n\n` +
+      `Move to another machine:\n` +
+      `  agentkeychain export [--out <path>] Export encrypted bundle (v0.2)\n` +
+      `  agentkeychain import <bundle> [--overwrite]\n` +
+      `                                    Import bundle into this vault (v0.2)\n\n` +
       `Advanced (for agents / power users):\n` +
       `  agentkeychain issue-token --sub <id> --scopes "..." [--ttl 1h]\n` +
       `                                    Issue a cross-agent delegate token\n` +
@@ -80,6 +90,8 @@ export async function main(): Promise<number> {
       case "audit": return runAudit(rest);
       case "serve": return runServe(rest);
       case "issue-token": return runIssueToken(rest);
+      case "export": return runExport(rest);
+      case "import": return runImport(rest);
       case "version":
         process.stdout.write(`agentkeychain v${VERSION}\n`);
         return 0;

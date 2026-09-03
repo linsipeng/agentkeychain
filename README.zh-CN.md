@@ -129,9 +129,29 @@ agentkeychain init
 | `agentkeychain list [--json]` | 列出所有凭证（仅元数据） |
 | `agentkeychain delete <name> [--yes]` | 删除凭证（加 `--yes` 跳过确认，Agent 调用时有用） |
 | `agentkeychain audit [--since 24h]` | 查看审计日志 |
+| `agentkeychain export [--out <path>]` | 导出全部凭证到加密 bundle（迁移到另一台机器用） |
+| `agentkeychain import <bundle> [--overwrite]` | 从 bundle 导入凭证（需要相同的 master 密码） |
 | `agentkeychain serve` | 启动 MCP 服务器（stdio 传输） |
 | `agentkeychain issue-token --sub <id> --scopes "..." [--ttl 1h]` | 签发跨 Agent 委托令牌 |
 | `agentkeychain --version` | 打印版本号 |
+
+### 迁移到新机器
+
+```bash
+# 旧机器：
+agentkeychain export
+# → ✓ exported 42 secret(s) → ./agentkeychain-export-20260903-120000.akcbundle
+
+# 把 bundle 传过去（AirDrop / U 盘 / scp），然后在新机器上：
+agentkeychain init          # 用【同一个】master 密码
+agentkeychain import ~/Downloads/agentkeychain-export-*.akcbundle
+# → ✓ imported 42 secret(s)
+```
+
+bundle 完全加密（与保险箱相同的 Argon2id + XChaCha20）——没有你的 master 密码，
+谁拿到的都只是密文。导入完成后请删除 bundle。
+注意：agent 身份属于各自的保险箱，不会随 bundle 迁移；新机器保留自己的
+`default` 身份（那边的审计由它签名）。
 
 ### 作为 MCP Server 使用
 

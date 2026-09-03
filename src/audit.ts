@@ -31,6 +31,8 @@ export type AuditAction =
   | "delete"
   | "delegate"
   | "revoke"
+  | "export"
+  | "import"
   | "failed_auth";
 
 export interface AuditRow {

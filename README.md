@@ -129,9 +129,29 @@ agentkeychain init
 | `agentkeychain list [--json]` | List all credentials (metadata only) |
 | `agentkeychain delete <name> [--yes]` | Delete a credential (add `--yes` to skip confirmation — useful for agents) |
 | `agentkeychain audit [--since 24h]` | Show audit log |
+| `agentkeychain export [--out <path>]` | Export all secrets to an encrypted bundle (for moving to another machine) |
+| `agentkeychain import <bundle> [--overwrite]` | Import secrets from an export bundle (same master password required) |
 | `agentkeychain serve` | Start MCP server (stdio transport) |
 | `agentkeychain issue-token --sub <id> --scopes "..." [--ttl 1h]` | Issue a cross-agent delegate token |
 | `agentkeychain --version` | Print version |
+
+### Moving to a new machine
+
+```bash
+# Old machine:
+agentkeychain export
+# → ✓ exported 42 secret(s) → ./agentkeychain-export-20260903-120000.akcbundle
+
+# Copy the bundle over (AirDrop / USB / scp), then on the NEW machine:
+agentkeychain init          # use the SAME master password
+agentkeychain import ~/Downloads/agentkeychain-export-*.akcbundle
+# → ✓ imported 42 secret(s)
+```
+
+The bundle is fully encrypted (same Argon2id + XChaCha20 as the vault) — anyone
+without your master password sees only ciphertext. Delete it after importing.
+Note: agent identities are per-vault and are NOT transferred; the new machine
+keeps its own `default` identity (audit entries there are signed by it).
 
 ### Use as MCP Server
 
