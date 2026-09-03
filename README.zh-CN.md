@@ -69,6 +69,32 @@ $ agentkeychain delete test-key --yes
 
 **你的 Agent 找保险箱要 key，不用再问你。你全程不用参与。**
 
+### 多台机器云同步（v0.3，BYO Cloudflare——用你自己的 CF 账号）
+
+通过**你自己的** Cloudflare 账号自动同步（免费额度绰绰有余——云端只存密文）：
+
+```bash
+# 一次性（在主机器上）：
+agentkeychain sync init      # 部署一个极小 Worker + D1 到你自己的 CF 账号
+# → 输出 Sync URL + Token
+
+agentkeychain sync connect   # 粘贴 URL + Token
+agentkeychain sync push      # 上传密钥（加密）
+
+# 在其他机器上：
+agentkeychain sync connect   # 同样的 URL + Token
+agentkeychain sync pull      # 下载——完成，所有密钥都在了
+
+# 日常：改完 push，其他机器 pull。
+agentkeychain sync status    # 健康状态 + 行数对账
+```
+
+- **零知识依然成立**：云端只存密文信封 + 不可逆的条目名哈希（BLAKE2b-256）——
+  没有明文名字，没有值。
+- 冲突按 **last-write-wins** 解决；所有操作本地审计留痕。
+- 费用：**$0**——单人使用远在 Cloudflare 免费额度之内。
+- Worker + D1 跑在**你自己的**账号里：随时可以在 CF 控制台删除。
+
 ### 换新 Mac（或第二台电脑）怎么迁移
 
 ```bash
@@ -114,7 +140,7 @@ agentkeychain list   # 检查一下，都在
 
 | | |
 |---|---|
-| **CLI** | `init / store / get / list / delete / audit / export / import / issue-token / serve` |
+| **CLI** | `init / store / get / list / delete / audit / export / import / sync / issue-token / serve` |
 | **MCP Server** | 5 个工具（`akc_store`, `akc_get`, `akc_list`, `akc_delete`, `akc_audit`），stdio 传输 |
 | **跨 Agent 委托** | Ed25519 签名的限时、限定作用域的代理令牌 |
 | **审计链** | 每次操作都有防篡改的 Ed25519 签名链 |

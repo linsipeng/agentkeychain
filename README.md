@@ -69,6 +69,33 @@ $ agentkeychain delete test-key --yes
 
 **Your agent asks the vault, not you. You stay out of the loop.**
 
+### Cloud sync across your machines (v0.3, bring-your-own Cloudflare)
+
+Sync automatically via **your own** Cloudflare account (free plan is plenty —
+the cloud only ever holds ciphertext):
+
+```bash
+# One-time (on your main machine):
+agentkeychain sync init      # deploys a tiny Worker + D1 to YOUR CF account
+# → prints a Sync URL + Token
+
+agentkeychain sync connect   # paste that URL + token here
+agentkeychain sync push      # upload your secrets (encrypted)
+
+# On your other machine(s):
+agentkeychain sync connect   # same URL + token
+agentkeychain sync pull      # download — done, everything's here
+
+# Day-to-day: push after changes, pull on other machines.
+agentkeychain sync status    # health + row counts
+```
+
+- **Zero knowledge holds**: the cloud stores only ciphertext envelopes +
+  irreversible name hashes (BLAKE2b-256) — no plaintext names, no values.
+- Conflicts resolve **last-write-wins**; everything is audit-logged locally.
+- Cost: **$0** — a single user stays far inside Cloudflare's free tier.
+- The Worker + D1 live in **your** account: you can delete them anytime.
+
 ### Moving to a new Mac (or a second machine)
 
 ```bash
@@ -114,7 +141,7 @@ If you find yourself about to paste a key anywhere, stop and say: **"存一下�
 
 | | |
 |---|---|
-| **CLI** | `init / store / get / list / delete / audit / export / import / issue-token / serve` |
+| **CLI** | `init / store / get / list / delete / audit / export / import / sync / issue-token / serve` |
 | **MCP Server** | 5 tools (`akc_store`, `akc_get`, `akc_list`, `akc_delete`, `akc_audit`) over stdio |
 | **Cross-agent delegate** | Ed25519-signed time-limited scope-bounded tokens |
 | **Audit chain** | Tamper-evident Ed25519 signature chain over every operation |
