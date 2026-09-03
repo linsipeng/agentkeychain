@@ -103,6 +103,78 @@ test("store + get full flow with KEK", async () => {
   }
 });
 
+test("store after delete resurrects tombstoned row (get must work again)", async () => {
+  const { init } = await import("./helpers.ts");
+  const { openDb } = await import("../src/vault.ts");
+  const { storeSecret, getSecret, deleteSecret, NotFoundError } = await import(
+    "../src/secrets.ts"
+  );
+  const { loadIdentityByName } = await import("../src/identity.ts");
+  const { deriveKEK } = await import("../src/crypto/argon2.ts");
+
+  await init("test-password-123");
+  const db = openDb();
+  const agent = loadIdentityByName(db, "default");
+  if (!agent) throw new Error("default identity not found");
+
+  const meta = db.prepare(`SELECT argon2_salt FROM kek_meta WHERE id = 1`).get() as
+    | { argon2_salt: Uint8Array }
+    | undefined;
+  if (!meta) throw new Error("kek_meta missing");
+  const kek = await deriveKEK("test-password-123", meta.argon2_salt);
+
+  try {
+    // 1. store v1
+    await storeSecret(db, {
+      name: "rotate-me",
+      value: "first-value",
+      scopes: ["test:read"],
+      kek,
+      agent,
+    });
+
+    // 2. delete → tombstone
+    const deleted = deleteSecret(db, { name: "rotate-me", agent });
+    expect(deleted).toBe(true);
+    await expect(
+      getSecret(db, { name: "rotate-me", kek, agent })
+    ).rejects.toThrow(NotFoundError);
+
+    // Row must still exist with a tombstone (soft delete contract)
+    const tombstoned = db
+      .prepare(`SELECT deleted_at, version FROM secrets WHERE name = ?`)
+      .get("rotate-me") as { deleted_at: number | null; version: number };
+    expect(tombstoned.deleted_at).not.toBeNull();
+
+    // 3. re-store same name → MUST clear the tombstone and bump version
+    await storeSecret(db, {
+      name: "rotate-me",
+      value: "second-value",
+      scopes: ["test:read"],
+      kek,
+      agent,
+    });
+
+    const row = db
+      .prepare(`SELECT deleted_at, version, created_at, updated_at FROM secrets WHERE name = ?`)
+      .get("rotate-me") as {
+      deleted_at: number | null;
+      version: number;
+      created_at: number;
+      updated_at: number;
+    };
+    expect(row.deleted_at).toBeNull();
+    expect(row.version).toBe(2);
+    expect(row.updated_at).toBeGreaterThanOrEqual(row.created_at);
+
+    // 4. get returns the NEW value — this is the exact production failure
+    const got = await getSecret(db, { name: "rotate-me", kek, agent });
+    expect(got).toBe("second-value");
+  } finally {
+    kek.fill(0);
+  }
+});
+
 test("getSecret throws NotFoundError for missing secret", async () => {
   const { init } = await import("./helpers.ts");
   const { openDb } = await import("../src/vault.ts");

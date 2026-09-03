@@ -64,9 +64,14 @@ export async function storeSecret(
     .get(args.name) as { version: number } | undefined;
 
   if (existing) {
+    // NOTE: `name` is the PRIMARY KEY, so a deleted secret leaves its row in
+    // place with a deleted_at tombstone. Re-storing the same name must RESURRECT
+    // that row (clear the tombstone) — otherwise get/list (which filter on
+    // `deleted_at IS NULL`) can never see it again. Bug seen in production
+    // 2026-09-03: store after delete returned ✓ but get threw NotFoundError.
     db.prepare(
       `UPDATE secrets
-       SET ciphertext = ?, nonce = ?, scopes = ?, metadata = ?, updated_at = ?, version = version + 1
+       SET ciphertext = ?, nonce = ?, scopes = ?, metadata = ?, updated_at = ?, version = version + 1, deleted_at = NULL
        WHERE name = ?`
     ).run(
       ciphertext,
