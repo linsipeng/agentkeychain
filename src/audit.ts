@@ -33,6 +33,8 @@ export type AuditAction =
   | "revoke"
   | "export"
   | "import"
+  | "sync_push"
+  | "sync_pull"
   | "failed_auth";
 
 export interface AuditRow {

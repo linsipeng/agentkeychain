@@ -17,6 +17,6 @@
     "isolatedModules": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*", "tests/**/*", "bin/**/*"],
+  "include": ["src/**/*", "tests/**/*", "bin/**/*", "worker/src/**/*"],
   "exclude": ["node_modules", "dist", "*.db"]
 }

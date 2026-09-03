@@ -14,6 +14,7 @@ import { runIssueToken } from "./issue-token.ts";
 import { runSetup } from "./setup.ts";
 import { runExport } from "./export.ts";
 import { runImport } from "./import.ts";
+import { runSync } from "./sync.ts";
 import { redact } from "../util/redact.ts";
 
 type Command =
@@ -28,6 +29,7 @@ type Command =
   | "issue-token"
   | "export"
   | "import"
+  | "sync"
   | "help"
   | "version";
 
@@ -45,6 +47,7 @@ function parseArgs(argv: string[]): { command: Command; rest: string[] } {
     case "issue-token": return { command: "issue-token", rest: argv.slice(1) };
     case "export": return { command: "export", rest: argv.slice(1) };
     case "import": return { command: "import", rest: argv.slice(1) };
+    case "sync": return { command: "sync", rest: argv.slice(1) };
     case "--version": case "-v": case "version": return { command: "version", rest: [] };
     default: return { command: "help", rest: [] };
   }
@@ -66,6 +69,9 @@ function printHelp(): void {
       `  agentkeychain export [--out <path>] Export encrypted bundle (v0.2)\n` +
       `  agentkeychain import <bundle> [--overwrite]\n` +
       `                                    Import bundle into this vault (v0.2)\n\n` +
+      `Cloud sync (BYO Cloudflare, v0.3):\n` +
+      `  agentkeychain sync init|connect|push|pull|status|disconnect\n` +
+      `                                    Sync secrets across machines via your own CF account\n\n` +
       `Advanced (for agents / power users):\n` +
       `  agentkeychain issue-token --sub <id> --scopes "..." [--ttl 1h]\n` +
       `                                    Issue a cross-agent delegate token\n` +
@@ -92,6 +98,7 @@ export async function main(): Promise<number> {
       case "issue-token": return runIssueToken(rest);
       case "export": return runExport(rest);
       case "import": return runImport(rest);
+      case "sync": return runSync(rest);
       case "version":
         process.stdout.write(`agentkeychain v${VERSION}\n`);
         return 0;
