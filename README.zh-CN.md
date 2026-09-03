@@ -95,6 +95,9 @@ agentkeychain sync status    # 健康状态 + 行数对账
 - 费用：**$0**——单人使用远在 Cloudflare 免费额度之内。
 - Worker + D1 跑在**你自己的**账号里：随时可以在 CF 控制台删除。
 
+> 📖 **完整同步指南**（设置、冲突、安全模型、故障排查、彻底移除）：
+> [docs/SYNC_GUIDE.md](./docs/SYNC_GUIDE.md)
+
 ### 换新 Mac（或第二台电脑）怎么迁移
 
 ```bash
@@ -184,6 +187,7 @@ agentkeychain init
 | `agentkeychain audit [--since 24h]` | 查看审计日志 |
 | `agentkeychain export [--out <path>]` | 导出全部凭证到加密 bundle（迁移到另一台机器用） |
 | `agentkeychain import <bundle> [--overwrite]` | 从 bundle 导入凭证（需要相同的 master 密码） |
+| `agentkeychain sync init/connect/push/pull/status/disconnect` | 云同步（用你自己的 Cloudflare 账号）——见 [docs/SYNC_GUIDE.md](./docs/SYNC_GUIDE.md) |
 | `agentkeychain serve` | 启动 MCP 服务器（stdio 传输） |
 | `agentkeychain issue-token --sub <id> --scopes "..." [--ttl 1h]` | 签发跨 Agent 委托令牌 |
 | `agentkeychain --version` | 打印版本号 |

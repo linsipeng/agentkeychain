@@ -96,6 +96,9 @@ agentkeychain sync status    # health + row counts
 - Cost: **$0** — a single user stays far inside Cloudflare's free tier.
 - The Worker + D1 live in **your** account: you can delete them anytime.
 
+> 📖 **Full sync guide** (setup, conflicts, security model, troubleshooting,
+> teardown): [docs/SYNC_GUIDE.md](./docs/SYNC_GUIDE.md)
+
 ### Moving to a new Mac (or a second machine)
 
 ```bash
@@ -185,6 +188,7 @@ agentkeychain init
 | `agentkeychain audit [--since 24h]` | Show audit log |
 | `agentkeychain export [--out <path>]` | Export all secrets to an encrypted bundle (for moving to another machine) |
 | `agentkeychain import <bundle> [--overwrite]` | Import secrets from an export bundle (same master password required) |
+| `agentkeychain sync init/connect/push/pull/status/disconnect` | Cloud sync via your own Cloudflare account — see [docs/SYNC_GUIDE.md](./docs/SYNC_GUIDE.md) |
 | `agentkeychain serve` | Start MCP server (stdio transport) |
 | `agentkeychain issue-token --sub <id> --scopes "..." [--ttl 1h]` | Issue a cross-agent delegate token |
 | `agentkeychain --version` | Print version |
