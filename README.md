@@ -69,6 +69,33 @@ $ agentkeychain delete test-key --yes
 
 **Your agent asks the vault, not you. You stay out of the loop.**
 
+### Moving to a new Mac (or a second machine)
+
+```bash
+# ── Old machine ──────────────────────────────────────────
+agentkeychain export
+# ✓ exported 42 secret(s) → ./agentkeychain-export-20260903-120000.akcbundle
+
+# Send that ONE file to the new machine (AirDrop / scp / USB).
+
+# ── New machine ──────────────────────────────────────────
+# 1. Install (see "Install (Mac)" below)
+# 2. Initialize with the SAME master password as the old machine:
+agentkeychain init
+# 3. Import the bundle:
+agentkeychain import ~/Downloads/agentkeychain-export-*.akcbundle
+# ✓ imported 42 secret(s)
+agentkeychain list   # verify — everything is there
+```
+
+- The bundle is **fully encrypted** (same Argon2id + XChaCha20 as the vault) —
+  without your master password it's just ciphertext. Delete it after importing.
+- Same-name secrets are skipped by default; add `--overwrite` to replace them.
+- Agent identities are NOT transferred (they're per-vault). That's fine —
+  the new machine keeps its own `default` identity.
+- Requires v0.2.0+ on **both** machines. Never copy `vault.db` directly —
+  each vault has its own salt, the copied file won't decrypt.
+
 ### What you NEVER do
 
 - ❌ Paste API keys into chat messages, emails, READMEs, or `.env` files you commit
@@ -87,7 +114,7 @@ If you find yourself about to paste a key anywhere, stop and say: **"存一下�
 
 | | |
 |---|---|
-| **CLI** | `init / store / get / list / delete / audit / issue-token / serve` |
+| **CLI** | `init / store / get / list / delete / audit / export / import / issue-token / serve` |
 | **MCP Server** | 5 tools (`akc_store`, `akc_get`, `akc_list`, `akc_delete`, `akc_audit`) over stdio |
 | **Cross-agent delegate** | Ed25519-signed time-limited scope-bounded tokens |
 | **Audit chain** | Tamper-evident Ed25519 signature chain over every operation |

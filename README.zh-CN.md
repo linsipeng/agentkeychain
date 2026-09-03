@@ -69,6 +69,33 @@ $ agentkeychain delete test-key --yes
 
 **你的 Agent 找保险箱要 key，不用再问你。你全程不用参与。**
 
+### 换新 Mac（或第二台电脑）怎么迁移
+
+```bash
+# ── 旧机器 ──────────────────────────────────────────
+agentkeychain export
+# ✓ exported 42 secret(s) → ./agentkeychain-export-20260903-120000.akcbundle
+
+# 把这一个文件传到新机器（AirDrop / scp / U 盘都行）。
+
+# ── 新机器 ──────────────────────────────────────────
+# 1. 先安装（见下面的「安装（Mac）」）
+# 2. 用【和旧机器相同】的 master 密码初始化：
+agentkeychain init
+# 3. 导入 bundle：
+agentkeychain import ~/Downloads/agentkeychain-export-*.akcbundle
+# ✓ imported 42 secret(s)
+agentkeychain list   # 检查一下，都在
+```
+
+- bundle 是**完全加密**的（和保险箱同一套 Argon2id + XChaCha20）——
+  没有你的 master 密码，谁拿到都只是密文。导入完删掉即可。
+- 同名条目默认跳过；想覆盖就加 `--overwrite`。
+- Agent 身份不会迁移（身份属于各自的保险箱）。没关系，
+  新机器保留自己的 `default` 身份。
+- 两台机器都需要 v0.2.0+。**不要**直接拷贝 `vault.db`——
+  每个保险箱有自己的 salt，拷过去的文件解不开。
+
 ### 你永远不要做的事
 
 - ❌ 把 API key 贴到聊天消息、邮件、README、或者会 commit 的 `.env` 文件里
@@ -87,7 +114,7 @@ $ agentkeychain delete test-key --yes
 
 | | |
 |---|---|
-| **CLI** | `init / store / get / list / delete / audit / issue-token / serve` |
+| **CLI** | `init / store / get / list / delete / audit / export / import / issue-token / serve` |
 | **MCP Server** | 5 个工具（`akc_store`, `akc_get`, `akc_list`, `akc_delete`, `akc_audit`），stdio 传输 |
 | **跨 Agent 委托** | Ed25519 签名的限时、限定作用域的代理令牌 |
 | **审计链** | 每次操作都有防篡改的 Ed25519 签名链 |
