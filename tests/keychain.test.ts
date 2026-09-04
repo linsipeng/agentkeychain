@@ -90,11 +90,17 @@ exit 1
   });
 
   test("keychainSet returns true on success", async () => {
+    // explicit env state — do not depend on earlier tests in this file
+    // (bun test may interleave describe blocks across files in one process)
+    process.env["PATH"] = fakeBinDir + ":" + (savedPath ?? "");
+    process.env["AKC_PASSWORD"] = "";
     const { keychainSet } = await import("../src/util/keychain.ts");
     expect(await keychainSet("test-password")).toBe(true);
   });
 
   test("keychainDelete returns true on success", async () => {
+    process.env["PATH"] = fakeBinDir + ":" + (savedPath ?? "");
+    process.env["AKC_PASSWORD"] = "";
     const { keychainDelete } = await import("../src/util/keychain.ts");
     expect(await keychainDelete()).toBe(true);
   });
