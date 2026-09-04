@@ -43,6 +43,9 @@ function spawnWithInput(
       clearTimeout(timer);
       reject(error);
     });
+    // bun on Linux can emit EPIPE on the stdin pipe if the child exits before
+    // consuming all input; the exit code is the source of truth, so swallow it.
+    child.stdin.on("error", () => {});
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code === 0) resolve();
