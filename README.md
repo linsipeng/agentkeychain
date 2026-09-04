@@ -109,7 +109,7 @@ agentkeychain export
 # Send that ONE file to the new machine (AirDrop / scp / USB).
 
 # ── New machine ──────────────────────────────────────────
-# 1. Install (see "Install (Mac)" below)
+# 1. Install (see "Install" below — one command)
 # 2. Initialize with the SAME master password as the old machine:
 agentkeychain init
 # 3. Import the bundle:
@@ -151,18 +151,18 @@ If you find yourself about to paste a key anywhere, stop and say: **"存一下�
 | **Zero-knowledge** | Master password never persisted; KEK derived via Argon2id on demand |
 | **Single binary** | `bun build --compile` → 62 MB self-contained executable |
 
-### Install (Mac)
+### Install (macOS & Linux, one command)
 
 ```bash
-curl -L https://github.com/linsipeng/agentkeychain/releases/latest/download/agentkeychain-darwin-arm64 \
-  -o ~/.local/bin/agentkeychain
-chmod +x ~/.local/bin/agentkeychain
-agentkeychain --version
+curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/main/install.sh | sh
 ```
 
-**No `sudo` needed.** `~/.local/bin` is already in PATH on macOS.
-
-For Linux x64, replace `darwin-arm64` with `linux-x64` (or build from source).
+- Detects your OS + architecture, downloads the right binary from the latest
+  release, **verifies its SHA256 checksum**, and installs to `~/.local/bin`.
+- Prefer to review before running? `curl -fsSLO .../install.sh && less install.sh && sh install.sh`
+- Options: `--version v0.3.0` (pin), `--dir <path>`, `--uninstall`.
+- If `~/.local/bin` is not on your PATH, the installer prints the exact line to add.
+- Supported: macOS (Apple Silicon & Intel), Linux (x64 & arm64). Or build from source with `bun`.
 
 ### First-time setup
 

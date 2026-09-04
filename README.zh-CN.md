@@ -108,7 +108,7 @@ agentkeychain export
 # 把这一个文件传到新机器（AirDrop / scp / U 盘都行）。
 
 # ── 新机器 ──────────────────────────────────────────
-# 1. 先安装（见下面的「安装（Mac）」）
+# 1. 先安装（见下面的「安装」——一条命令）
 # 2. 用【和旧机器相同】的 master 密码初始化：
 agentkeychain init
 # 3. 导入 bundle：
@@ -150,18 +150,18 @@ agentkeychain list   # 检查一下，都在
 | **零知识** | Master 密码永不落盘；KEK 由 Argon2id 即时导出 |
 | **单文件二进制** | `bun build --compile` → 62 MB 自包含可执行文件 |
 
-### 安装（Mac）
+### 安装（macOS 和 Linux，一条命令）
 
 ```bash
-curl -L https://github.com/linsipeng/agentkeychain/releases/latest/download/agentkeychain-darwin-arm64 \
-  -o ~/.local/bin/agentkeychain
-chmod +x ~/.local/bin/agentkeychain
-agentkeychain --version
+curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/main/install.sh | sh
 ```
 
-**不需要 `sudo`。** macOS 上 `~/.local/bin` 已经在 PATH 里了。
-
-Linux x64 用户把 `darwin-arm64` 换成 `linux-x64`（也可以从源码构建）。
+- 自动识别你的系统和架构，从最新 Release 下载对应二进制，
+  **校验 SHA256**，安装到 `~/.local/bin`。
+- 想先审查脚本再运行？`curl -fsSLO .../install.sh && less install.sh && sh install.sh`
+- 可选参数：`--version v0.3.0`（锁版本）、`--dir <路径>`、`--uninstall`。
+- 如果 `~/.local/bin` 不在你的 PATH 里，安装器会打印需要添加的那一行。
+- 支持：macOS（Apple Silicon 和 Intel）、Linux（x64 和 arm64）。也可以用 `bun` 从源码构建。
 
 ### 首次设置
 
