@@ -51,10 +51,13 @@ esac
 exit 1
 `;
     writeFileSync(join(fakeBinDir, "security"), securityStub, { mode: 0o755 });
-    writeFileSync(join(fakeBinDir, "secret-tool"), "#!/bin/sh\n# stub for tests\nif [ -n \"$AKC_STUB_OUT\" ]; then echo \"$AKC_STUB_OUT\"; else cat >/dev/null; fi\nexit 0\n", { mode: 0o755 });
+    writeFileSync(join(fakeBinDir, "secret-tool"), "#!/bin/sh\n# stub for tests; mirrors security stub semantics per subcommand\ncase \"$1\" in\n  lookup)\n    if [ -n \"$AKC_STUB_FAIL\" ]; then echo \"could not be found\" >&2; exit 44; fi\n    if [ -n \"$AKC_STUB_OUT\" ]; then echo \"$AKC_STUB_OUT\"; exit 0; fi\n    echo \"could not be found\" >&2\n    exit 44\n    ;;\n  store|clear)\n    if [ -n \"$AKC_STUB_FAIL\" ]; then cat >/dev/null; exit 1; fi\n    cat >/dev/null\n    exit 0\n    ;;\nesac\necho \"unsupported: $1\" >&2\nexit 1\n", { mode: 0o755 });
     process.env["PATH"] = fakeBinDir + ":" + (savedPath ?? "");
     delete process.env["AKC_STUB_OUT"];
     delete process.env["AKC_STUB_FAIL"];
+    // Explicit env state: earlier test files may leave AKC_PASSWORD set, which
+    // flips detectBackend() to "unsupported" regardless of platform.
+    delete process.env["AKC_PASSWORD"];
   });
 
   test("detectBackend returns platform-appropriate backend", async () => {
