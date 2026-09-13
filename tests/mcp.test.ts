@@ -13,7 +13,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 let tmpDir: string;
-type Handler = () => Promise<unknown>;
+// eslint-disable-next-line no-unused-vars
+type Handler = (...args: unknown[]) => Promise<unknown>;
 
 beforeEach(async () => {
   await sodium.ready;
@@ -31,7 +32,7 @@ beforeEach(async () => {
 
 
 
-test("server creates with all 5 tools and reports the package version", async () => {
+test("server creates with tool handlers and reports the package version", async () => {
   const { createServer } = await import("../src/mcp/server.ts");
   const { VERSION } = await import("../src/index.ts");
   const server = createServer();
@@ -42,6 +43,21 @@ test("server creates with all 5 tools and reports the package version", async ()
   // tools/list should be registered (set via setRequestHandler in createServer)
   expect(handlers.has("tools/list")).toBe(true);
   expect(handlers.has("tools/call")).toBe(true);
+});
+
+test("server exposes a novice store request without secret or scope inputs", async () => {
+  const { createServer } = await import("../src/mcp/server.ts");
+  const server = createServer();
+  const handlers = (server as unknown as { _requestHandlers: Map<string, Handler> })._requestHandlers;
+  const listHandler = handlers.get("tools/list");
+  if (!listHandler) throw new Error("tools/list handler missing");
+  const result = await listHandler({ method: "tools/list", params: {} }) as {
+    tools: Array<{ name: string; inputSchema: { properties: Record<string, unknown>; required?: string[] } }>;
+  };
+  const tool = result.tools.find((item) => item.name === "akc_request_store");
+  expect(tool).toBeDefined();
+  expect(Object.keys(tool?.inputSchema.properties ?? {})).toEqual(["name", "purpose"]);
+  expect(tool?.inputSchema.required).toEqual(["name", "purpose"]);
 });
 
 test("withVaultDatabase closes the database on success and failure", async () => {

@@ -16,6 +16,7 @@ import { runExport } from "./export.ts";
 import { runImport } from "./import.ts";
 import { runSync } from "./sync.ts";
 import { runStatus } from "./status.ts";
+import { runCapture } from "./capture.ts";
 import { redact } from "../util/redact.ts";
 
 type Command =
@@ -32,6 +33,7 @@ type Command =
   | "import"
   | "sync"
   | "status"
+  | "capture"
   | "help"
   | "version";
 
@@ -51,6 +53,7 @@ function parseArgs(argv: string[]): { command: Command; rest: string[] } {
     case "import": return { command: "import", rest: argv.slice(1) };
     case "sync": return { command: "sync", rest: argv.slice(1) };
     case "status": return { command: "status", rest: argv.slice(1) };
+    case "capture": return { command: "capture", rest: argv.slice(1) };
     case "--version": case "-v": case "version": return { command: "version", rest: [] };
     default: return { command: "help", rest: [] };
   }
@@ -64,6 +67,8 @@ function printHelp(): void {
       `  agentkeychain setup                 Bind existing vault to OS keychain\n\n` +
       `Daily use (no password prompt when keychain is set):\n` +
       `  agentkeychain store <name>          Store encrypted secret\n` +
+      `  agentkeychain capture <name> --purpose <text>\n` +
+      `                                    Open a local secure-entry form\n` +
       `  agentkeychain get <name> [--json]   Retrieve and decrypt\n` +
       `  agentkeychain list [--json]         List all secrets (metadata only)\n` +
       `  agentkeychain delete <name> [--yes] Delete a secret\n` +
@@ -104,6 +109,7 @@ export async function main(): Promise<number> {
       case "import": return runImport(rest);
       case "sync": return runSync(rest);
       case "status": return runStatus(rest);
+      case "capture": return runCapture(rest);
       case "version":
         process.stdout.write(`agentkeychain v${VERSION}\n`);
         return 0;

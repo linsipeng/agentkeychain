@@ -17,7 +17,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { timingSafeEqual } from "node:crypto";
 import type { Database } from "bun:sqlite";
 
 import { getSecret, storeSecret, listSecrets, deleteSecret } from "../secrets.js";
@@ -27,47 +26,14 @@ import type { DelegateToken } from "../auth/delegate.js";
 import { verifyDelegateToken } from "../auth/delegate.js";
 import { loadIdentityByName, type Identity } from "../identity.js";
 import { openDb } from "../vault.js";
-import { resolvePassword } from "../util/keychain.js";
-import { deriveKEK, hashKEK } from "../crypto/argon2.js";
+import { resolveVaultKek } from "../unlock.js";
+import { requestSecureStore } from "../capture/store.js";
 import { VERSION } from "../index.js";
 
 const IDENTITY_NAME = "default";
 
-/** Resolve and verify the vault KEK without exposing password or KEK material. */
-export async function resolveMcpKek(db: Database): Promise<Uint8Array> {
-  const password = await resolvePassword();
-  if (!password) {
-    throw new Error(
-      "vault locked — run `agentkeychain setup` so the OS keychain can unlock MCP"
-    );
-  }
-
-  const meta = db.prepare(
-    `SELECT argon2_salt, kek_hash FROM kek_meta WHERE id = 1`
-  ).get() as { argon2_salt: Uint8Array; kek_hash: Uint8Array } | undefined;
-  if (!meta) throw new Error("vault not initialized — run `agentkeychain init` first");
-
-  const kek = await deriveKEK(password, meta.argon2_salt);
-  let actualHash: Uint8Array | null = null;
-  let expected: Buffer | null = null;
-  let actual: Buffer | null = null;
-  try {
-    actualHash = await hashKEK(kek);
-    expected = Buffer.from(meta.kek_hash);
-    actual = Buffer.from(actualHash);
-    if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
-      throw new Error("vault unlock failed — OS keychain password does not match this vault");
-    }
-    return kek;
-  } catch (err) {
-    kek.fill(0);
-    throw err;
-  } finally {
-    actualHash?.fill(0);
-    expected?.fill(0);
-    actual?.fill(0);
-  }
-}
+/** Backward-compatible export for callers/tests that used the MCP-specific name. */
+export const resolveMcpKek = resolveVaultKek;
 
 function toolErr(msg: string): { isError: true; content: [{ type: "text"; text: string }] } {
   return {
@@ -111,8 +77,20 @@ export function createServer(): Server {
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
       {
+        name: "akc_request_store",
+        description: "Open a one-time local secure-entry form. Use this by default so credential values never enter chat or MCP arguments. Scope is inferred automatically.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Human-readable credential name" },
+            purpose: { type: "string", description: "Natural-language intended use" },
+          },
+          required: ["name", "purpose"],
+        },
+      },
+      {
         name: "akc_store",
-        description: "Encrypt and store a secret. Returns the secret id, never the value.",
+        description: "Advanced compatibility tool that accepts a secret value in MCP arguments. Prefer akc_request_store for human input.",
         inputSchema: {
           type: "object",
           properties: {
@@ -189,6 +167,19 @@ export function createServer(): Server {
       const kek = await resolveMcpKek(db);
       try {
         switch (name) {
+        case "akc_request_store": {
+          const secretName = String(a["name"] ?? "").trim();
+          const purpose = String(a["purpose"] ?? "").trim();
+          if (!secretName || !purpose) return toolErr("name and purpose required");
+          const capture = await requestSecureStore({ name: secretName, purpose });
+          return toolOk(JSON.stringify({
+            status: "waiting_for_local_input",
+            name: secretName,
+            permission: capture.permission,
+            message: "A one-time secure form was opened locally. The credential value will not be returned to MCP.",
+          }));
+        }
+
         case "akc_store": {
           const secretName = String(a["name"] ?? "");
           const value = String(a["value"] ?? "");

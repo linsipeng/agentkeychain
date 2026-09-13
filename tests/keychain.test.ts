@@ -55,6 +55,9 @@ exit 1
     process.env["PATH"] = fakeBinDir + ":" + (savedPath ?? "");
     delete process.env["AKC_STUB_OUT"];
     delete process.env["AKC_STUB_FAIL"];
+    // Explicit env state: earlier test files may leave AKC_PASSWORD set, which
+    // flips detectBackend() to "unsupported" regardless of platform.
+    delete process.env["AKC_PASSWORD"];
   });
 
   test("detectBackend returns platform-appropriate backend", async () => {
