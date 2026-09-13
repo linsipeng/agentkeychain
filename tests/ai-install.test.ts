@@ -26,9 +26,9 @@ describe("AI-native installation contract", () => {
 
   test("agent protocol pins release artifacts, preserves collisions, registers MCP, and documents trust", () => {
     const protocol = read("AGENTS.md");
-    expect(protocol).toContain("v0.4.0/install.sh");
-    expect(protocol).toContain("--version v0.4.0");
-    expect(protocol).toContain("v0.4.0/skills/agentkeychain/SKILL.md");
+    expect(protocol).toContain("v0.5.0/install.sh");
+    expect(protocol).toContain("--version v0.5.0");
+    expect(protocol).toContain("v0.5.0/skills/agentkeychain/SKILL.md");
     expect(protocol).toContain("hermes skills install --yes");
     expect(protocol).toContain("printf 'y\\n' | hermes mcp add");
     expect(protocol).toContain("hermes mcp test");

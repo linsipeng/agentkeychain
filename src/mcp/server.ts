@@ -1,8 +1,9 @@
 /**
  * MCP server for agentkeychain.
  *
- * Exposes 5 tools over Model Context Protocol (stdio transport):
- *   - akc_store: encrypt + persist a secret
+ * Exposes 6 tools over Model Context Protocol (stdio transport):
+ *   - akc_request_store: open a local secure-entry form + infer scope
+ *   - akc_store: advanced compatibility path for trusted clients
  *   - akc_get:   decrypt + return a secret (scope-checked)
  *   - akc_list:  list secret names (no values)
  *   - akc_delete: remove a secret

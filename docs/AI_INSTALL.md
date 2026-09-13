@@ -35,7 +35,7 @@ That's it. The agent will:
 ## Manual fallback (no agent available)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/v0.4.0/install.sh | sh -s -- --version v0.4.0
+curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/v0.5.0/install.sh | sh -s -- --version v0.5.0
 agentkeychain init
 ```
 
