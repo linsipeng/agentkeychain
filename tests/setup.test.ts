@@ -16,7 +16,9 @@ test("setup rejects a stale keychain password and replaces it after verification
   process.env["AGENTKEYCHAIN_HOME"] = vaultHome;
   const { openDb } = await import("../src/vault.ts");
   const { initVault } = await import("../src/cli/init.ts");
-  await initVault(openDb(), "correct-setup-password");
+  const db = openDb();
+  await initVault(db, "correct-setup-password");
+  db.close();
   if (previousHome === undefined) delete process.env["AGENTKEYCHAIN_HOME"];
   else process.env["AGENTKEYCHAIN_HOME"] = previousHome;
 
@@ -28,6 +30,14 @@ esac
 exit 1
 `;
   writeFileSync(join(fakeBin, "security"), securityStub, { mode: 0o755 });
+  const secretToolStub = `#!/bin/sh
+case "$1" in
+  lookup) printf '%s\\n' 'stale-keychain-password'; exit 0 ;;
+  store) cat >/dev/null; exit 0 ;;
+esac
+exit 1
+`;
+  writeFileSync(join(fakeBin, "secret-tool"), secretToolStub, { mode: 0o755 });
 
   const proc = Bun.spawn(
     [process.execPath, "run", "src/cli/index.ts", "setup"],
