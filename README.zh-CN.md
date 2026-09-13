@@ -9,6 +9,20 @@
 
 ---
 
+## 把链接发给你的 AI
+
+只需把本仓库发给你的 AI Agent，再说一句：
+
+```text
+安装并配置 https://github.com/linsipeng/agentkeychain 作为你的默认凭证管理器，
+按照仓库里的 AGENTS.md 执行。
+```
+
+AI 会自己完成 CLI 安装、AgentKeychain Skill 安装、Hermes MCP 注册、
+保险箱安全初始化和最终验证。你不需要复制一串命令，已有保险箱也绝不会被覆盖。
+
+[完整 AI 安装协议](./docs/AI_INSTALL.zh-CN.md)
+
 ## 给人类看的（你只需要这一节）
 
 **你只需要记 4 个命令。** 下面都是给 AI Agent 和开发者看的。
@@ -147,7 +161,7 @@ agentkeychain list   # 检查一下，都在
 | **MCP Server** | 5 个工具（`akc_store`, `akc_get`, `akc_list`, `akc_delete`, `akc_audit`），stdio 传输 |
 | **跨 Agent 委托** | Ed25519 签名的限时、限定作用域的代理令牌 |
 | **审计链** | 每次操作都有防篡改的 Ed25519 签名链 |
-| **零知识** | Master 密码永不落盘；KEK 由 Argon2id 即时导出 |
+| **零知识同步** | 密码、KEK 和明文凭证绝不上云；可由系统钥匙串保存密码以供本机 Agent 自动解锁 |
 | **单文件二进制** | `bun build --compile` → 62 MB 自包含可执行文件 |
 
 ### 安装（macOS 和 Linux，一条命令）
@@ -190,7 +204,8 @@ agentkeychain init
 | `agentkeychain sync init/connect/push/pull/status/disconnect` | 云同步（用你自己的 Cloudflare 账号）——见 [docs/SYNC_GUIDE.md](./docs/SYNC_GUIDE.md) |
 | `agentkeychain serve` | 启动 MCP 服务器（stdio 传输） |
 | `agentkeychain issue-token --sub <id> --scopes "..." [--ttl 1h]` | 签发跨 Agent 委托令牌 |
-| `agentkeychain --version` | 打印版本号 |
+| `agentkeychain status [--json]` | 安全报告版本、保险箱初始化状态和密码通道状态，不读取凭证 |
+| `agentkeychain --version` | 打印版本 |
 
 ### 迁移到新机器
 
@@ -218,7 +233,7 @@ bundle 完全加密（与保险箱相同的 Argon2id + XChaCha20）——没有�
 {
   "mcpServers": {
     "agentkeychain": {
-      "command": "/usr/local/bin/agentkeychain",
+      "command": "/home/you/.local/bin/agentkeychain",
       "args": ["serve"]
     }
   }
@@ -234,6 +249,10 @@ bundle 完全加密（与保险箱相同的 Argon2id + XChaCha20）——没有�
 | `akc_list` | 列出凭证名（不返回值） |
 | `akc_delete` | 删除凭证（作用域检查） |
 | `akc_audit` | 读取审计日志（不含凭证信息） |
+
+**MCP 信任边界：**`akc_get` 会把明文返回给 MCP 客户端，调用它的 Agent 才能实际使用。
+只应注册可信的本地客户端；如果客户端没有关闭留存，其模型上下文、会话记录或工具日志
+可能保留该结果，AgentKeychain 无法清除客户端持有的副本。
 
 ### 安全模型
 
@@ -251,7 +270,7 @@ bundle 完全加密（与保险箱相同的 Argon2id + XChaCha20）——没有�
 
 ```bash
 bun install         # 安装依赖
-bun test            # 运行所有测试（41 个）
+bun test            # 运行所有测试（65 个）
 bun run lint        # eslint
 bun run build       # 编译为单文件二进制到 bin/agentkeychain-bin
 bun run typecheck   # tsc --noEmit
@@ -267,4 +286,5 @@ MIT——见 [LICENSE](./LICENSE)。
 
 ## 状态
 
-v0.1.0 —— 公开 alpha 版。单文件二进制端到端可用。v1.0 前可能会有破坏性变更。
+v0.4.0 —— 新增 AI 原生安装、公开 Hermes Skill、安全就绪探测和基于系统钥匙串的
+MCP 解锁。v1.0 前仍可能有破坏性变更。

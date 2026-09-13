@@ -15,6 +15,7 @@ import { runSetup } from "./setup.ts";
 import { runExport } from "./export.ts";
 import { runImport } from "./import.ts";
 import { runSync } from "./sync.ts";
+import { runStatus } from "./status.ts";
 import { redact } from "../util/redact.ts";
 
 type Command =
@@ -30,6 +31,7 @@ type Command =
   | "export"
   | "import"
   | "sync"
+  | "status"
   | "help"
   | "version";
 
@@ -48,6 +50,7 @@ function parseArgs(argv: string[]): { command: Command; rest: string[] } {
     case "export": return { command: "export", rest: argv.slice(1) };
     case "import": return { command: "import", rest: argv.slice(1) };
     case "sync": return { command: "sync", rest: argv.slice(1) };
+    case "status": return { command: "status", rest: argv.slice(1) };
     case "--version": case "-v": case "version": return { command: "version", rest: [] };
     default: return { command: "help", rest: [] };
   }
@@ -76,6 +79,7 @@ function printHelp(): void {
       `  agentkeychain issue-token --sub <id> --scopes "..." [--ttl 1h]\n` +
       `                                    Issue a cross-agent delegate token\n` +
       `  agentkeychain serve                 Start MCP server (stdio transport)\n` +
+      `  agentkeychain status [--json]        Safe vault + password readiness probe\n` +
       `  agentkeychain --version             Print version\n\n` +
       `Environment:\n` +
       `  AKC_PASSWORD         Override keychain (CI / scripts)\n` +
@@ -99,6 +103,7 @@ export async function main(): Promise<number> {
       case "export": return runExport(rest);
       case "import": return runImport(rest);
       case "sync": return runSync(rest);
+      case "status": return runStatus(rest);
       case "version":
         process.stdout.write(`agentkeychain v${VERSION}\n`);
         return 0;

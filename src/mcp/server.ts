@@ -9,7 +9,7 @@
  *   - akc_audit: read audit log (no secret material)
  *
  * The MCP server runs in the same process as the agent.
- * It uses the agent's own identity (loaded from ~/.agentkeychain/keychain.db)
+ * It uses the agent's own identity and the OS-keychain-backed password chain
  * to decrypt secrets on demand. Sub-agents presenting a delegate token
  * (Ed25519-signed) are verified against the issuer's public key without
  * touching the DB.
@@ -17,6 +17,8 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { timingSafeEqual } from "node:crypto";
+import type { Database } from "bun:sqlite";
 
 import { getSecret, storeSecret, listSecrets, deleteSecret } from "../secrets.js";
 import { query as queryAuditLog } from "../audit.js";
@@ -25,8 +27,47 @@ import type { DelegateToken } from "../auth/delegate.js";
 import { verifyDelegateToken } from "../auth/delegate.js";
 import { loadIdentityByName, type Identity } from "../identity.js";
 import { openDb } from "../vault.js";
+import { resolvePassword } from "../util/keychain.js";
+import { deriveKEK, hashKEK } from "../crypto/argon2.js";
+import { VERSION } from "../index.js";
 
 const IDENTITY_NAME = "default";
+
+/** Resolve and verify the vault KEK without exposing password or KEK material. */
+export async function resolveMcpKek(db: Database): Promise<Uint8Array> {
+  const password = await resolvePassword();
+  if (!password) {
+    throw new Error(
+      "vault locked — run `agentkeychain setup` so the OS keychain can unlock MCP"
+    );
+  }
+
+  const meta = db.prepare(
+    `SELECT argon2_salt, kek_hash FROM kek_meta WHERE id = 1`
+  ).get() as { argon2_salt: Uint8Array; kek_hash: Uint8Array } | undefined;
+  if (!meta) throw new Error("vault not initialized — run `agentkeychain init` first");
+
+  const kek = await deriveKEK(password, meta.argon2_salt);
+  let actualHash: Uint8Array | null = null;
+  let expected: Buffer | null = null;
+  let actual: Buffer | null = null;
+  try {
+    actualHash = await hashKEK(kek);
+    expected = Buffer.from(meta.kek_hash);
+    actual = Buffer.from(actualHash);
+    if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+      throw new Error("vault unlock failed — OS keychain password does not match this vault");
+    }
+    return kek;
+  } catch (err) {
+    kek.fill(0);
+    throw err;
+  } finally {
+    actualHash?.fill(0);
+    expected?.fill(0);
+    actual?.fill(0);
+  }
+}
 
 function toolErr(msg: string): { isError: true; content: [{ type: "text"; text: string }] } {
   return {
@@ -41,6 +82,21 @@ function toolOk(text: string): { content: [{ type: "text"; text: string }] } {
   };
 }
 
+/** Run one MCP operation with a database handle that always closes. */
+export async function withVaultDatabase<T>(
+  // Function-type parameters are declarations; ESLint still treats the name as unused.
+  // eslint-disable-next-line no-unused-vars
+  operation: (db: Database) => Promise<T>,
+  open: () => Database = openDb
+): Promise<T> {
+  const db = open();
+  try {
+    return await operation(db);
+  } finally {
+    db.close();
+  }
+}
+
 function _resolveContext(): void {
   // Reserved for future context resolution logic (currently inlined in handlers).
 }
@@ -48,7 +104,7 @@ void _resolveContext;
 
 export function createServer(): Server {
   const server = new Server(
-    { name: "agentkeychain", version: "0.1.0" },
+    { name: "agentkeychain", version: VERSION },
     { capabilities: { tools: {} } }
   );
 
@@ -118,26 +174,21 @@ export function createServer(): Server {
     ],
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request) => withVaultDatabase(async (db) => {
     const { name, arguments: args } = request.params;
     const a = (args ?? {}) as Record<string, unknown>;
 
-    // Lazy identity unlock — first call per process asks for password via stdin prompt.
-    // For MVP we require pre-unlocked identity (set via env or DB plaintext at startup).
-    // Real implementation: prompt for password, derive KEK, cache in process memory.
-    const db = openDb();
+    // Resolve the password through the standard chain: AKC_PASSWORD for CI,
+    // otherwise the OS keychain populated by init/setup. Raw KEKs are never
+    // accepted through environment variables.
     const identity = loadIdentityByName(db, IDENTITY_NAME);
     if (!identity) return toolErr("identity 'default' not found — run `agentkeychain init` first");
-    const kek = process.env["AKC_KEK_HEX"]
-      ? new Uint8Array(Buffer.from(process.env["AKC_KEK_HEX"], "hex"))
-      : null;
-    if (!kek) {
-      return toolErr("KEK not unlocked — set AKC_KEK_HEX env or use `agentkeychain shell` to unlock");
-    }
     const agent: Identity = identity;
 
     try {
-      switch (name) {
+      const kek = await resolveMcpKek(db);
+      try {
+        switch (name) {
         case "akc_store": {
           const secretName = String(a["name"] ?? "");
           const value = String(a["value"] ?? "");
@@ -206,13 +257,16 @@ export function createServer(): Server {
 
         default:
           return toolErr(`unknown tool: ${name}`);
+        }
+      } finally {
+        kek.fill(0);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       // Do NOT echo back secret material even on error
       return toolErr(`error: ${msg.replace(/sk-[A-Za-z0-9_-]+/g, "[REDACTED]")}`);
     }
-  });
+  }));
 
   return server;
 }

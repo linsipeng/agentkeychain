@@ -31,14 +31,56 @@ beforeEach(async () => {
 
 
 
-test("server creates with all 5 tools", async () => {
+test("server creates with all 5 tools and reports the package version", async () => {
   const { createServer } = await import("../src/mcp/server.ts");
+  const { VERSION } = await import("../src/index.ts");
   const server = createServer();
   expect(server).toBeDefined();
   const handlers = (server as unknown as { _requestHandlers: Map<string, Handler> })._requestHandlers;
+  const info = (server as unknown as { _serverInfo: { version: string } })._serverInfo;
+  expect(info.version).toBe(VERSION);
   // tools/list should be registered (set via setRequestHandler in createServer)
   expect(handlers.has("tools/list")).toBe(true);
   expect(handlers.has("tools/call")).toBe(true);
+});
+
+test("withVaultDatabase closes the database on success and failure", async () => {
+  const { withVaultDatabase } = await import("../src/mcp/server.ts");
+  let successClosed = false;
+  const successDb = { close: () => { successClosed = true; } };
+  const result = await withVaultDatabase(
+    async () => "ok",
+    () => successDb as never
+  );
+  expect(result).toBe("ok");
+  expect(successClosed).toBe(true);
+
+  let failureClosed = false;
+  const failureDb = { close: () => { failureClosed = true; } };
+  await expect(withVaultDatabase(
+    async () => { throw new Error("expected-test-error"); },
+    () => failureDb as never
+  )).rejects.toThrow("expected-test-error");
+  expect(failureClosed).toBe(true);
+});
+
+test("MCP resolves its KEK from the normal password chain", async () => {
+  process.env["AKC_PASSWORD"] = "hunter2correct";
+  const { openDb } = await import("../src/vault.ts");
+  const { resolveMcpKek } = await import("../src/mcp/server.ts");
+  const kek = await resolveMcpKek(openDb());
+  expect(kek).toBeInstanceOf(Uint8Array);
+  expect(kek.length).toBe(32);
+  kek.fill(0);
+  delete process.env["AKC_PASSWORD"];
+});
+
+test("MCP refuses an incorrect resolved password without exposing it", async () => {
+  process.env["AKC_PASSWORD"] = "definitely-wrong-password";
+  const { openDb } = await import("../src/vault.ts");
+  const { resolveMcpKek } = await import("../src/mcp/server.ts");
+  await expect(resolveMcpKek(openDb())).rejects.toThrow("vault unlock failed");
+  delete process.env["AKC_PASSWORD"];
 });
 
 test("delegate token signed by correct issuer verifies", async () => {
