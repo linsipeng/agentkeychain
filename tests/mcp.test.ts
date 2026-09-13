@@ -41,6 +41,25 @@ test("server creates with all 5 tools", async () => {
   expect(handlers.has("tools/call")).toBe(true);
 });
 
+test("MCP resolves its KEK from the normal password chain", async () => {
+  process.env["AKC_PASSWORD"] = "hunter2correct";
+  const { openDb } = await import("../src/vault.ts");
+  const { resolveMcpKek } = await import("../src/mcp/server.ts");
+  const kek = await resolveMcpKek(openDb());
+  expect(kek).toBeInstanceOf(Uint8Array);
+  expect(kek.length).toBe(32);
+  kek.fill(0);
+  delete process.env["AKC_PASSWORD"];
+});
+
+test("MCP refuses an incorrect resolved password without exposing it", async () => {
+  process.env["AKC_PASSWORD"] = "definitely-wrong-password";
+  const { openDb } = await import("../src/vault.ts");
+  const { resolveMcpKek } = await import("../src/mcp/server.ts");
+  await expect(resolveMcpKek(openDb())).rejects.toThrow("vault unlock failed");
+  delete process.env["AKC_PASSWORD"];
+});
+
 test("delegate token signed by correct issuer verifies", async () => {
   const { signDelegateToken, verifyDelegateToken } = await import("../src/auth/delegate.ts");
   await sodium.ready;

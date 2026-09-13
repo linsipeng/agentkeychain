@@ -9,6 +9,21 @@
 
 ---
 
+## Install with your AI agent
+
+Send your AI agent this repository and one sentence:
+
+```text
+Install and configure https://github.com/linsipeng/agentkeychain as your
+default credential manager. Follow AGENTS.md in the repository.
+```
+
+The agent owns the whole setup: CLI installation, AgentKeychain Skill,
+Hermes MCP registration, vault-safe initialization, and verification. You do
+not need to copy a list of commands. Existing vaults are never overwritten.
+
+[Full AI installation contract](./docs/AI_INSTALL.md)
+
 ## For Humans (the only section you need)
 
 **You only need 4 commands.** Everything else is for agents and developers.
@@ -148,7 +163,7 @@ If you find yourself about to paste a key anywhere, stop and say: **"存一下�
 | **MCP Server** | 5 tools (`akc_store`, `akc_get`, `akc_list`, `akc_delete`, `akc_audit`) over stdio |
 | **Cross-agent delegate** | Ed25519-signed time-limited scope-bounded tokens |
 | **Audit chain** | Tamper-evident Ed25519 signature chain over every operation |
-| **Zero-knowledge** | Master password never persisted; KEK derived via Argon2id on demand |
+| **Zero-knowledge sync** | No password, KEK, or plaintext secret reaches the cloud; optional OS-keychain storage unlocks local agent use |
 | **Single binary** | `bun build --compile` → 62 MB self-contained executable |
 
 ### Install (macOS & Linux, one command)
@@ -191,6 +206,7 @@ agentkeychain init
 | `agentkeychain sync init/connect/push/pull/status/disconnect` | Cloud sync via your own Cloudflare account — see [docs/SYNC_GUIDE.md](./docs/SYNC_GUIDE.md) |
 | `agentkeychain serve` | Start MCP server (stdio transport) |
 | `agentkeychain issue-token --sub <id> --scopes "..." [--ttl 1h]` | Issue a cross-agent delegate token |
+| `agentkeychain status [--json]` | Safely report version, vault initialization, and password-channel readiness without reading credentials |
 | `agentkeychain --version` | Print version |
 
 ### Moving to a new machine
@@ -219,7 +235,7 @@ Add to any MCP-compatible client (Claude Desktop, Hermes, Codex, IDE plugins):
 {
   "mcpServers": {
     "agentkeychain": {
-      "command": "/usr/local/bin/agentkeychain",
+      "command": "/home/you/.local/bin/agentkeychain",
       "args": ["serve"]
     }
   }
