@@ -51,7 +51,7 @@ esac
 exit 1
 `;
     writeFileSync(join(fakeBinDir, "security"), securityStub, { mode: 0o755 });
-    writeFileSync(join(fakeBinDir, "secret-tool"), "#!/bin/sh\n# stub for tests\nif [ -n \"$AKC_STUB_OUT\" ]; then echo \"$AKC_STUB_OUT\"; else cat >/dev/null; fi\nexit 0\n", { mode: 0o755 });
+    writeFileSync(join(fakeBinDir, "secret-tool"), "#!/bin/sh\n# stub for tests (mirrors security stub semantics)\nif [ -n \"$AKC_STUB_FAIL\" ]; then echo \"could not be found\" >&2; exit 44; fi\nif [ -n \"$AKC_STUB_OUT\" ]; then echo \"$AKC_STUB_OUT\"; exit 0; fi\necho \"could not be found\" >&2\nexit 44\n", { mode: 0o755 });
     process.env["PATH"] = fakeBinDir + ":" + (savedPath ?? "");
     delete process.env["AKC_STUB_OUT"];
     delete process.env["AKC_STUB_FAIL"];
