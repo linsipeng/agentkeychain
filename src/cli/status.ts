@@ -1,9 +1,10 @@
 /**
  * `agentkeychain status [--json]` — safe installation/readiness probe.
- * Never creates or opens a vault and never reads credential metadata.
+ * Never creates or mutates a vault and never reads credential rows. It reads
+ * only KEK metadata in read-only mode to prove the password channel works.
  */
 import { VERSION } from "../index.ts";
-import { vaultExists } from "../vault.ts";
+import { vaultExists, verifyVaultPassword } from "../vault.ts";
 import { detectBackend, resolvePassword, type Backend } from "../util/keychain.ts";
 
 export interface StatusSnapshot {
@@ -15,10 +16,11 @@ export interface StatusSnapshot {
 
 export async function getStatusSnapshot(): Promise<StatusSnapshot> {
   const vaultInitialized = vaultExists();
+  const password = vaultInitialized ? await resolvePassword() : null;
   return {
     version: VERSION,
     vaultInitialized,
-    passwordAvailable: vaultInitialized && (await resolvePassword()) !== null,
+    passwordAvailable: password !== null && await verifyVaultPassword(password),
     keychainBackend: detectBackend(),
   };
 }

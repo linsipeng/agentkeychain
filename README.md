@@ -252,6 +252,11 @@ The server exposes 5 tools:
 | `akc_delete` | Remove a secret (scope-checked) |
 | `akc_audit` | Read the audit log (no secret material) |
 
+**MCP trust boundary:** `akc_get` returns plaintext to the MCP client so the
+calling agent can use it. Register only trusted local clients. Their model
+context, transcripts, or tool logs may retain the result unless retention is
+disabled; AgentKeychain cannot erase copies held by the client.
+
 ### Security model
 
 - **Argon2id** (memory=64 MB, iterations=3) derives a KEK from master password
@@ -268,7 +273,7 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full threat model and competito
 
 ```bash
 bun install         # install deps
-bun test            # run all tests (41 tests)
+bun test            # run all tests (65 tests)
 bun run lint        # eslint
 bun run build       # single-binary compile to bin/agentkeychain-bin
 bun run typecheck   # tsc --noEmit
@@ -284,4 +289,5 @@ MIT — see [LICENSE](./LICENSE).
 
 ## Status
 
-v0.1.0 — public alpha. Single binary works end-to-end. Breaking changes possible before v1.0.
+v0.4.0 — AI-native onboarding, public Hermes skill, safe readiness probe, and
+OS-keychain-backed MCP unlock. Breaking changes remain possible before v1.0.

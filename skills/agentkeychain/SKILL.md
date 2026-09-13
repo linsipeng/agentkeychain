@@ -36,7 +36,7 @@ Do not wait for the user to say “AgentKeychain”. Credential involvement is t
 3. If a suitable entry exists, use AgentKeychain instead of asking the user again.
 4. If no suitable entry exists, ask once through the safest available local input boundary, then store it immediately with an explicit, narrow scope.
 5. Prefer the `agentkeychain` MCP tools when configured. Otherwise use the verified CLI.
-6. Never print, quote, summarize, persist, or return a secret value in an assistant message, report, source file, README, issue, commit, or log.
+6. Never print, quote, summarize, persist, or return a secret value in an assistant message, report, source file, README, issue, commit, or log. `akc_get` necessarily returns plaintext to the MCP client for immediate use; treat that client as trusted and configure it not to retain tool results.
 7. Never place a long-lived secret in a command shown to the user or in a committed `.env` file.
 8. Never expose a master password or raw KEK. The OS keychain is the supported unlock path.
 9. Treat delete, overwrite, rotation, migration, restore, scope expansion, and delegation-token issuance as approval-required actions.
@@ -69,7 +69,7 @@ agentkeychain list --json
 
 ## Retrieve for Work
 
-Prefer the configured MCP tool `akc_get`. If CLI retrieval is necessary, consume the result only inside the immediate operation and do not print it or interpolate it into a user-visible command. Never include the value in the final response; report only whether the operation succeeded.
+Prefer the configured MCP tool `akc_get`. Its plaintext result enters the MCP client/model context and may be retained by client transcripts or logs, so use it only with a trusted local client whose retention is appropriately configured. If CLI retrieval is necessary, consume the result only inside the immediate operation and do not print it or interpolate it into a user-visible command. Never include the value in the final response; report only whether the operation succeeded.
 
 ## Missing or Locked Vault
 

@@ -29,6 +29,7 @@ import { loadIdentityByName, type Identity } from "../identity.js";
 import { openDb } from "../vault.js";
 import { resolvePassword } from "../util/keychain.js";
 import { deriveKEK, hashKEK } from "../crypto/argon2.js";
+import { VERSION } from "../index.js";
 
 const IDENTITY_NAME = "default";
 
@@ -47,16 +48,25 @@ export async function resolveMcpKek(db: Database): Promise<Uint8Array> {
   if (!meta) throw new Error("vault not initialized — run `agentkeychain init` first");
 
   const kek = await deriveKEK(password, meta.argon2_salt);
-  const actualHash = await hashKEK(kek);
-  const expected = Buffer.from(meta.kek_hash);
-  const actual = Buffer.from(actualHash);
-  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+  let actualHash: Uint8Array | null = null;
+  let expected: Buffer | null = null;
+  let actual: Buffer | null = null;
+  try {
+    actualHash = await hashKEK(kek);
+    expected = Buffer.from(meta.kek_hash);
+    actual = Buffer.from(actualHash);
+    if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
+      throw new Error("vault unlock failed — OS keychain password does not match this vault");
+    }
+    return kek;
+  } catch (err) {
     kek.fill(0);
-    actualHash.fill(0);
-    throw new Error("vault unlock failed — OS keychain password does not match this vault");
+    throw err;
+  } finally {
+    actualHash?.fill(0);
+    expected?.fill(0);
+    actual?.fill(0);
   }
-  actualHash.fill(0);
-  return kek;
 }
 
 function toolErr(msg: string): { isError: true; content: [{ type: "text"; text: string }] } {
@@ -72,6 +82,21 @@ function toolOk(text: string): { content: [{ type: "text"; text: string }] } {
   };
 }
 
+/** Run one MCP operation with a database handle that always closes. */
+export async function withVaultDatabase<T>(
+  // Function-type parameters are declarations; ESLint still treats the name as unused.
+  // eslint-disable-next-line no-unused-vars
+  operation: (db: Database) => Promise<T>,
+  open: () => Database = openDb
+): Promise<T> {
+  const db = open();
+  try {
+    return await operation(db);
+  } finally {
+    db.close();
+  }
+}
+
 function _resolveContext(): void {
   // Reserved for future context resolution logic (currently inlined in handlers).
 }
@@ -79,7 +104,7 @@ void _resolveContext;
 
 export function createServer(): Server {
   const server = new Server(
-    { name: "agentkeychain", version: "0.1.0" },
+    { name: "agentkeychain", version: VERSION },
     { capabilities: { tools: {} } }
   );
 
@@ -149,14 +174,13 @@ export function createServer(): Server {
     ],
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request) => withVaultDatabase(async (db) => {
     const { name, arguments: args } = request.params;
     const a = (args ?? {}) as Record<string, unknown>;
 
     // Resolve the password through the standard chain: AKC_PASSWORD for CI,
     // otherwise the OS keychain populated by init/setup. Raw KEKs are never
     // accepted through environment variables.
-    const db = openDb();
     const identity = loadIdentityByName(db, IDENTITY_NAME);
     if (!identity) return toolErr("identity 'default' not found — run `agentkeychain init` first");
     const agent: Identity = identity;
@@ -242,7 +266,7 @@ export function createServer(): Server {
       // Do NOT echo back secret material even on error
       return toolErr(`error: ${msg.replace(/sk-[A-Za-z0-9_-]+/g, "[REDACTED]")}`);
     }
-  });
+  }));
 
   return server;
 }

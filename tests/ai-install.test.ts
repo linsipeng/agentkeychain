@@ -24,13 +24,16 @@ describe("AI-native installation contract", () => {
     expect(skill).toContain("Never print");
   });
 
-  test("agent protocol installs CLI, skill, and MCP and verifies all three", () => {
+  test("agent protocol pins release artifacts, preserves collisions, registers MCP, and documents trust", () => {
     const protocol = read("AGENTS.md");
-    expect(protocol).toContain("install.sh");
-    expect(protocol).toContain("hermes skills install");
+    expect(protocol).toContain("v0.4.0/install.sh");
+    expect(protocol).toContain("--version v0.4.0");
+    expect(protocol).toContain("v0.4.0/skills/agentkeychain/SKILL.md");
+    expect(protocol).toContain("hermes skills install --yes");
     expect(protocol).toContain("printf 'y\\n' | hermes mcp add");
     expect(protocol).toContain("hermes mcp test");
     expect(protocol).toMatch(/do not overwrite/i);
+    expect(protocol).toMatch(/trusted\s+local clients/i);
   });
 
   test("English and Chinese AI installation guides are both present", () => {

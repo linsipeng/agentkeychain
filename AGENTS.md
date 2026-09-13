@@ -14,7 +14,9 @@ Own the full outcome. Do not hand the user a checklist of shell commands.
 - An existing vault is preserved exactly as-is. Do not overwrite, import into, migrate, or reset it.
 - A new vault is initialized only after the user enters a master password at a local, private input boundary.
 - CLI, skill, MCP, and metadata-only vault access are verified.
-- No secret value, token, password, private key, raw credential list, vault content, or raw KEK is printed or persisted.
+- Installation and verification never retrieve, print, or persist secret values. Normal
+  `akc_get` use returns plaintext to the configured MCP client, so register only trusted
+  local clients and prevent their transcripts/logs from retaining tool results.
 
 ### Installation protocol
 
@@ -26,22 +28,22 @@ Own the full outcome. Do not hand the user a checklist of shell commands.
    command -v hermes || true
    ```
 
-2. If a working CLI is already present, preserve it. Do not overwrite or upgrade
-   an existing binary unless the user explicitly asked for an upgrade. If the
-   CLI is absent, install it with the repository installer:
+2. If a working CLI with `status --json` is already present, preserve it. Do not
+   overwrite or upgrade an existing binary unless the user explicitly asked for
+   an upgrade. If the CLI is absent, install the pinned release:
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/main/install.sh | sh
+   curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/v0.4.0/install.sh | sh -s -- --version v0.4.0
    ```
 
    Resolve the installed binary by absolute path. Do not modify global PATH without need.
 
 3. If Hermes is present, inspect `hermes skills list`. Preserve any existing
    `agentkeychain` skill; do not force-overwrite it. Only when absent, install
-   the repository skill non-interactively:
+   the pinned release skill non-interactively:
 
    ```bash
-   hermes skills install --yes https://raw.githubusercontent.com/linsipeng/agentkeychain/main/skills/agentkeychain/SKILL.md
+   hermes skills install --yes https://raw.githubusercontent.com/linsipeng/agentkeychain/v0.4.0/skills/agentkeychain/SKILL.md
    ```
 
 4. If Hermes supports MCP, inspect `hermes mcp list`. If `agentkeychain`
@@ -60,7 +62,7 @@ Own the full outcome. Do not hand the user a checklist of shell commands.
 
 5. Preserve vault state:
 
-   - Run `agentkeychain status --json` first; unlike `list`, this probe never creates or opens a vault.
+   - Run `agentkeychain status --json` first; unlike `list`, this probe never creates or mutates a vault. It verifies only KEK metadata in read-only mode.
    - If `vaultInitialized` is true, the vault already exists. Do not run `init`, import, overwrite, migrate, or reset.
    - If `vaultInitialized` is true but `passwordAvailable` is false, run `agentkeychain setup` and let the user enter the existing master password locally.
    - If `vaultInitialized` is false, run `agentkeychain init` and stop at the private password-input boundary. Never choose, record, or display the master password for the user.
@@ -86,6 +88,7 @@ Stop and ask the user only when:
 
 - local master-password input is required;
 - initialization would overwrite or conflict with an existing vault;
+- an existing CLI lacks `status --json` or conflicts with the expected install path and upgrading was not explicitly requested;
 - migration, restore, credential rotation, deletion, scope expansion, or delegation-token issuance is required;
 - the platform has no supported OS keychain and a plaintext workaround would be necessary.
 

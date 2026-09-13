@@ -250,6 +250,10 @@ bundle 完全加密（与保险箱相同的 Argon2id + XChaCha20）——没有�
 | `akc_delete` | 删除凭证（作用域检查） |
 | `akc_audit` | 读取审计日志（不含凭证信息） |
 
+**MCP 信任边界：**`akc_get` 会把明文返回给 MCP 客户端，调用它的 Agent 才能实际使用。
+只应注册可信的本地客户端；如果客户端没有关闭留存，其模型上下文、会话记录或工具日志
+可能保留该结果，AgentKeychain 无法清除客户端持有的副本。
+
 ### 安全模型
 
 - **Argon2id**（内存=64 MB，迭代=3）从 master 密码导出 KEK
@@ -266,7 +270,7 @@ bundle 完全加密（与保险箱相同的 Argon2id + XChaCha20）——没有�
 
 ```bash
 bun install         # 安装依赖
-bun test            # 运行所有测试（41 个）
+bun test            # 运行所有测试（65 个）
 bun run lint        # eslint
 bun run build       # 编译为单文件二进制到 bin/agentkeychain-bin
 bun run typecheck   # tsc --noEmit
@@ -282,4 +286,5 @@ MIT——见 [LICENSE](./LICENSE)。
 
 ## 状态
 
-v0.1.0 —— 公开 alpha 版。单文件二进制端到端可用。v1.0 前可能会有破坏性变更。
+v0.4.0 —— 新增 AI 原生安装、公开 Hermes Skill、安全就绪探测和基于系统钥匙串的
+MCP 解锁。v1.0 前仍可能有破坏性变更。

@@ -31,14 +31,37 @@ beforeEach(async () => {
 
 
 
-test("server creates with all 5 tools", async () => {
+test("server creates with all 5 tools and reports the package version", async () => {
   const { createServer } = await import("../src/mcp/server.ts");
+  const { VERSION } = await import("../src/index.ts");
   const server = createServer();
   expect(server).toBeDefined();
   const handlers = (server as unknown as { _requestHandlers: Map<string, Handler> })._requestHandlers;
+  const info = (server as unknown as { _serverInfo: { version: string } })._serverInfo;
+  expect(info.version).toBe(VERSION);
   // tools/list should be registered (set via setRequestHandler in createServer)
   expect(handlers.has("tools/list")).toBe(true);
   expect(handlers.has("tools/call")).toBe(true);
+});
+
+test("withVaultDatabase closes the database on success and failure", async () => {
+  const { withVaultDatabase } = await import("../src/mcp/server.ts");
+  let successClosed = false;
+  const successDb = { close: () => { successClosed = true; } };
+  const result = await withVaultDatabase(
+    async () => "ok",
+    () => successDb as never
+  );
+  expect(result).toBe("ok");
+  expect(successClosed).toBe(true);
+
+  let failureClosed = false;
+  const failureDb = { close: () => { failureClosed = true; } };
+  await expect(withVaultDatabase(
+    async () => { throw new Error("expected-test-error"); },
+    () => failureDb as never
+  )).rejects.toThrow("expected-test-error");
+  expect(failureClosed).toBe(true);
 });
 
 test("MCP resolves its KEK from the normal password chain", async () => {

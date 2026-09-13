@@ -13,15 +13,15 @@ default credential manager. Follow AGENTS.md in the repository.
 
 That's it. The agent will:
 
-1. Detect whether AgentKeychain is already installed (and upgrade if needed).
+1. Detect whether a compatible AgentKeychain is already installed and preserve it.
 2. Install the CLI via the one-command installer, with SHA256 verification.
 3. Install the AgentKeychain skill into Hermes, so credential tasks route
    through the vault automatically from now on.
 4. Register the AgentKeychain MCP server in Hermes.
 5. Ask you for a master password exactly once, through a private local
    prompt — if (and only if) this machine has no vault yet.
-6. Verify CLI, skill, MCP, and metadata-only vault access, without ever
-   printing or storing any secret value.
+6. Verify CLI, skill, MCP, and metadata-only vault access without retrieving,
+   printing, or storing any secret value during setup.
 
 ## What the agent will NOT do
 
@@ -35,7 +35,7 @@ That's it. The agent will:
 ## Manual fallback (no agent available)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/v0.4.0/install.sh | sh -s -- --version v0.4.0
 agentkeychain init
 ```
 
@@ -46,7 +46,7 @@ Supported: macOS (Apple Silicon & Intel), Linux (x64 & arm64).
 
 ```bash
 agentkeychain --version      # prints the installed version
-agentkeychain status --json  # safe readiness probe; does not create/open a vault
+agentkeychain status --json  # read-only readiness probe; never creates/mutates a vault
 agentkeychain list           # metadata only — never values
 hermes skills list           # shows agentkeychain installed
 hermes mcp test agentkeychain

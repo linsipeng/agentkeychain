@@ -12,12 +12,12 @@
 
 就这样。Agent 会自己：
 
-1. 检测是否已安装 AgentKeychain（已装则升级）。
+1. 检测是否已安装兼容版本的 AgentKeychain，已兼容则原样保留。
 2. 用一键安装脚本装 CLI，带 SHA256 校验。
 3. 把 AgentKeychain Skill 装进 Hermes——以后涉及凭证的任务会自动走保险箱。
 4. 在 Hermes 注册 AgentKeychain MCP server。
 5. 只在（且仅在）本机还没有保险箱时，通过本地私密输入问你要一次 master 密码。
-6. 验证 CLI、Skill、MCP 和保险箱元数据访问——全程不打印、不存储任何 secret 值。
+6. 验证 CLI、Skill、MCP 和保险箱元数据访问——安装验证期间不读取、不打印、不存储任何 secret 值。
 
 ## Agent 不会做的事
 
@@ -29,7 +29,7 @@
 ## 手动安装兜底（没有 Agent 可用的时候）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/v0.4.0/install.sh | sh -s -- --version v0.4.0
 agentkeychain init
 ```
 
@@ -40,7 +40,7 @@ agentkeychain init
 
 ```bash
 agentkeychain --version      # 打印版本
-agentkeychain status --json  # 安全检查，不创建或打开保险箱
+agentkeychain status --json  # 只读检查，不创建或修改保险箱
 agentkeychain list           # 只显示元数据，绝不显示值
 hermes skills list           # 能看到 agentkeychain
 hermes mcp test agentkeychain
