@@ -26,16 +26,17 @@ not need to copy a list of commands. Existing vaults are never overwritten.
 
 ## For Humans (the only section you need)
 
-**You only need 4 commands.** Everything else is for agents and developers.
+**You do not need to remember commands or invent permission scopes.** Tell your
+local AI agent what credential you want to store and what it is for:
 
-```bash
-agentkeychain init      # One-time: set a master password (≥8 chars, remember it!)
-agentkeychain store     # Add a new secret — it asks you: name? value? scope?
-agentkeychain get NAME  # Retrieve a secret
-agentkeychain list      # See all stored secrets (metadata only, NEVER values)
+```text
+Store my OpenAI credential for model calls.
 ```
 
-**⬆️ That's it. That's all you need to remember. Everything below is for AI agents, developers, and power users.**
+AgentKeychain opens a one-time form in your local browser. Paste the credential
+there—not into chat. The form shows a plain-language permission such as “Only
+allow OpenAI model calls”; AgentKeychain infers the underlying least-privilege
+scope automatically.
 
 ### Real-world usage
 
@@ -49,12 +50,8 @@ Master password (min 8 chars): ********
 #     👆 After this, agentkeychain remembers your password in macOS Keychain.
 #     You will NEVER be asked to type it again. Your AI agent handles it.
 
-# Step 2: Store your first secret
-$ agentkeychain store
-Name: openai
-Value: ***[paste your key]*     (hidden while typing)
-Scope: openai:chat
-✓ encrypted and stored: openai
+# Step 2: Ask your agent to store a credential.
+# A one-time local form opens; the value and raw scope never enter chat.
 
 # Step 3: Retrieve it when you need it (password auto-resolved from Keychain)
 $ agentkeychain get openai
@@ -76,7 +73,7 @@ $ agentkeychain delete test-key --yes
 
 | You say | Agent does (silently) |
 |---|---|
-| "存一下这个 OpenAI key：sk-xxxxx" | `agentkeychain store openai-key --value sk-xxxxx` |
+| "Store my OpenAI credential for model calls" | Opens a one-time local form and infers the minimum scope |
 | "帮我查一下 Cloudflare 的 token" | `agentkeychain get cloudflare-token` |
 | "用 openai 帮我写段代码" | `agentkeychain get openai-key` → call API → do the work |
 | "告诉我存了哪些 key" | `agentkeychain list` |
@@ -159,8 +156,8 @@ If you find yourself about to paste a key anywhere, stop and say: **"存一下�
 
 | | |
 |---|---|
-| **CLI** | `init / store / get / list / delete / audit / export / import / sync / issue-token / serve` |
-| **MCP Server** | 5 tools (`akc_store`, `akc_get`, `akc_list`, `akc_delete`, `akc_audit`) over stdio |
+| **CLI** | `init / capture / store / get / list / delete / audit / export / import / sync / issue-token / serve` |
+| **MCP Server** | 6 tools, including safe human entry via `akc_request_store`, over stdio |
 | **Cross-agent delegate** | Ed25519-signed time-limited scope-bounded tokens |
 | **Audit chain** | Tamper-evident Ed25519 signature chain over every operation |
 | **Zero-knowledge sync** | No password, KEK, or plaintext secret reaches the cloud; optional OS-keychain storage unlocks local agent use |
@@ -242,11 +239,12 @@ Add to any MCP-compatible client (Claude Desktop, Hermes, Codex, IDE plugins):
 }
 ```
 
-The server exposes 5 tools:
+The server exposes 6 tools:
 
 | Tool | Description |
 |---|---|
-| `akc_store` | Encrypt + persist a secret (returns id, never the value) |
+| `akc_request_store` | Default human path: open a one-time local form and infer scope; no value enters MCP arguments |
+| `akc_store` | Advanced compatibility path: encrypt + persist a value supplied by a trusted MCP client |
 | `akc_get` | Decrypt + return a secret (scope-checked) |
 | `akc_list` | List secret names (no values) |
 | `akc_delete` | Remove a secret (scope-checked) |
@@ -262,7 +260,7 @@ disabled; AgentKeychain cannot erase copies held by the client.
 - **Argon2id** (memory=64 MB, iterations=3) derives a KEK from master password
 - **XChaCha20-Poly1305** AEAD encrypts each secret independently
 - **Ed25519** signs audit entries + delegate tokens (offline-verifiable)
-- **Client-side only** — no server, no network call; vault file is fully encrypted
+- **Client-side only** — no hosted service or external credential upload; secure capture uses a one-time 127.0.0.1 loopback form
 - **Zero-knowledge** — master password is never written to disk
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full threat model and competitor comparison.
@@ -273,7 +271,7 @@ See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full threat model and competito
 
 ```bash
 bun install         # install deps
-bun test            # run all tests (65 tests)
+bun test            # run all tests
 bun run lint        # eslint
 bun run build       # single-binary compile to bin/agentkeychain-bin
 bun run typecheck   # tsc --noEmit
@@ -289,5 +287,5 @@ MIT — see [LICENSE](./LICENSE).
 
 ## Status
 
-v0.4.0 — AI-native onboarding, public Hermes skill, safe readiness probe, and
-OS-keychain-backed MCP unlock. Breaking changes remain possible before v1.0.
+v0.5.0 — local secure credential capture, natural-language permission display,
+and automatic least-privilege scope inference. Breaking changes remain possible before v1.0.

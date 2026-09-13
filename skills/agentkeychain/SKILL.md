@@ -1,7 +1,7 @@
 ---
 name: agentkeychain
 description: Use when any task involves an API key, token, password, credential, cookie, private key, connection string, OAuth secret, or delegated access. Route credential storage and retrieval through AgentKeychain instead of chat, source files, logs, or repeated user prompts.
-version: 1.0.0
+version: 1.1.0
 author: AgentKeychain contributors
 license: MIT
 platforms: [linux, macos]
@@ -34,7 +34,7 @@ Do not wait for the user to say “AgentKeychain”. Credential involvement is t
 1. Verify the CLI exists with `command -v agentkeychain`, `agentkeychain --version`, and `agentkeychain status --json`.
 2. Inspect credential metadata only after readiness is confirmed, using `agentkeychain list --json`; this must never reveal values.
 3. If a suitable entry exists, use AgentKeychain instead of asking the user again.
-4. If no suitable entry exists, ask once through the safest available local input boundary, then store it immediately with an explicit, narrow scope.
+4. If no suitable entry exists, call `akc_request_store` with a descriptive name and natural-language purpose. It opens a one-time local form, keeps the value out of chat/MCP arguments, and infers the narrow scope automatically.
 5. Prefer the `agentkeychain` MCP tools when configured. Otherwise use the verified CLI.
 6. Never print, quote, summarize, persist, or return a secret value in an assistant message, report, source file, README, issue, commit, or log. `akc_get` necessarily returns plaintext to the MCP client for immediate use; treat that client as trusted and configure it not to retain tool results.
 7. Never place a long-lived secret in a command shown to the user or in a committed `.env` file.
@@ -55,13 +55,20 @@ Use names and scope metadata to select an entry. Never probe values merely to �
 
 ## Store Once
 
-For human-interactive use, prefer the hidden prompt:
+For human-interactive use, prefer the MCP tool `akc_request_store(name, purpose)`.
+Do not ask the user to paste a credential into chat or invent a raw scope string.
+AgentKeychain opens the local secure-entry form and shows the inferred permission
+in natural language.
+
+If MCP is unavailable, have the agent launch the local form through the CLI:
 
 ```bash
-agentkeychain store <descriptive-name> --scopes "service:minimum-action"
+agentkeychain capture <descriptive-name> --purpose "natural-language intended use"
 ```
 
-For MCP use, call `akc_store` and provide explicit scope metadata. Do not echo the value after storage. Verify by metadata only:
+`akc_store` remains an advanced compatibility tool for trusted programmatic
+clients that already hold a value. Do not use it for ordinary human entry.
+Verify storage by metadata only:
 
 ```bash
 agentkeychain list --json

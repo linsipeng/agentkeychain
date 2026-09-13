@@ -25,16 +25,16 @@ AI 会自己完成 CLI 安装、AgentKeychain Skill 安装、Hermes MCP 注册�
 
 ## 给人类看的（你只需要这一节）
 
-**你只需要记 4 个命令。** 下面都是给 AI Agent 和开发者看的。
+**你不需要记命令，也不需要编写权限 scope。** 只要告诉本机 AI Agent
+你要存什么凭证、准备拿它做什么：
 
-```bash
-agentkeychain init      # 一次性：设一个 master 密码（≥8 位，记好！）
-agentkeychain store     # 存一个 key——跟着提示输入：名字？值？作用域？
-agentkeychain get NAME  # 取出来
-agentkeychain list      # 看存了哪些（只显示名字，绝不显示值）
+```text
+帮我保存 OpenAI 凭证，用于模型调用。
 ```
 
-**⬆️ 就这些。剩下的都是给 AI Agent 和开发者准备的。**
+AgentKeychain 会在本机浏览器打开一次性安全表单。把凭证粘贴到表单，
+不要贴进聊天。页面只显示“仅允许用于 OpenAI 模型调用”这类自然语言权限；
+底层最小权限由系统自动推断。
 
 ### 真实使用场景
 
@@ -48,12 +48,8 @@ Master password (min 8 chars): ********
 #     👆 之后 agentkeychain 就把密码存到 macOS Keychain 了。
 #     **你再也不需要输第二遍。你的 AI Agent 会帮你处理。**
 
-# 第 2 步：存入第一个 key
-$ agentkeychain store
-Name: openai
-Value: ***[粘贴你的 key]*     （输入时不可见）
-Scope: openai:chat
-✓ encrypted and stored: openai
+# 第 2 步：告诉 Agent 要保存什么凭证、用于什么。
+# 系统打开一次性本地表单；凭证值和原始 scope 都不会进入聊天。
 
 # 第 3 步：需要时取出来（密码从 Keychain 自动取，不弹窗）
 $ agentkeychain get openai
@@ -75,7 +71,7 @@ $ agentkeychain delete test-key --yes
 
 | 你说 | Agent 静默执行 |
 |---|---|
-| "存一下这个 OpenAI key：sk-xxxxx" | `agentkeychain store openai-key --value sk-xxxxx` |
+| “帮我保存 OpenAI 凭证，用于模型调用” | 打开一次性本地表单，并自动推断最小权限 |
 | "帮我查一下 Cloudflare 的 token" | `agentkeychain get cloudflare-token` |
 | "用 openai 帮我写段代码" | `agentkeychain get openai-key` → 调 API → 干活 |
 | "告诉我存了哪些 key" | `agentkeychain list` |
@@ -157,8 +153,8 @@ agentkeychain list   # 检查一下，都在
 
 | | |
 |---|---|
-| **CLI** | `init / store / get / list / delete / audit / export / import / sync / issue-token / serve` |
-| **MCP Server** | 5 个工具（`akc_store`, `akc_get`, `akc_list`, `akc_delete`, `akc_audit`），stdio 传输 |
+| **CLI** | `init / capture / store / get / list / delete / audit / export / import / sync / issue-token / serve` |
+| **MCP Server** | 6 个工具，包含安全人工录入工具 `akc_request_store`，stdio 传输 |
 | **跨 Agent 委托** | Ed25519 签名的限时、限定作用域的代理令牌 |
 | **审计链** | 每次操作都有防篡改的 Ed25519 签名链 |
 | **零知识同步** | 密码、KEK 和明文凭证绝不上云；可由系统钥匙串保存密码以供本机 Agent 自动解锁 |
@@ -240,11 +236,12 @@ bundle 完全加密（与保险箱相同的 Argon2id + XChaCha20）——没有�
 }
 ```
 
-服务器暴露 5 个工具：
+服务器暴露 6 个工具：
 
 | 工具 | 说明 |
 |---|---|
-| `akc_store` | 加密并持久化凭证（返回 id，绝不返回值） |
+| `akc_request_store` | 默认人工录入路径：打开一次性本地表单并自动推断权限；凭证值不进入 MCP 参数 |
+| `akc_store` | 高级兼容路径：加密存储可信 MCP 客户端提供的值 |
 | `akc_get` | 解密并返回凭证（作用域检查） |
 | `akc_list` | 列出凭证名（不返回值） |
 | `akc_delete` | 删除凭证（作用域检查） |
@@ -259,7 +256,7 @@ bundle 完全加密（与保险箱相同的 Argon2id + XChaCha20）——没有�
 - **Argon2id**（内存=64 MB，迭代=3）从 master 密码导出 KEK
 - **XChaCha20-Poly1305** AEAD 独立加密每个凭证
 - **Ed25519** 为审计条目和委托令牌签名（离线可验证）
-- **纯客户端**——无服务器，无网络调用；保险箱文件完全加密
+- **纯客户端**——无托管服务、不向外部上传凭证；安全录入仅使用一次性 127.0.0.1 本地回环表单
 - **零知识**——master 密码永不写入磁盘
 
 详细威胁模型和竞品对比见 [ARCHITECTURE.md](./ARCHITECTURE.md)。
@@ -270,7 +267,7 @@ bundle 完全加密（与保险箱相同的 Argon2id + XChaCha20）——没有�
 
 ```bash
 bun install         # 安装依赖
-bun test            # 运行所有测试（65 个）
+bun test            # 运行全部测试
 bun run lint        # eslint
 bun run build       # 编译为单文件二进制到 bin/agentkeychain-bin
 bun run typecheck   # tsc --noEmit
@@ -286,5 +283,5 @@ MIT——见 [LICENSE](./LICENSE)。
 
 ## 状态
 
-v0.4.0 —— 新增 AI 原生安装、公开 Hermes Skill、安全就绪探测和基于系统钥匙串的
-MCP 解锁。v1.0 前仍可能有破坏性变更。
+v0.5.0 —— 新增本地安全凭证录入、自然语言权限展示和自动最小权限推断。
+v1.0 前仍可能有破坏性变更。
