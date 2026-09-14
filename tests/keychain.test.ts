@@ -44,7 +44,8 @@ case "$1" in
     if [ -n "$AKC_STUB_FAIL" ]; then echo "could not be found" >&2; exit 44; fi
     if [ -n "$AKC_STUB_OUT" ]; then echo "$AKC_STUB_OUT"; exit 0; fi
     echo "could not be found" >&2; exit 44 ;;
-  store|clear) cat >/dev/null; exit 0 ;;
+  store) cat >/dev/null; exit 0 ;;
+  clear) exit 0 ;;
 esac
 exit 1
 `;
