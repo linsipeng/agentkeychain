@@ -20,7 +20,8 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { homedir, platform } from "node:os";
 import { createHash } from "node:crypto";
-import { join, resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 
 const execFileAsync = promisify(execFile);
 
@@ -82,10 +83,22 @@ function backendCommand(backend: Backend): string | null {
     : backend === "linux-libsecret"
       ? process.env["AKC_KEYCHAIN_SECRET_TOOL_BIN"]
       : undefined;
+  if (process.env["AKC_KEYCHAIN_TEST_MODE"] === "1") {
+    // bunfig.toml enables this guard for every direct `bun test` invocation.
+    // Inherited command variables are untrusted: accept a stub only when both
+    // it and its declared root resolve to the same isolated directory tree.
+    const stubRoot = process.env["AKC_KEYCHAIN_TEST_STUB_ROOT"];
+    if (!injected || !stubRoot) return null;
+    try {
+      const root = realpathSync(stubRoot);
+      const command = realpathSync(injected);
+      if (command !== root && !command.startsWith(`${root}${sep}`)) return null;
+      return command;
+    } catch {
+      return null;
+    }
+  }
   if (injected) return injected;
-  // bunfig.toml enables this guard for every direct `bun test` invocation.
-  // Tests must inject a stub by absolute path; PATH discovery is forbidden.
-  if (process.env["AKC_KEYCHAIN_TEST_MODE"] === "1") return null;
   if (backend === "macos-keychain") return "security";
   if (backend === "linux-libsecret") return "secret-tool";
   return null;
@@ -104,7 +117,7 @@ export function detectBackend(): Backend {
  * Returns null if the entry doesn't exist, the backend isn't available,
  * or the user has not yet run `agentkeychain setup`.
  */
-export async function keychainGet(): Promise<string | null> {
+export async function keychainGet(service = keychainService()): Promise<string | null> {
   const backend = detectBackend();
   const command = backendCommand(backend);
   if (!command) return null;
@@ -115,7 +128,7 @@ export async function keychainGet(): Promise<string | null> {
         [
           "find-generic-password",
           "-a", KEYCHAIN_ACCOUNT,
-          "-s", keychainService(),
+          "-s", service,
           "-w", // print password only
         ],
         { encoding: "utf8", timeout: 5_000 }
@@ -126,7 +139,7 @@ export async function keychainGet(): Promise<string | null> {
     if (backend === "linux-libsecret") {
       const { stdout } = await execFileAsync(
         command,
-        ["lookup", "service", keychainService(), "account", KEYCHAIN_ACCOUNT],
+        ["lookup", "service", service, "account", KEYCHAIN_ACCOUNT],
         { encoding: "utf8", timeout: 5_000 }
       );
       const pw = stdout.trim();

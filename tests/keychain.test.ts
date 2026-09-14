@@ -23,6 +23,7 @@ describe("keychain", () => {
       AKC_KEYCHAIN_TEST_MODE: process.env["AKC_KEYCHAIN_TEST_MODE"],
       AKC_KEYCHAIN_SECURITY_BIN: process.env["AKC_KEYCHAIN_SECURITY_BIN"],
       AKC_KEYCHAIN_SECRET_TOOL_BIN: process.env["AKC_KEYCHAIN_SECRET_TOOL_BIN"],
+      AKC_KEYCHAIN_TEST_STUB_ROOT: process.env["AKC_KEYCHAIN_TEST_STUB_ROOT"],
       AKC_STUB_OUT: process.env["AKC_STUB_OUT"],
       AKC_STUB_FAIL: process.env["AKC_STUB_FAIL"],
     };
@@ -55,6 +56,7 @@ exit 1
     process.env["AKC_KEYCHAIN_TEST_MODE"] = "1";
     process.env["AKC_KEYCHAIN_SECURITY_BIN"] = join(fakeBinDir, "security");
     process.env["AKC_KEYCHAIN_SECRET_TOOL_BIN"] = join(fakeBinDir, "secret-tool");
+    process.env["AKC_KEYCHAIN_TEST_STUB_ROOT"] = fakeBinDir;
     delete process.env["AKC_PASSWORD"];
     delete process.env["AKC_STUB_OUT"];
     delete process.env["AKC_STUB_FAIL"];
@@ -146,5 +148,23 @@ exit 1
     expect(customA1).toBe(customA2);
     expect(customA1).not.toBe(defaultService);
     expect(customA1).not.toBe(customB);
+  });
+
+  test("test mode rejects an injected keychain binary outside the stub root", async () => {
+    const outside = mkdtempSync(join(tmpdir(), "akc-untrusted-bin-"));
+    const marker = join(outside, "UNTRUSTED_KEYCHAIN_WAS_CALLED");
+    const binaryName = process.platform === "linux" ? "secret-tool" : "security";
+    const binary = join(outside, binaryName);
+    writeFileSync(binary, `#!/bin/sh\ntouch '${marker}'\nexit 0\n`, { mode: 0o755 });
+    if (process.platform === "linux") {
+      process.env["AKC_KEYCHAIN_SECRET_TOOL_BIN"] = binary;
+    } else {
+      process.env["AKC_KEYCHAIN_SECURITY_BIN"] = binary;
+    }
+
+    const { keychainSet } = await import("../src/util/keychain.ts");
+    expect(await keychainSet("must-not-reach-untrusted-binary")).toBe(false);
+    expect(existsSync(marker)).toBe(false);
+    rmSync(outside, { recursive: true, force: true });
   });
 });

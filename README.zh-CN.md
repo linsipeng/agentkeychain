@@ -185,6 +185,12 @@ agentkeychain init
 
 **这是你唯一一次输入密码。** 之后所有的 `store / get / list / delete / audit` 都会自动从 macOS Keychain 读取密码。
 
+每个自定义 `AGENTKEYCHAIN_HOME` 都绑定独立的、按路径隔离的系统钥匙串
+条目，因此临时 vault 与生产 vault 不能再互相覆盖主密码。默认
+`~/.agentkeychain` 继续兼容原有条目。旧版自定义 vault 升级后运行
+`agentkeychain setup` 时，只有旧条目经验证确实能解锁当前 vault，才会
+自动复制到新的隔离条目。
+
 ### CLI 命令参考
 
 | 命令 | 说明 |

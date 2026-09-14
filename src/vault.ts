@@ -2,9 +2,9 @@
  * Vault file paths + open helper.
  */
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
 import { timingSafeEqual } from "node:crypto";
 import { migrate } from "./db/migrate.ts";
 import { deriveKEK, hashKEK } from "./crypto/argon2.ts";
@@ -13,7 +13,25 @@ export const VAULT_DIR_NAME = ".agentkeychain";
 export const DB_FILENAME = "vault.db";
 
 export function vaultDir(): string {
-  return process.env.AGENTKEYCHAIN_HOME ?? join(homedir(), VAULT_DIR_NAME);
+  const configured = process.env.AGENTKEYCHAIN_HOME;
+  if (process.env["AKC_KEYCHAIN_TEST_MODE"] === "1") {
+    if (!configured) {
+      throw new Error("test vault path required: AGENTKEYCHAIN_HOME is not set");
+    }
+    let testRoot: string;
+    let candidate: string;
+    try {
+      testRoot = realpathSync(tmpdir());
+      candidate = realpathSync(configured);
+    } catch {
+      throw new Error("test vault must already exist inside the system temporary directory");
+    }
+    if (candidate !== testRoot && !candidate.startsWith(`${testRoot}${sep}`)) {
+      throw new Error("test vault must be inside the system temporary directory");
+    }
+    return candidate;
+  }
+  return resolve(configured ?? join(homedir(), VAULT_DIR_NAME));
 }
 
 export function dbPath(): string {

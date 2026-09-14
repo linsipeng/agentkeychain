@@ -1,5 +1,5 @@
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { URLSearchParams } from "node:url";
@@ -8,18 +8,28 @@ import { URLSearchParams } from "node:url";
 // vault, so it must restore the ambient environment or later files (keychain)
 // see a stale env var and fail. Matches the explicit-env-state rule.
 let savedAkcPassword: string | undefined;
+let savedVaultHome: string | undefined;
+let testVaultHome: string;
+
+beforeAll(() => {
+  savedAkcPassword = process.env.AKC_PASSWORD;
+  savedVaultHome = process.env.AGENTKEYCHAIN_HOME;
+});
 
 beforeEach(async () => {
-  savedAkcPassword = process.env.AKC_PASSWORD;
-  process.env.AGENTKEYCHAIN_HOME = mkdtempSync(join(tmpdir(), "akc-capture-store-"));
+  testVaultHome = mkdtempSync(join(tmpdir(), "akc-capture-store-"));
+  process.env.AGENTKEYCHAIN_HOME = testVaultHome;
   process.env.AKC_PASSWORD = "test-password-123";
   const { init } = await import("./helpers.ts");
   await init("test-password-123");
 });
 
-afterAll(() => {
+afterEach(() => {
   if (savedAkcPassword === undefined) delete process.env.AKC_PASSWORD;
   else process.env.AKC_PASSWORD = savedAkcPassword;
+  if (savedVaultHome === undefined) delete process.env.AGENTKEYCHAIN_HOME;
+  else process.env.AGENTKEYCHAIN_HOME = savedVaultHome;
+  rmSync(testVaultHome, { recursive: true, force: true });
 });
 
 describe("secure capture store integration", () => {

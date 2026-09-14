@@ -1,13 +1,21 @@
-import { test, expect, beforeEach } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 let testDir: string;
+let savedVaultHome: string | undefined;
 
 beforeEach(() => {
+  savedVaultHome = process.env.AGENTKEYCHAIN_HOME;
   testDir = mkdtempSync(join(tmpdir(), "agentkeychain-store-test-"));
   process.env.AGENTKEYCHAIN_HOME = testDir;
+});
+
+afterEach(() => {
+  if (savedVaultHome === undefined) delete process.env.AGENTKEYCHAIN_HOME;
+  else process.env.AGENTKEYCHAIN_HOME = savedVaultHome;
+  rmSync(testDir, { recursive: true, force: true });
 });
 
 test("scope check: * wildcard allows everything", async () => {

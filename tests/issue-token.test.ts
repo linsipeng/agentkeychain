@@ -8,15 +8,17 @@
  *   - ttl parser handles all units (s/m/h/d) + rejects bad input
  *   - runIssueToken CLI exits 1 on missing --sub or bad --ttl
  */
-import { test, expect, beforeEach } from "bun:test";
+import { test, expect, beforeEach, afterEach } from "bun:test";
 import sodium from "libsodium-wrappers-sumo";
 import { unlinkSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 let tmpDir: string;
+let savedVaultHome: string | undefined;
 
 beforeEach(async () => {
+  savedVaultHome = process.env.AGENTKEYCHAIN_HOME;
   await sodium.ready;
   tmpDir = mkdtempSync(join(tmpdir(), "akc-issue-"));
   process.env["AGENTKEYCHAIN_HOME"] = tmpDir;
@@ -29,6 +31,12 @@ beforeEach(async () => {
   const { initVault } = await import("../src/cli/init.ts");
   const db = openDb();
   await initVault(db, "hunter2correct");
+});
+
+afterEach(() => {
+  if (savedVaultHome === undefined) delete process.env.AGENTKEYCHAIN_HOME;
+  else process.env.AGENTKEYCHAIN_HOME = savedVaultHome;
+  if (tmpDir && existsSync(tmpDir)) rmSync(tmpDir, { recursive: true });
 });
 
 test("issueDelegateToken: signs + verifies round-trip", async () => {
@@ -173,7 +181,3 @@ test("runIssueToken: --help prints usage and exits 0", async () => {
   expect(captured).toContain("--ttl");
 });
 
-test("cleanup", () => {
-  delete process.env["AGENTKEYCHAIN_HOME"];
-  if (tmpDir && existsSync(tmpDir)) rmSync(tmpDir, { recursive: true });
-});

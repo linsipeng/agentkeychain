@@ -188,6 +188,12 @@ agentkeychain init
 
 **That's the only time you type the password.** Every subsequent `store / get / list / delete / audit` reads the password automatically from macOS Keychain.
 
+Each custom `AGENTKEYCHAIN_HOME` is bound to its own path-scoped OS-keychain
+entry, so temporary and production vaults cannot overwrite each other's master
+password. The default `~/.agentkeychain` entry remains backward compatible.
+When upgrading an older custom vault, `agentkeychain setup` will copy the legacy
+entry only after verifying that it unlocks that exact vault.
+
 ### CLI reference
 
 | Command | Description |
