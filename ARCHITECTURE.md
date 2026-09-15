@@ -43,10 +43,11 @@
 ```
 agentkeychain/
 ├── src/
-│   ├── cli/                   # init / capture / store / get / list / delete / audit / serve / issue-token / setup
+│   ├── cli/                   # init / capture / verify-password / store / get / list / delete / audit / serve / issue-token / setup
+│   ├── password-check/        # one-time loopback read-only master-password check
 │   ├── crypto/                # argon2, xchacha, ed25519 wrappers (libsodium-sumo)
 │   ├── auth/                  # scope parsing, delegate token issue + verify
-│   ├── mcp/                   # MCP server (6 tools via stdio transport)
+│   ├── mcp/                   # MCP server (7 tools via stdio transport)
 │   ├── db/                    # SQLite schema + migration
 │   ├── util/                  # prompt, keychain (macOS/Linux), redact
 │   ├── audit.ts               # append-only tamper-evident audit chain

@@ -57,7 +57,7 @@ Own the full outcome. Do not hand the user a checklist of shell commands.
    ```
 
    `hermes mcp add` asks whether to enable discovered tools. The piped `y`
-   accepts all six in non-interactive agent runs; without it, EOF cancels the
+   accepts all seven in non-interactive agent runs; without it, EOF cancels the
    installation and nothing is saved.
 
 5. Preserve vault state:
