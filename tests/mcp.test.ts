@@ -6,17 +6,19 @@
  * does under the hood. We bypass capabilities assertion by setting the
  * internal capability flag before triggering.
  */
-import { test, expect, beforeEach } from "bun:test";
+import { test, expect, beforeEach, afterEach } from "bun:test";
 import sodium from "libsodium-wrappers-sumo";
 import { unlinkSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 let tmpDir: string;
+let savedVaultHome: string | undefined;
 // eslint-disable-next-line no-unused-vars
 type Handler = (...args: unknown[]) => Promise<unknown>;
 
 beforeEach(async () => {
+  savedVaultHome = process.env.AGENTKEYCHAIN_HOME;
   await sodium.ready;
   tmpDir = mkdtempSync(join(tmpdir(), "akc-mcp-"));
   process.env["AGENTKEYCHAIN_HOME"] = tmpDir;
@@ -28,6 +30,12 @@ beforeEach(async () => {
   const { initVault } = await import("../src/cli/init.ts");
   const db = openDb();
   await initVault(db, "hunter2correct");
+});
+
+afterEach(() => {
+  if (savedVaultHome === undefined) delete process.env.AGENTKEYCHAIN_HOME;
+  else process.env.AGENTKEYCHAIN_HOME = savedVaultHome;
+  if (tmpDir && existsSync(tmpDir)) rmSync(tmpDir, { recursive: true });
 });
 
 
@@ -249,9 +257,4 @@ test("akc_get with bad delegate token returns error", async () => {
   );
   expect(result).toBeNull();
   expect(handlers.has("tools/call")).toBe(true);
-});
-// Cleanup after suite
-test("cleanup", () => {
-  delete process.env["AGENTKEYCHAIN_HOME"];
-  if (tmpDir && existsSync(tmpDir)) rmSync(tmpDir, { recursive: true });
 });

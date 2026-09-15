@@ -13,7 +13,13 @@
  * If the vault is not initialized, prints an error and exits 1.
  */
 import { readPassword } from "../util/prompt.ts";
-import { keychainSet, keychainGet, detectBackend } from "../util/keychain.ts";
+import {
+  KEYCHAIN_SERVICE,
+  detectBackend,
+  keychainGet,
+  keychainService,
+  keychainSet,
+} from "../util/keychain.ts";
 import { vaultExists, verifyVaultPassword } from "../vault.ts";
 
 export async function runSetup(): Promise<number> {
@@ -42,6 +48,26 @@ export async function runSetup(): Promise<number> {
         "  You can `agentkeychain get <name>` directly without re-entering the password.\n"
     );
     return 0;
+  }
+
+  // Before v0.6, every custom vault shared the default fixed keychain service.
+  // Migrate only after proving that the legacy password unlocks THIS vault;
+  // an unrelated production/default-vault password is never copied blindly.
+  if (keychainService() !== KEYCHAIN_SERVICE) {
+    const legacy = await keychainGet(KEYCHAIN_SERVICE);
+    if (legacy && await verifyVaultPassword(legacy)) {
+      const migrated = await keychainSet(legacy);
+      if (!migrated) {
+        process.stderr.write(
+          "error: verified legacy password, but failed to migrate it to the vault-scoped keychain entry.\n"
+        );
+        return 1;
+      }
+      process.stdout.write(
+        "✓ verified legacy keychain password migrated to this vault's isolated keychain entry.\n"
+      );
+      return 0;
+    }
   }
   if (existing) {
     process.stdout.write(

@@ -18,7 +18,10 @@
  */
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { platform } from "node:os";
+import { homedir, platform } from "node:os";
+import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 
 const execFileAsync = promisify(execFile);
 
@@ -61,6 +64,46 @@ export const KEYCHAIN_LABEL = "AgentKeychain Vault Master Password";
 
 export type Backend = "macos-keychain" | "linux-libsecret" | "unsupported";
 
+/**
+ * Isolate OS-keychain entries per vault. The default vault keeps the original
+ * service name for backward compatibility; a custom AGENTKEYCHAIN_HOME gets a
+ * stable path-derived suffix so an E2E/temp vault cannot overwrite production.
+ */
+export function keychainService(): string {
+  const defaultHome = resolve(join(homedir(), ".agentkeychain"));
+  const configuredHome = resolve(process.env["AGENTKEYCHAIN_HOME"] ?? defaultHome);
+  if (configuredHome === defaultHome) return KEYCHAIN_SERVICE;
+  const suffix = createHash("sha256").update(configuredHome).digest("hex").slice(0, 16);
+  return `${KEYCHAIN_SERVICE}.${suffix}`;
+}
+
+function backendCommand(backend: Backend): string | null {
+  const injected = backend === "macos-keychain"
+    ? process.env["AKC_KEYCHAIN_SECURITY_BIN"]
+    : backend === "linux-libsecret"
+      ? process.env["AKC_KEYCHAIN_SECRET_TOOL_BIN"]
+      : undefined;
+  if (process.env["AKC_KEYCHAIN_TEST_MODE"] === "1") {
+    // bunfig.toml enables this guard for every direct `bun test` invocation.
+    // Inherited command variables are untrusted: accept a stub only when both
+    // it and its declared root resolve to the same isolated directory tree.
+    const stubRoot = process.env["AKC_KEYCHAIN_TEST_STUB_ROOT"];
+    if (!injected || !stubRoot) return null;
+    try {
+      const root = realpathSync(stubRoot);
+      const command = realpathSync(injected);
+      if (command !== root && !command.startsWith(`${root}${sep}`)) return null;
+      return command;
+    } catch {
+      return null;
+    }
+  }
+  if (injected) return injected;
+  if (backend === "macos-keychain") return "security";
+  if (backend === "linux-libsecret") return "secret-tool";
+  return null;
+}
+
 export function detectBackend(): Backend {
   if (process.env["AKC_PASSWORD"]) return "unsupported"; // env var is primary
   const p = platform();
@@ -74,16 +117,18 @@ export function detectBackend(): Backend {
  * Returns null if the entry doesn't exist, the backend isn't available,
  * or the user has not yet run `agentkeychain setup`.
  */
-export async function keychainGet(): Promise<string | null> {
+export async function keychainGet(service = keychainService()): Promise<string | null> {
   const backend = detectBackend();
+  const command = backendCommand(backend);
+  if (!command) return null;
   try {
     if (backend === "macos-keychain") {
       const { stdout } = await execFileAsync(
-        "security",
+        command,
         [
           "find-generic-password",
           "-a", KEYCHAIN_ACCOUNT,
-          "-s", KEYCHAIN_SERVICE,
+          "-s", service,
           "-w", // print password only
         ],
         { encoding: "utf8", timeout: 5_000 }
@@ -93,8 +138,8 @@ export async function keychainGet(): Promise<string | null> {
     }
     if (backend === "linux-libsecret") {
       const { stdout } = await execFileAsync(
-        "secret-tool",
-        ["lookup", "service", KEYCHAIN_SERVICE, "account", KEYCHAIN_ACCOUNT],
+        command,
+        ["lookup", "service", service, "account", KEYCHAIN_ACCOUNT],
         { encoding: "utf8", timeout: 5_000 }
       );
       const pw = stdout.trim();
@@ -124,15 +169,17 @@ export async function keychainGet(): Promise<string | null> {
  */
 export async function keychainSet(password: string): Promise<boolean> {
   const backend = detectBackend();
+  const command = backendCommand(backend);
+  if (!command) return false;
   try {
     if (backend === "macos-keychain") {
       // -U updates if entry exists, otherwise creates
       await execFileAsync(
-        "security",
+        command,
         [
           "add-generic-password",
           "-a", KEYCHAIN_ACCOUNT,
-          "-s", KEYCHAIN_SERVICE,
+          "-s", keychainService(),
           "-l", KEYCHAIN_LABEL,
           "-w", password,
           "-U",
@@ -144,12 +191,12 @@ export async function keychainSet(password: string): Promise<boolean> {
     if (backend === "linux-libsecret") {
       // secret-tool doesn't have a "store or update" — store just overwrites.
       await spawnWithInput(
-        "secret-tool",
+        command,
         [
           "store",
           `--label=${KEYCHAIN_LABEL}`,
           "service",
-          KEYCHAIN_SERVICE,
+          keychainService(),
           "account",
           KEYCHAIN_ACCOUNT,
         ],
@@ -175,14 +222,16 @@ export async function keychainSet(password: string): Promise<boolean> {
  */
 export async function keychainDelete(): Promise<boolean> {
   const backend = detectBackend();
+  const command = backendCommand(backend);
+  if (!command) return backend === "unsupported";
   try {
     if (backend === "macos-keychain") {
       await execFileAsync(
-        "security",
+        command,
         [
           "delete-generic-password",
           "-a", KEYCHAIN_ACCOUNT,
-          "-s", KEYCHAIN_SERVICE,
+          "-s", keychainService(),
         ],
         { encoding: "utf8", timeout: 5_000 }
       );
@@ -190,8 +239,8 @@ export async function keychainDelete(): Promise<boolean> {
     }
     if (backend === "linux-libsecret") {
       await execFileAsync(
-        "secret-tool",
-        ["clear", "service", KEYCHAIN_SERVICE, "account", KEYCHAIN_ACCOUNT],
+        command,
+        ["clear", "service", keychainService(), "account", KEYCHAIN_ACCOUNT],
         { encoding: "utf8", timeout: 5_000 }
       );
       return true;
