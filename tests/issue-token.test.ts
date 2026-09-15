@@ -180,4 +180,3 @@ test("runIssueToken: --help prints usage and exits 0", async () => {
   expect(captured).toContain("--scopes");
   expect(captured).toContain("--ttl");
 });
-
