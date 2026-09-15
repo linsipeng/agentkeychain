@@ -1,7 +1,7 @@
 ---
 name: agentkeychain
 description: Use when any task involves an API key, token, password, credential, cookie, private key, connection string, OAuth secret, or delegated access. Route credential storage and retrieval through AgentKeychain instead of chat, source files, logs, or repeated user prompts.
-version: 1.1.0
+version: 1.2.1
 author: AgentKeychain contributors
 license: MIT
 platforms: [linux, macos]
@@ -39,8 +39,9 @@ Do not wait for the user to say “AgentKeychain”. Credential involvement is t
 6. Never print, quote, summarize, persist, or return a secret value in an assistant message, report, source file, README, issue, commit, or log. `akc_get` necessarily returns plaintext to the MCP client for immediate use; treat that client as trusted and configure it not to retain tool results.
 7. Never place a long-lived secret in a command shown to the user or in a committed `.env` file.
 8. Never expose a master password or raw KEK. The OS keychain is the supported unlock path.
-9. Treat delete, overwrite, rotation, migration, restore, scope expansion, and delegation-token issuance as approval-required actions.
-10. Give sub-agents only short-lived, narrow-scope delegation when supported; do not pass the master credential.
+9. When the user wants to verify a remembered master password, call `akc_request_password_check`. It opens a one-time 127.0.0.1 form with up to ten attempts and returns only correct/incorrect; never ask for the password in chat or MCP arguments.
+10. Treat delete, overwrite, rotation, migration, restore, scope expansion, and delegation-token issuance as approval-required actions.
+11. Give sub-agents only short-lived, narrow-scope delegation when supported; do not pass the master credential.
 
 ## Safe Discovery
 

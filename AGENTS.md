@@ -33,7 +33,7 @@ Own the full outcome. Do not hand the user a checklist of shell commands.
    an upgrade. If the CLI is absent, install the pinned release:
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/v0.5.0/install.sh | sh -s -- --version v0.5.0
+   curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/v0.6.1/install.sh | sh -s -- --version v0.6.1
    ```
 
    Resolve the installed binary by absolute path. Do not modify global PATH without need.
@@ -43,7 +43,7 @@ Own the full outcome. Do not hand the user a checklist of shell commands.
    the pinned release skill non-interactively:
 
    ```bash
-   hermes skills install --yes https://raw.githubusercontent.com/linsipeng/agentkeychain/v0.5.0/skills/agentkeychain/SKILL.md
+   hermes skills install --yes https://raw.githubusercontent.com/linsipeng/agentkeychain/v0.6.1/skills/agentkeychain/SKILL.md
    ```
 
 4. If Hermes supports MCP, inspect `hermes mcp list`. If `agentkeychain`
@@ -57,7 +57,7 @@ Own the full outcome. Do not hand the user a checklist of shell commands.
    ```
 
    `hermes mcp add` asks whether to enable discovered tools. The piped `y`
-   accepts all six in non-interactive agent runs; without it, EOF cancels the
+   accepts all seven in non-interactive agent runs; without it, EOF cancels the
    installation and nothing is saved.
 
 5. Preserve vault state:

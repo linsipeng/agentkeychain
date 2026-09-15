@@ -17,6 +17,7 @@ import { runImport } from "./import.ts";
 import { runSync } from "./sync.ts";
 import { runStatus } from "./status.ts";
 import { runCapture } from "./capture.ts";
+import { runVerifyPassword } from "./verify-password.ts";
 import { redact } from "../util/redact.ts";
 
 type Command =
@@ -34,6 +35,7 @@ type Command =
   | "sync"
   | "status"
   | "capture"
+  | "verify-password"
   | "help"
   | "version";
 
@@ -54,6 +56,7 @@ function parseArgs(argv: string[]): { command: Command; rest: string[] } {
     case "sync": return { command: "sync", rest: argv.slice(1) };
     case "status": return { command: "status", rest: argv.slice(1) };
     case "capture": return { command: "capture", rest: argv.slice(1) };
+    case "verify-password": return { command: "verify-password", rest: argv.slice(1) };
     case "--version": case "-v": case "version": return { command: "version", rest: [] };
     default: return { command: "help", rest: [] };
   }
@@ -69,6 +72,7 @@ function printHelp(): void {
       `  agentkeychain store <name>          Store encrypted secret\n` +
       `  agentkeychain capture <name> --purpose <text>\n` +
       `                                    Open a local secure-entry form\n` +
+      `  agentkeychain verify-password      Privately check the password you remember\n` +
       `  agentkeychain get <name> [--json]   Retrieve and decrypt\n` +
       `  agentkeychain list [--json]         List all secrets (metadata only)\n` +
       `  agentkeychain delete <name> [--yes] Delete a secret\n` +
@@ -110,6 +114,7 @@ export async function main(): Promise<number> {
       case "sync": return runSync(rest);
       case "status": return runStatus(rest);
       case "capture": return runCapture(rest);
+      case "verify-password": return runVerifyPassword(rest);
       case "version":
         process.stdout.write(`agentkeychain v${VERSION}\n`);
         return 0;
