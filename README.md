@@ -301,5 +301,7 @@ MIT — see [LICENSE](./LICENSE).
 
 ## Status
 
-v0.6.1 — private, read-only master-password verification now allows up to ten
-attempts per one-time local form. Breaking changes remain possible before v1.0.
+v0.6.2 — emergency safety release: test runs are fail-closed against the host
+OS keychain and default production vault, custom vaults use path-scoped keychain
+entries, and `setup` verifies a password before any overwrite. Breaking changes
+remain possible before v1.0.
