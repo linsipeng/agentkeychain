@@ -36,6 +36,10 @@ AgentKeychain 会在本机浏览器打开一次性安全表单。把凭证粘贴
 不要贴进聊天。页面只显示“仅允许用于 OpenAI 模型调用”这类自然语言权限；
 底层最小权限由系统自动推断。
 
+如果想确认自己记住的主密码是否正确，只需告诉 Agent“验证我的主密码”。
+系统会打开另一个一次性本地表单，只读校验一次。密码不会进入聊天或 MCP 参数，
+也不会修改 Vault 或 macOS 钥匙串。
+
 ### 真实使用场景
 
 ```bash
@@ -72,6 +76,7 @@ $ agentkeychain delete test-key --yes
 | 你说 | Agent 静默执行 |
 |---|---|
 | “帮我保存 OpenAI 凭证，用于模型调用” | 打开一次性本地表单，并自动推断最小权限 |
+| “验证我记住的主密码” | 打开一次性本地表单，只读校验密码，不修改任何数据 |
 | "帮我查一下 Cloudflare 的 token" | `agentkeychain get cloudflare-token` |
 | "用 openai 帮我写段代码" | `agentkeychain get openai-key` → 调 API → 干活 |
 | "告诉我存了哪些 key" | `agentkeychain list` |
@@ -153,8 +158,8 @@ agentkeychain list   # 检查一下，都在
 
 | | |
 |---|---|
-| **CLI** | `init / capture / store / get / list / delete / audit / export / import / sync / issue-token / serve` |
-| **MCP Server** | 6 个工具，包含安全人工录入工具 `akc_request_store`，stdio 传输 |
+| **CLI** | `init / capture / verify-password / store / get / list / delete / audit / export / import / sync / issue-token / serve` |
+| **MCP Server** | 7 个工具，包含私密密码校验和安全凭证录入，stdio 传输 |
 | **跨 Agent 委托** | Ed25519 签名的限时、限定作用域的代理令牌 |
 | **审计链** | 每次操作都有防篡改的 Ed25519 签名链 |
 | **零知识同步** | 密码、KEK 和明文凭证绝不上云；可由系统钥匙串保存密码以供本机 Agent 自动解锁 |
@@ -190,6 +195,7 @@ agentkeychain init
 | 命令 | 说明 |
 |---|---|
 | `agentkeychain init` | 初始化保险箱，设置 master 密码，创建默认身份 |
+| `agentkeychain verify-password` | 打开一次性本地表单，只读校验记住的主密码，不修改保险箱或钥匙串 |
 | `agentkeychain store <name> --value <v> --scopes "..."` | 加密并存储凭证 |
 | `agentkeychain get <name> [--json]` | 解密并返回凭证 |
 | `agentkeychain list [--json]` | 列出所有凭证（仅元数据） |
@@ -236,11 +242,12 @@ bundle 完全加密（与保险箱相同的 Argon2id + XChaCha20）——没有�
 }
 ```
 
-服务器暴露 6 个工具：
+服务器暴露 7 个工具：
 
 | 工具 | 说明 |
 |---|---|
 | `akc_request_store` | 默认人工录入路径：打开一次性本地表单并自动推断权限；凭证值不进入 MCP 参数 |
+| `akc_request_password_check` | 打开一次性本地只读校验表单；主密码不进入 MCP 参数 |
 | `akc_store` | 高级兼容路径：加密存储可信 MCP 客户端提供的值 |
 | `akc_get` | 解密并返回凭证（作用域检查） |
 | `akc_list` | 列出凭证名（不返回值） |

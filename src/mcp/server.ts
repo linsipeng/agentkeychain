@@ -1,8 +1,9 @@
 /**
  * MCP server for agentkeychain.
  *
- * Exposes 6 tools over Model Context Protocol (stdio transport):
+ * Exposes 7 tools over Model Context Protocol (stdio transport):
  *   - akc_request_store: open a local secure-entry form + infer scope
+ *   - akc_request_password_check: privately verify one remembered master password
  *   - akc_store: advanced compatibility path for trusted clients
  *   - akc_get:   decrypt + return a secret (scope-checked)
  *   - akc_list:  list secret names (no values)
@@ -29,6 +30,8 @@ import { loadIdentityByName, type Identity } from "../identity.js";
 import { openDb } from "../vault.js";
 import { resolveVaultKek } from "../unlock.js";
 import { requestSecureStore } from "../capture/store.js";
+import { requestMasterPasswordCheck } from "../password-check/check.js";
+import type { PasswordCheckHandle } from "../password-check/server.js";
 import { VERSION } from "../index.js";
 
 const IDENTITY_NAME = "default";
@@ -69,7 +72,12 @@ function _resolveContext(): void {
 }
 void _resolveContext;
 
-export function createServer(): Server {
+export interface McpServerOptions {
+  requestPasswordCheck?: () => Promise<PasswordCheckHandle>;
+}
+
+export function createServer(options: McpServerOptions = {}): Server {
+  const requestPasswordCheck = options.requestPasswordCheck ?? requestMasterPasswordCheck;
   const server = new Server(
     { name: "agentkeychain", version: VERSION },
     { capabilities: { tools: {} } }
@@ -88,6 +96,11 @@ export function createServer(): Server {
           },
           required: ["name", "purpose"],
         },
+      },
+      {
+        name: "akc_request_password_check",
+        description: "Open a one-time local form that checks a remembered master password without sending it through chat or MCP arguments and without changing the vault or OS keychain.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false },
       },
       {
         name: "akc_store",
@@ -153,9 +166,31 @@ export function createServer(): Server {
     ],
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => withVaultDatabase(async (db) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     const a = (args ?? {}) as Record<string, unknown>;
+
+    if (name === "akc_request_password_check") {
+      if (Object.keys(a).length > 0) return toolErr("this tool accepts no arguments");
+      try {
+        const check = await requestPasswordCheck();
+        const result = await check.done;
+        return toolOk(JSON.stringify({
+          status: result,
+          matches: result === "correct" ? true : result === "incorrect" ? false : null,
+          message: result === "correct"
+            ? "The remembered master password is correct."
+            : result === "incorrect"
+              ? "The remembered master password is incorrect. The vault and OS keychain were not changed."
+              : "The local password check did not complete.",
+        }));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return toolErr(`error: ${msg.replace(/sk-[A-Za-z0-9_-]+/g, "[REDACTED]")}`);
+      }
+    }
+
+    return withVaultDatabase(async (db) => {
 
     // Resolve the password through the standard chain: AKC_PASSWORD for CI,
     // otherwise the OS keychain populated by init/setup. Raw KEKs are never
@@ -258,7 +293,8 @@ export function createServer(): Server {
       // Do NOT echo back secret material even on error
       return toolErr(`error: ${msg.replace(/sk-[A-Za-z0-9_-]+/g, "[REDACTED]")}`);
     }
-  }));
+    });
+  });
 
   return server;
 }

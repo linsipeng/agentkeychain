@@ -45,7 +45,7 @@ test("server creates with tool handlers and reports the package version", async 
   expect(handlers.has("tools/call")).toBe(true);
 });
 
-test("server exposes a novice store request without secret or scope inputs", async () => {
+test("server exposes novice local-input requests without sensitive arguments", async () => {
   const { createServer } = await import("../src/mcp/server.ts");
   const server = createServer();
   const handlers = (server as unknown as { _requestHandlers: Map<string, Handler> })._requestHandlers;
@@ -54,10 +54,81 @@ test("server exposes a novice store request without secret or scope inputs", asy
   const result = await listHandler({ method: "tools/list", params: {} }) as {
     tools: Array<{ name: string; inputSchema: { properties: Record<string, unknown>; required?: string[] } }>;
   };
-  const tool = result.tools.find((item) => item.name === "akc_request_store");
-  expect(tool).toBeDefined();
-  expect(Object.keys(tool?.inputSchema.properties ?? {})).toEqual(["name", "purpose"]);
-  expect(tool?.inputSchema.required).toEqual(["name", "purpose"]);
+  const storeTool = result.tools.find((item) => item.name === "akc_request_store");
+  expect(storeTool).toBeDefined();
+  expect(Object.keys(storeTool?.inputSchema.properties ?? {})).toEqual(["name", "purpose"]);
+  expect(storeTool?.inputSchema.required).toEqual(["name", "purpose"]);
+
+  const checkTool = result.tools.find((item) => item.name === "akc_request_password_check");
+  expect(checkTool).toBeDefined();
+  expect(Object.keys(checkTool?.inputSchema.properties ?? {})).toEqual([]);
+  expect(checkTool?.inputSchema.required).toBeUndefined();
+  expect((checkTool?.inputSchema as { additionalProperties?: boolean }).additionalProperties).toBe(false);
+});
+
+test("password-check MCP rejects every argument without echoing it", async () => {
+  let called = false;
+  const { createServer } = await import("../src/mcp/server.ts");
+  const server = createServer({
+    requestPasswordCheck: async () => {
+      called = true;
+      return { url: "unused", done: Promise.resolve("correct" as const), close: () => {} };
+    },
+  });
+  const handlers = (server as unknown as { _requestHandlers: Map<string, Handler> })._requestHandlers;
+  const callHandler = handlers.get("tools/call");
+  if (!callHandler) throw new Error("tools/call handler missing");
+  const candidate = "must-never-enter-password-check-mcp";
+  const result = await callHandler({
+    method: "tools/call",
+    params: { name: "akc_request_password_check", arguments: { password: candidate } },
+  }) as { isError?: boolean; content: Array<{ type: string; text: string }> };
+  expect(called).toBe(false);
+  expect(result.isError).toBe(true);
+  expect(result.content[0]?.text).not.toContain(candidate);
+  expect(result.content[0]?.text).not.toContain("password");
+});
+
+test("password-check MCP dispatch returns only the verification result", async () => {
+  const { createServer } = await import("../src/mcp/server.ts");
+  const server = createServer({
+    requestPasswordCheck: async () => ({
+      url: "http://127.0.0.1:1/verify-password/test",
+      done: Promise.resolve("correct" as const),
+      close: () => {},
+    }),
+  });
+  const handlers = (server as unknown as { _requestHandlers: Map<string, Handler> })._requestHandlers;
+  const callHandler = handlers.get("tools/call");
+  if (!callHandler) throw new Error("tools/call handler missing");
+  const result = await callHandler({
+    method: "tools/call",
+    params: { name: "akc_request_password_check", arguments: {} },
+  }) as { content: Array<{ type: string; text: string }> };
+  expect(JSON.parse(result.content[0]?.text ?? "{}")).toEqual({
+    status: "correct",
+    matches: true,
+    message: "The remembered master password is correct.",
+  });
+});
+
+test("password-check MCP dispatch does not mislabel an incomplete check as incorrect", async () => {
+  const { createServer } = await import("../src/mcp/server.ts");
+  const server = createServer({
+    requestPasswordCheck: async () => ({
+      url: "http://127.0.0.1:1/verify-password/test",
+      done: Promise.resolve("expired" as const),
+      close: () => {},
+    }),
+  });
+  const handlers = (server as unknown as { _requestHandlers: Map<string, Handler> })._requestHandlers;
+  const callHandler = handlers.get("tools/call");
+  if (!callHandler) throw new Error("tools/call handler missing");
+  const result = await callHandler({
+    method: "tools/call",
+    params: { name: "akc_request_password_check", arguments: {} },
+  }) as { content: Array<{ type: string; text: string }> };
+  expect(JSON.parse(result.content[0]?.text ?? "{}").matches).toBeNull();
 });
 
 test("withVaultDatabase closes the database on success and failure", async () => {

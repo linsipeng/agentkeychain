@@ -38,6 +38,11 @@ there—not into chat. The form shows a plain-language permission such as “Onl
 allow OpenAI model calls”; AgentKeychain infers the underlying least-privilege
 scope automatically.
 
+If you want to check the master password you remember, tell your agent “verify
+my master password.” A separate one-time local form performs a read-only check.
+The password never enters chat or MCP arguments, and neither the vault nor the
+OS keychain is changed.
+
 ### Real-world usage
 
 ```bash
@@ -74,6 +79,7 @@ $ agentkeychain delete test-key --yes
 | You say | Agent does (silently) |
 |---|---|
 | "Store my OpenAI credential for model calls" | Opens a one-time local form and infers the minimum scope |
+| "Verify the master password I remember" | Opens a one-time local read-only password check |
 | "帮我查一下 Cloudflare 的 token" | `agentkeychain get cloudflare-token` |
 | "用 openai 帮我写段代码" | `agentkeychain get openai-key` → call API → do the work |
 | "告诉我存了哪些 key" | `agentkeychain list` |
@@ -156,8 +162,8 @@ If you find yourself about to paste a key anywhere, stop and say: **"存一下�
 
 | | |
 |---|---|
-| **CLI** | `init / capture / store / get / list / delete / audit / export / import / sync / issue-token / serve` |
-| **MCP Server** | 6 tools, including safe human entry via `akc_request_store`, over stdio |
+| **CLI** | `init / capture / verify-password / store / get / list / delete / audit / export / import / sync / issue-token / serve` |
+| **MCP Server** | 7 tools, including private password checking and safe credential entry, over stdio |
 | **Cross-agent delegate** | Ed25519-signed time-limited scope-bounded tokens |
 | **Audit chain** | Tamper-evident Ed25519 signature chain over every operation |
 | **Zero-knowledge sync** | No password, KEK, or plaintext secret reaches the cloud; optional OS-keychain storage unlocks local agent use |
@@ -193,6 +199,7 @@ agentkeychain init
 | Command | Description |
 |---|---|
 | `agentkeychain init` | Initialize vault, set master password, create default identity |
+| `agentkeychain verify-password` | Open a one-time local form to check a remembered master password without changing the vault or keychain |
 | `agentkeychain store <name> --value <v> --scopes "..."` | Encrypt and store a credential |
 | `agentkeychain get <name> [--json]` | Decrypt and return a credential |
 | `agentkeychain list [--json]` | List all credentials (metadata only) |
@@ -239,11 +246,12 @@ Add to any MCP-compatible client (Claude Desktop, Hermes, Codex, IDE plugins):
 }
 ```
 
-The server exposes 6 tools:
+The server exposes 7 tools:
 
 | Tool | Description |
 |---|---|
 | `akc_request_store` | Default human path: open a one-time local form and infer scope; no value enters MCP arguments |
+| `akc_request_password_check` | Open a one-time local read-only form; no password enters MCP arguments |
 | `akc_store` | Advanced compatibility path: encrypt + persist a value supplied by a trusted MCP client |
 | `akc_get` | Decrypt + return a secret (scope-checked) |
 | `akc_list` | List secret names (no values) |
