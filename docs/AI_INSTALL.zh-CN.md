@@ -29,7 +29,7 @@
 ## 手动安装兜底（没有 Agent 可用的时候）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/v0.6.1/install.sh | sh -s -- --version v0.6.1
+curl -fsSL https://raw.githubusercontent.com/linsipeng/agentkeychain/v0.6.2/install.sh | sh -s -- --version v0.6.2
 agentkeychain init
 ```
 
