@@ -6,7 +6,7 @@ export interface MasterPasswordCheckOptions {
   timeoutMs?: number;
 }
 
-/** Open a private loopback form and verify one candidate without mutating the vault or keychain. */
+/** Open a private loopback form and allow up to ten candidates without mutating the vault or keychain. */
 export async function requestMasterPasswordCheck(
   options: MasterPasswordCheckOptions = {}
 ): Promise<PasswordCheckHandle> {

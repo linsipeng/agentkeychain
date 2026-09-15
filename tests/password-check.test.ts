@@ -62,17 +62,28 @@ describe("local master-password check", () => {
     expect(await handle.done).toBe("correct");
   });
 
-  test("reports an incorrect password without changing the vault", async () => {
+  test("allows ten incorrect attempts before the check expires", async () => {
     const dbPath = join(tmpDir, "vault.db");
     const before = statSync(dbPath).mtimeMs;
     const { verifyVaultPassword } = await import("../src/vault.ts");
     const handle = await startPasswordCheck({ openBrowser: false, onVerify: verifyVaultPassword });
     handles.push(handle);
-    const response = await submit(handle, "wrong-remembered-password");
-    const body = await response.text();
-    expect(response.status).toBe(200);
-    expect(body).toContain("主密码不正确");
+
+    for (let attempt = 1; attempt <= 9; attempt++) {
+      const response = await submit(handle, `wrong-remembered-password-${attempt}`);
+      const body = await response.text();
+      expect(response.status).toBe(200);
+      expect(response.redirected).toBe(true);
+      expect(body).toContain("主密码不正确");
+      expect(body).toContain(`还可尝试 ${10 - attempt} 次`);
+      expect((await fetch(handle.url)).status).toBe(200);
+    }
+
+    const finalResponse = await submit(handle, "wrong-remembered-password-10");
+    expect(finalResponse.status).toBe(200);
+    expect(await finalResponse.text()).toContain("10 次验证机会已用完");
     expect(await handle.done).toBe("incorrect");
+    expect((await fetch(handle.url)).status).toBe(410);
     expect(statSync(dbPath).mtimeMs).toBe(before);
   });
 
