@@ -295,5 +295,5 @@ MIT — see [LICENSE](./LICENSE).
 
 ## Status
 
-v0.5.0 — local secure credential capture, natural-language permission display,
-and automatic least-privilege scope inference. Breaking changes remain possible before v1.0.
+v0.6.0 — private, read-only master-password verification through a one-time
+local form, available from CLI and a zero-argument MCP tool. Breaking changes remain possible before v1.0.
