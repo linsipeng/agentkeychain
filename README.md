@@ -39,9 +39,9 @@ allow OpenAI model calls”; AgentKeychain infers the underlying least-privilege
 scope automatically.
 
 If you want to check the master password you remember, tell your agent “verify
-my master password.” A separate one-time local form performs a read-only check.
-The password never enters chat or MCP arguments, and neither the vault nor the
-OS keychain is changed.
+my master password.” A separate one-time local form allows up to ten read-only
+attempts before it expires. The password never enters chat or MCP arguments,
+and neither the vault nor the OS keychain is changed.
 
 ### Real-world usage
 
@@ -295,5 +295,5 @@ MIT — see [LICENSE](./LICENSE).
 
 ## Status
 
-v0.6.0 — private, read-only master-password verification through a one-time
-local form, available from CLI and a zero-argument MCP tool. Breaking changes remain possible before v1.0.
+v0.6.1 — private, read-only master-password verification now allows up to ten
+attempts per one-time local form. Breaking changes remain possible before v1.0.
