@@ -87,35 +87,23 @@ $ agentkeychain delete test-key --yes
 
 **Your agent asks the vault, not you. You stay out of the loop.**
 
-### Cloud sync across your machines (v0.3, bring-your-own Cloudflare)
+### Managed Cloud v0.7 (Slice 1: local tests only)
 
-Sync automatically via **your own** Cloudflare account (free plan is plenty —
-the cloud only ever holds ciphertext):
+AgentKeychain is moving to one official managed-cloud mode. The planned experience
+is account sign-in and automatic encrypted sync across approved devices.
+Slice 1 implements and tests the protocol, independent device signatures,
+server receive-order history, idempotent retries, pagination, deletion barriers,
+and explicit approved restore using an in-memory service and clients.
 
-```bash
-# One-time (on your main machine):
-agentkeychain sync init      # deploys a tiny Worker + D1 to YOUR CF account
-# → prints a Sync URL + Token
+There is no deployed cloud, account sign-in, recovery, approval UI or persistent
+sync queue in this slice. Existing v0.6.2 local Vault behavior remains unchanged;
+existing CLI/MCP secret reads still return plaintext to their trusted local caller.
+The new approval contract does not retrofit existing CLI/MCP actions.
 
-agentkeychain sync connect   # paste that URL + token here
-agentkeychain sync push      # upload your secrets (encrypted)
-
-# On your other machine(s):
-agentkeychain sync connect   # same URL + token
-agentkeychain sync pull      # download — done, everything's here
-
-# Day-to-day: push after changes, pull on other machines.
-agentkeychain sync status    # health + row counts
-```
-
-- **Zero knowledge holds**: the cloud stores only ciphertext envelopes +
-  irreversible name hashes (BLAKE2b-256) — no plaintext names, no values.
-- Conflicts resolve **last-write-wins**; everything is audit-logged locally.
-- Cost: **$0** — a single user stays far inside Cloudflare's free tier.
-- The Worker + D1 live in **your** account: you can delete them anytime.
-
-> 📖 **Full sync guide** (setup, conflicts, security model, troubleshooting,
-> teardown): [docs/SYNC_GUIDE.md](./docs/SYNC_GUIDE.md)
+`agentkeychain sync status` reports safe compatibility status locally. Legacy
+`init/connect/push/pull/disconnect` sync commands are disabled; existing configuration
+is preserved, without contacting its endpoint or uploading data. No automatic
+migration is available. See [the managed-cloud guide](./docs/SYNC_GUIDE.md).
 
 ### Moving to a new Mac (or a second machine)
 
@@ -213,7 +201,7 @@ entry only after verifying that it unlocks that exact vault.
 | `agentkeychain audit [--since 24h]` | Show audit log |
 | `agentkeychain export [--out <path>]` | Export all secrets to an encrypted bundle (for moving to another machine) |
 | `agentkeychain import <bundle> [--overwrite]` | Import secrets from an export bundle (same master password required) |
-| `agentkeychain sync init/connect/push/pull/status/disconnect` | Cloud sync via your own Cloudflare account — see [docs/SYNC_GUIDE.md](./docs/SYNC_GUIDE.md) |
+| `agentkeychain sync status` | Local compatibility status; Managed Cloud Slice 1 is test-only — see [docs/SYNC_GUIDE.md](./docs/SYNC_GUIDE.md) |
 | `agentkeychain serve` | Start MCP server (stdio transport) |
 | `agentkeychain issue-token --sub <id> --scopes "..." [--ttl 1h]` | Issue a cross-agent delegate token |
 | `agentkeychain status [--json]` | Safely report version, vault initialization, and password-channel readiness without reading credentials |
@@ -305,3 +293,9 @@ v0.6.2 — emergency safety release: test runs are fail-closed against the host
 OS keychain and default production vault, custom vaults use path-scoped keychain
 entries, and `setup` verifies a password before any overwrite. Breaking changes
 remain possible before v1.0.
+
+Managed Cloud Slice 1 validates pulls and restart history against device keys pinned
+through a separate trusted enrollment input, with replay and deletion barriers.
+Snapshots retain full signed history; storage and rollback protection are not yet
+implemented. Production approval consumption and version acceptance must share a
+single durable transaction; the memory-only service is not a production adapter.

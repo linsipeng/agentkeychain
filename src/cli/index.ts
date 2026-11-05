@@ -81,9 +81,9 @@ function printHelp(): void {
       `  agentkeychain export [--out <path>] Export encrypted bundle (v0.2)\n` +
       `  agentkeychain import <bundle> [--overwrite]\n` +
       `                                    Import bundle into this vault (v0.2)\n\n` +
-      `Cloud sync (BYO Cloudflare, v0.3):\n` +
-      `  agentkeychain sync init|connect|push|pull|status|disconnect\n` +
-      `                                    Sync secrets across machines via your own CF account\n\n` +
+      `Managed Cloud (local/test-only Slice 1):\n` +
+      `  agentkeychain sync status\n` +
+      `                                    Show safe legacy compatibility status; connection is not available\n\n` +
       `Advanced (for agents / power users):\n` +
       `  agentkeychain issue-token --sub <id> --scopes "..." [--ttl 1h]\n` +
       `                                    Issue a cross-agent delegate token\n` +

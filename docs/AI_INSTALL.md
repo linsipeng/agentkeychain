@@ -55,7 +55,18 @@ hermes mcp test agentkeychain
 Skill and MCP changes take effect in a new Hermes session (or
 `/reload-skills` + `/reload-mcp` in the current one).
 
+## Managed Cloud status
+
+The installer still installs the pinned v0.6.2 local CLI. Managed Cloud v0.7 Slice 1
+is a local/test-only implementation, not a hosted service or an account setup flow.
+The only planned cloud mode is the official managed service; users do not deploy
+infrastructure or supply shared sync credentials. In this development branch,
+`agentkeychain sync status` safely detects legacy configuration; old sync commands
+are disabled, and configuration is preserved without contacting an endpoint.
+No automatic migration, account recovery or approval UI is available. The approval
+contract does not change existing CLI/MCP plaintext delivery to trusted clients.
+
 ## Related docs
 
-- Cloud sync between machines: [SYNC_GUIDE.md](./SYNC_GUIDE.md)
+- Managed Cloud scope and compatibility: [SYNC_GUIDE.md](./SYNC_GUIDE.md)
 - 中文版安装指南: [AI_INSTALL.zh-CN.md](./AI_INSTALL.zh-CN.md)

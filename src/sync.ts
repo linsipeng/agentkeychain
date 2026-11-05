@@ -1,12 +1,13 @@
 /**
- * Cloud sync (BYO Cloudflare) — client core.
+ * Legacy v0.3 compatibility core. Not used by Managed Cloud or the sync CLI.
  *
  * sync.json layout (0600): { url, token, deviceId, lastPushAt, lastPullAt }
  * Name privacy: rows are keyed by BLAKE2b-256 keyed hash of the real name
  * (key derived from master password). The cloud never sees plaintext names.
  */
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { writeFileSync, existsSync, unlinkSync, lstatSync } from "node:fs";
 import { join } from "node:path";
+import { vaultDir } from "./vault.ts";
 import sodium from "libsodium-wrappers-sumo";
 import type { Database } from "bun:sqlite";
 import { deriveKEK, hashKEK } from "./crypto/argon2.ts";
@@ -34,18 +35,20 @@ export interface SyncConfig {
 }
 
 export function syncConfigPath(): string {
-  const home = process.env.AGENTKEYCHAIN_HOME ?? join(process.env.HOME ?? "", ".agentkeychain");
-  return join(home, SYNC_CONFIG_FILE);
+  const path = join(vaultDir(), SYNC_CONFIG_FILE);
+  if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error("sync config symlink refused");
+  return path;
+}
+
+/** Managed Cloud never opens a legacy config. Presence is detected separately and
+ * the file is preserved for a future explicit migration flow. */
+export function readSyncConfigText(path: string): never {
+  void path;
+  throw new Error("legacy sync config reading disabled");
 }
 
 export function loadSyncConfig(): SyncConfig | null {
-  const path = syncConfigPath();
-  if (!existsSync(path)) return null;
-  try {
-    return JSON.parse(readFileSync(path, "utf8")) as SyncConfig;
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 export function saveSyncConfig(config: SyncConfig): void {

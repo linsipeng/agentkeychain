@@ -49,7 +49,15 @@ hermes mcp test agentkeychain
 Skill 和 MCP 的变更在新 Hermes 会话生效（或在当前会话执行
 `/reload-skills` + `/reload-mcp`）。
 
+## Managed Cloud 状态
+
+安装器仍安装固定的 v0.6.2 本地 CLI。Managed Cloud v0.7 Slice 1 仅为本地测试实现，
+并非已上线的云服务或账号设置流程。唯一规划的云模式是官方托管服务；用户无需部署
+基础设施或提供共享同步凭证。在此开发分支中，`agentkeychain sync status` 安全检测旧配置；
+旧同步命令已禁用，配置原样保留且不连接端点。本阶段没有自动迁移、账号恢复或审批界面。
+审批契约不改变现有 CLI/MCP 向受信任客户端交付明文的行为。
+
 ## 相关文档
 
-- 多机云同步：[SYNC_GUIDE.md](./SYNC_GUIDE.md)
+- 托管云范围与兼容性：[SYNC_GUIDE.md](./SYNC_GUIDE.md)
 - English install guide: [AI_INSTALL.md](./AI_INSTALL.md)

@@ -84,34 +84,19 @@ $ agentkeychain delete test-key --yes
 
 **你的 Agent 找保险箱要 key，不用再问你。你全程不用参与。**
 
-### 多台机器云同步（v0.3，BYO Cloudflare——用你自己的 CF 账号）
+### Managed Cloud v0.7（Slice 1：仅本地测试）
 
-通过**你自己的** Cloudflare 账号自动同步（免费额度绰绰有余——云端只存密文）：
+AgentKeychain 正在转向唯一的官方托管云模式。目标体验是登录账号后，在获批设备间
+自动同步加密凭证。Slice 1 通过内存服务与客户端实现并测试协议、独立设备签名、
+服务器接收顺序与历史、幂等重试、分页、删除屏障以及明确批准后的恢复。
 
-```bash
-# 一次性（在主机器上）：
-agentkeychain sync init      # 部署一个极小 Worker + D1 到你自己的 CF 账号
-# → 输出 Sync URL + Token
+本阶段没有已部署的云服务、账号登录、账号恢复、审批界面或持久化同步队列。
+v0.6.2 本地 Vault 行为保持不变；现有 CLI/MCP 读取仍会向受信任的本地调用方返回明文。
+新的审批契约尚未接入现有 CLI/MCP 操作。
 
-agentkeychain sync connect   # 粘贴 URL + Token
-agentkeychain sync push      # 上传密钥（加密）
-
-# 在其他机器上：
-agentkeychain sync connect   # 同样的 URL + Token
-agentkeychain sync pull      # 下载——完成，所有密钥都在了
-
-# 日常：改完 push，其他机器 pull。
-agentkeychain sync status    # 健康状态 + 行数对账
-```
-
-- **零知识依然成立**：云端只存密文信封 + 不可逆的条目名哈希（BLAKE2b-256）——
-  没有明文名字，没有值。
-- 冲突按 **last-write-wins** 解决；所有操作本地审计留痕。
-- 费用：**$0**——单人使用远在 Cloudflare 免费额度之内。
-- Worker + D1 跑在**你自己的**账号里：随时可以在 CF 控制台删除。
-
-> 📖 **完整同步指南**（设置、冲突、安全模型、故障排查、彻底移除）：
-> [docs/SYNC_GUIDE.md](./docs/SYNC_GUIDE.md)
+`agentkeychain sync status` 只在本地报告安全兼容状态。旧同步
+`init/connect/push/pull/disconnect` 命令已禁用；已有配置原样保留，不连接旧端点，
+也不上传数据。本阶段不自动迁移。详见[托管云指南](./docs/SYNC_GUIDE.md)。
 
 ### 换新 Mac（或第二台电脑）怎么迁移
 
@@ -209,7 +194,7 @@ agentkeychain init
 | `agentkeychain audit [--since 24h]` | 查看审计日志 |
 | `agentkeychain export [--out <path>]` | 导出全部凭证到加密 bundle（迁移到另一台机器用） |
 | `agentkeychain import <bundle> [--overwrite]` | 从 bundle 导入凭证（需要相同的 master 密码） |
-| `agentkeychain sync init/connect/push/pull/status/disconnect` | 云同步（用你自己的 Cloudflare 账号）——见 [docs/SYNC_GUIDE.md](./docs/SYNC_GUIDE.md) |
+| `agentkeychain sync status` | 本地兼容状态；Managed Cloud Slice 1 仅供测试——见 [docs/SYNC_GUIDE.md](./docs/SYNC_GUIDE.md) |
 | `agentkeychain serve` | 启动 MCP 服务器（stdio 传输） |
 | `agentkeychain issue-token --sub <id> --scopes "..." [--ttl 1h]` | 签发跨 Agent 委托令牌 |
 | `agentkeychain status [--json]` | 安全报告版本、保险箱初始化状态和密码通道状态，不读取凭证 |
@@ -299,3 +284,7 @@ MIT——见 [LICENSE](./LICENSE)。
 v0.6.2 —— 紧急安全版本：测试默认禁止访问宿主机钥匙串与生产 Vault；自定义
 Vault 使用按路径隔离的钥匙串条目；`setup` 在任何覆盖前必须先验证密码。
 v1.0 前仍可能有破坏性变更。
+
+Managed Cloud Slice 1 使用独立受信注册入口固定的设备公钥校验拉取及重启历史，
+并实施重放检查和删除屏障。快照保留完整签名历史；持久化存储及回滚保护尚未实现。
+生产审批消费与版本接受必须共用一个持久化事务；内存服务并非生产适配器。
