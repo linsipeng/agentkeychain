@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "bun run src/cli/index.ts",
     "test": "bun test",
-    "lint": "eslint src tests",
+    "lint": "eslint src tests managed-cloud",
     "build": "bun build src/cli/index.ts --compile --outfile bin/agentkeychain-bin",
     "typecheck": "tsc --noEmit"
   },

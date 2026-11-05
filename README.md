@@ -299,3 +299,5 @@ through a separate trusted enrollment input, with replay and deletion barriers.
 Snapshots retain full signed history; storage and rollback protection are not yet
 implemented. Production approval consumption and version acceptance must share a
 single durable transaction; the memory-only service is not a production adapter.
+
+Phase 2A adds an independent, locally tested Workers/D1 backend under `managed-cloud/`, with atomic device-authenticated sync and a private recovery skeleton. Account login, enrollment, signed checkpoints and split-key recovery remain deferred. See [Phase 2A evidence](./docs/MANAGED_CLOUD_PHASE2A_EVIDENCE.md).

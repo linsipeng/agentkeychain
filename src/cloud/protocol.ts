@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 /** Managed protocol v2. IDs are opaque; envelopes contain encrypted bytes only. */
 export interface ManagedOperation {
   protocolVersion: 2;

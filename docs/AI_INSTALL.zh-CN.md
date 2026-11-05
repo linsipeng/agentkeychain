@@ -61,3 +61,5 @@ Skill 和 MCP 的变更在新 Hermes 会话生效（或在当前会话执行
 
 - 托管云范围与兼容性：[SYNC_GUIDE.md](./SYNC_GUIDE.md)
 - English install guide: [AI_INSTALL.md](./AI_INSTALL.md)
+
+Phase 2A 已新增独立的 Workers/D1 本地可测后端；它不改变安装流程，也未启用账号登录、设备注册或分钥恢复。详见 [Phase 2A 验收记录](./MANAGED_CLOUD_PHASE2A_EVIDENCE.md)。

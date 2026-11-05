@@ -112,3 +112,9 @@ keyEpoch 转移及审批引用。删除/恢复的审批引用纳入签名，实�
 幂等检查、序列分配与版本追加必须在同一个持久化事务内提交或回滚。注入仓库与独立
 MemoryApprovals 不提供此生产保证。Managed Cloud 不打开旧 `sync.json`，状态命令只检测
 安全普通文件是否存在，并原样保留给未来显式迁移流程。
+
+## Phase 2A backend foundation / 后端基础
+
+The independent `managed-cloud/` workspace now tests atomic D1 acceptance, device-authenticated push/pull, isolation and a private Custodian skeleton on local workerd. This does not turn the Slice 1 client into a production client. Account login, enrollment, signed checkpoints and split-key recovery remain deferred. See [contracts](../managed-cloud/README.md) and [evidence](./MANAGED_CLOUD_PHASE2A_EVIDENCE.md).
+
+独立 `managed-cloud/` 已通过本地 workerd 验证 D1 原子接受、设备认证同步、隔离及私有 Custodian 骨架。Slice 1 客户端仍不是生产客户端；账号登录、设备注册、签名检查点与分钥恢复仍属于后续阶段。

@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "types": [
+      "@cloudflare/workers-types",
+      "@cloudflare/vitest-pool-workers/types",
+      "node"
+    ]
+  },
+  "include": [
+    "shared/**/*.ts",
+    "api-worker/**/*.ts",
+    "recovery-worker/**/*.ts",
+    "tests/**/*.ts",
+    "vitest.config.ts"
+  ]
+}

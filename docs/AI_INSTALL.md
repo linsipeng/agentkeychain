@@ -70,3 +70,5 @@ contract does not change existing CLI/MCP plaintext delivery to trusted clients.
 
 - Managed Cloud scope and compatibility: [SYNC_GUIDE.md](./SYNC_GUIDE.md)
 - 中文版安装指南: [AI_INSTALL.zh-CN.md](./AI_INSTALL.zh-CN.md)
+
+Phase 2A now has an independent locally tested Workers/D1 backend; it does not change installation or enable account login, enrollment or split-key recovery. See [Phase 2A evidence](./MANAGED_CLOUD_PHASE2A_EVIDENCE.md).

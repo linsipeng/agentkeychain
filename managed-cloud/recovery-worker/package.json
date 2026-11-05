@@ -1,0 +1,5 @@
+{
+  "name": "@agentkeychain/recovery-worker",
+  "private": true,
+  "type": "module"
+}

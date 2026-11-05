@@ -1,0 +1,23 @@
+{
+  "name": "@agentkeychain/managed-cloud",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "api-worker",
+    "recovery-worker"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.18.5",
+    "@cloudflare/workers-types": "5.20260716.1",
+    "vitest": "4.1.10",
+    "wrangler": "4.111.0",
+    "typescript": "5.9.3",
+    "esbuild": "0.28.1"
+  }
+}

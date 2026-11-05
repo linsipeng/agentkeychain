@@ -1,0 +1,5 @@
+{
+  "name": "@agentkeychain/api-worker",
+  "private": true,
+  "type": "module"
+}
