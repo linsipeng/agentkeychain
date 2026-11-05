@@ -1,4 +1,4 @@
-import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-pool-workers';
+import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin';
 import { defineConfig } from 'vitest/config';
 import { build } from 'esbuild';
 await build({
@@ -10,7 +10,7 @@ export default defineConfig({
     test: {
         projects: [
             {
-                test: { name: 'api', include: ['tests/foundation.spec.ts', 'tests/transaction.spec.ts'] },
+                test: { name: 'api', include: ['tests/foundation.spec.ts', 'tests/transaction.spec.ts', 'tests/browser-auth.spec.ts'] },
                 plugins: [cloudflareTest({
                     main: 'api-worker/index.ts', remoteBindings: false,
                     miniflare: {

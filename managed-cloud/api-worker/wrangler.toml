@@ -16,3 +16,15 @@ remote = false
 binding = "RECOVERY"
 service = "agentkeychain-managed-custodian"
 entrypoint = "Custodian"
+
+# Trusted ingress/email adapters are separate provisioning/review gates.
+# Local bundle tests supply synthetic implementations under these exact names.
+[[services]]
+binding = "EMAIL_VERIFIER"
+service = "agentkeychain-auth-trust"
+entrypoint = "EmailVerifier"
+
+[[services]]
+binding = "TRUSTED_AUTH_SOURCE"
+service = "agentkeychain-auth-trust"
+entrypoint = "TrustedAuthSource"

@@ -289,4 +289,4 @@ Managed Cloud Slice 1 使用独立受信注册入口固定的设备公钥校验�
 并实施重放检查和删除屏障。快照保留完整签名历史；持久化存储及回滚保护尚未实现。
 生产审批消费与版本接受必须共用一个持久化事务；内存服务并非生产适配器。
 
-Phase 2A 新增独立的 `managed-cloud/` Workers/D1 本地可测后端，包含设备认证原子同步和私有恢复骨架。账号登录、设备注册、签名检查点与分钥恢复仍未实现。详见 [Phase 2A 验收记录](./docs/MANAGED_CLOUD_PHASE2A_EVIDENCE.md)。
+Phase 2A 新增独立的 `managed-cloud/` Workers/D1 本地可测后端，包含设备认证原子同步和私有恢复骨架。Phase 2B 已增加本地可测的邀请制 Passkey 账号、浏览器会话、CSRF 和动作绑定 step-up。复审修复要求可发现凭证及可信来源绑定，加入有界清理，并本地执行生成的 Worker bundle；设备注册、签名检查点与分钥恢复仍未实现。详见 [Phase 2B 验收及限制](./docs/MANAGED_CLOUD_PHASE2B_EVIDENCE.md)。详见 [Phase 2A 验收记录](./docs/MANAGED_CLOUD_PHASE2A_EVIDENCE.md)。

@@ -1,13 +1,15 @@
 import { ApiError, boundedBody, errorResponse, validateSigned, type RecoveryContract } from '../shared/contracts.ts';
+import { browserFetch, type BrowserBindings } from './browser-bindings.ts';
 import { authenticate } from './auth.ts';
 import { createRepository } from './repository.ts';
-export interface Env {
+export interface Env extends BrowserBindings {
     MAIN: D1Database;
     RECOVERY: RecoveryContract;
 }
 export default {
     async fetch(request: Request, env: Env): Promise<Response> {
         try {
+            if (new URL(request.url).pathname.startsWith('/v1/auth/')) return await browserFetch(request,env);
             const url = new URL(request.url), match = url.pathname.match(/^\/v1\/vaults\/([A-Za-z0-9_-]{1,128})\/sync\/(push|pull)$/);
             if (!match)
                 throw new ApiError('not_found');

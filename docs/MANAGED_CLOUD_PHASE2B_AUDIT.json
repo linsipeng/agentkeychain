@@ -1,0 +1,438 @@
+{
+  "date": "2026-11-05",
+  "scope": "managed-cloud npm workspace, including development dependencies",
+  "command": "npm audit --json",
+  "exitCode": 0,
+  "counts": {
+    "info": 0,
+    "low": 0,
+    "moderate": 0,
+    "high": 0,
+    "critical": 0,
+    "total": 0
+  },
+  "runtimeAudit": {
+    "command": "npm audit --omit=dev --json",
+    "exitCode": 0,
+    "counts": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    }
+  },
+  "versions": {
+    "@cloudflare/vitest-plugin": "1.6.0",
+    "@cloudflare/workers-types": "5.20261104.1",
+    "vitest": "4.1.12",
+    "@vitest/mocker": "4.1.12",
+    "vite": "8.1.6",
+    "wrangler": "4.158.0",
+    "miniflare": "5.20261104.0-beta",
+    "workerd": "1.20261104.1",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3",
+    "zod": "4.6.6",
+    "sharp": "0.35.5",
+    "undici": "7.30.1",
+    "postcss": "8.5.32",
+    "nanoid": "3.3.20",
+    "source-map-js": "1.2.2",
+    "@simplewebauthn/server": "14.0.3"
+  },
+  "installation": {
+    "node": "22.22.3",
+    "npm": "12.2.2 (ephemeral; no global upgrade)",
+    "flags": [
+      "--ignore-scripts",
+      "--save-exact"
+    ],
+    "forcedOrLegacyPeerResolution": false,
+    "notes": [
+      "npm 10.9.8 Arborist edgesOut crash on optional-peer resolution.",
+      "npm 12.2.2 exposed the Workers-types peer conflict; aligned types to Wrangler required version.",
+      "Official Workers Vitest plugin replaces obsolete pool package; Vitest 4 retained.",
+      "Miniflare 5 beta is upstream-pinned, reviewed via types/source and full workerd plus standalone generated-bundle execution."
+    ]
+  },
+  "findings": [],
+  "fullReport": {
+    "auditReportVersion": 2,
+    "vulnerabilities": {},
+    "metadata": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0,
+        "total": 0
+      },
+      "dependencies": {
+        "prod": 32,
+        "dev": 165,
+        "optional": 90,
+        "peer": 0,
+        "peerOptional": 0,
+        "total": 196
+      }
+    }
+  },
+  "runtimeReport": {
+    "auditReportVersion": 2,
+    "vulnerabilities": {},
+    "metadata": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0,
+        "total": 0
+      },
+      "dependencies": {
+        "prod": 32,
+        "dev": 165,
+        "optional": 90,
+        "peer": 0,
+        "peerOptional": 0,
+        "total": 196
+      }
+    }
+  },
+  "previousAudit": {
+    "date": "2026-11-05",
+    "command": "npm audit --json",
+    "exitCode": 1,
+    "counts": {
+      "info": 0,
+      "low": 0,
+      "moderate": 3,
+      "high": 9,
+      "critical": 0,
+      "total": 12
+    },
+    "findings": [
+      {
+        "name": "@cloudflare/vitest-pool-workers",
+        "severity": "high",
+        "version": "0.18.5",
+        "baselineVersion": "0.18.5",
+        "developmentOnly": true,
+        "advisories": [],
+        "via": [
+          "miniflare",
+          "wrangler",
+          "zod"
+        ]
+      },
+      {
+        "name": "@vitest/mocker",
+        "severity": "moderate",
+        "version": "4.1.10",
+        "baselineVersion": "4.1.10",
+        "developmentOnly": true,
+        "advisories": [
+          {
+            "title": "Vitest: Path Traversal / Arbitrary File Read via @vitest/mocker Redirect Mock",
+            "url": "https://github.com/advisories/GHSA-82fw-gwwq-j7x9",
+            "range": ">=2.1.0 <4.1.11"
+          },
+          {
+            "title": "Vitest: Code injection via unauthenticated manual mock registration",
+            "url": "https://github.com/advisories/GHSA-qxg6-89mg-rqv8",
+            "range": ">=2.1.0-beta.7 <4.1.12"
+          }
+        ],
+        "via": []
+      },
+      {
+        "name": "miniflare",
+        "severity": "high",
+        "version": "4.20260710.0",
+        "baselineVersion": "4.20260710.0",
+        "developmentOnly": true,
+        "advisories": [],
+        "via": [
+          "sharp",
+          "undici"
+        ]
+      },
+      {
+        "name": "nanoid",
+        "severity": "high",
+        "version": "3.3.16",
+        "baselineVersion": "3.3.16",
+        "developmentOnly": true,
+        "advisories": [
+          {
+            "title": "nanoid: custom generators can loop indefinitely when size is zero",
+            "url": "https://github.com/advisories/GHSA-2v37-7h3g-55p8",
+            "range": "<3.3.18"
+          }
+        ],
+        "via": []
+      },
+      {
+        "name": "postcss",
+        "severity": "moderate",
+        "version": "8.5.19",
+        "baselineVersion": "8.5.19",
+        "developmentOnly": true,
+        "advisories": [
+          {
+            "title": "PostCSS: incomplete fix of GHSA-6g55-p6wh-862q \u2014 attacker-controlled sourceMappingURL reads arbitrary .map files when `from` is unset",
+            "url": "https://github.com/advisories/GHSA-fxqj-rqcc-2cmp",
+            "range": "<=8.5.22"
+          }
+        ],
+        "via": []
+      },
+      {
+        "name": "sharp",
+        "severity": "high",
+        "version": "0.34.5",
+        "baselineVersion": "0.34.5",
+        "developmentOnly": true,
+        "advisories": [
+          {
+            "title": "sharp inherited vulnerabilities in libvips: CVE-2026-33327, CVE-2026-33328, CVE-2026-35590, CVE-2026-35591",
+            "url": "https://github.com/advisories/GHSA-f88m-g3jw-g9cj",
+            "range": "<0.35.0"
+          },
+          {
+            "title": "sharp: Vulnerabilities in libheif: GHSA-g89c-p67h-r497 and GHSA-2jg2-4ch7-h545",
+            "url": "https://github.com/advisories/GHSA-rgj7-g3m4-5g8c",
+            "range": "<0.35.4"
+          },
+          {
+            "title": "sharp : Vulnerability in librsvg dependency CVE-2026-96889",
+            "url": "https://github.com/advisories/GHSA-wq5f-xc86-pv6w",
+            "range": "<0.35.5"
+          }
+        ],
+        "via": []
+      },
+      {
+        "name": "source-map-js",
+        "severity": "high",
+        "version": "1.2.1",
+        "baselineVersion": "1.2.1",
+        "developmentOnly": true,
+        "advisories": [
+          {
+            "title": "source-map-js allows event-loop denial of service through indexed source-map section offsets",
+            "url": "https://github.com/advisories/GHSA-68fv-2mgg-jv7q",
+            "range": ">=1.0.0 <1.2.2"
+          }
+        ],
+        "via": []
+      },
+      {
+        "name": "undici",
+        "severity": "high",
+        "version": "7.28.0",
+        "baselineVersion": "7.28.0",
+        "developmentOnly": true,
+        "advisories": [
+          {
+            "title": "undici vulnerable to downstream response desynchronization via retry interceptor",
+            "url": "https://github.com/advisories/GHSA-8xcm-r25x-g524",
+            "range": ">=7.0.0 <7.29.0"
+          },
+          {
+            "title": "undici vulnerable to cross-user information disclosure and parse-time crash via degenerate private cache directives",
+            "url": "https://github.com/advisories/GHSA-4cwx-7wf7-3272",
+            "range": ">=7.0.0 <7.29.0"
+          },
+          {
+            "title": "undici vulnerable to CRLF Injection via blob-like body 'type' property",
+            "url": "https://github.com/advisories/GHSA-m8rv-5g2x-5cg5",
+            "range": ">=7.0.0 <7.29.0"
+          },
+          {
+            "title": "undici vulnerable to cross-user information disclosure via whitespace around equals in Cache-Control directives",
+            "url": "https://github.com/advisories/GHSA-jr45-8vmc-qm54",
+            "range": ">=7.0.0 <7.29.0"
+          },
+          {
+            "title": "undici vulnerable to cookie attribute injection via unsanitized domain and unparsed setCookie fields",
+            "url": "https://github.com/advisories/GHSA-v3r7-h72x-cjcm",
+            "range": ">=7.0.0 <7.29.0"
+          },
+          {
+            "title": "undici vulnerable to Denial of Service via unhandled error in WebSocket permessage-deflate decompression",
+            "url": "https://github.com/advisories/GHSA-3wwx-pv8p-q78v",
+            "range": ">=7.28.0 <7.29.1"
+          },
+          {
+            "title": "undici vulnerable to Denial of Service via orphaned RetryHandler response body",
+            "url": "https://github.com/advisories/GHSA-pmjh-fq2x-6v4x",
+            "range": ">=7.11.0 <7.29.1"
+          },
+          {
+            "title": "undici vulnerable to downstream response splitting via retry interceptor",
+            "url": "https://github.com/advisories/GHSA-r53p-7pc4-xj5r",
+            "range": ">=7.0.0 <7.29.1"
+          },
+          {
+            "title": "undici vulnerable to Denial of Service via unrequested WebSocket subprotocol",
+            "url": "https://github.com/advisories/GHSA-rfgv-xxqx-mfg5",
+            "range": ">=7.0.0 <7.29.1"
+          },
+          {
+            "title": "undici vulnerable to Denial of Service via unbounded decompression of compressed responses",
+            "url": "https://github.com/advisories/GHSA-3xpg-4rpp-hhhm",
+            "range": ">=7.15.0 <7.29.1"
+          },
+          {
+            "title": "undici vulnerable to cross-user cookie disclosure via Set-Cookie caching in shared caches",
+            "url": "https://github.com/advisories/GHSA-2jfj-6hjv-fm6j",
+            "range": ">=7.0.0 <7.29.1"
+          },
+          {
+            "title": "undici vulnerable to response truncation via oversized chunked responses in the dump interceptor",
+            "url": "https://github.com/advisories/GHSA-2gqq-gqf2-x968",
+            "range": ">=7.1.0 <7.29.1"
+          },
+          {
+            "title": "undici vulnerable to TLS certificate validation bypass via dropped connect options in BalancedPool",
+            "url": "https://github.com/advisories/GHSA-w293-vg96-wgc3",
+            "range": ">=7.24.1 <7.29.1"
+          },
+          {
+            "title": "undici vulnerable to caching and replay of unsafe HTTP method responses",
+            "url": "https://github.com/advisories/GHSA-8436-99hf-9mmv",
+            "range": ">=7.0.0 <7.29.1"
+          },
+          {
+            "title": "undici vulnerable to Denial of Service via WebSocketStream unclean close",
+            "url": "https://github.com/advisories/GHSA-rx4f-c7p8-82vq",
+            "range": ">=7.0.0 <7.29.1"
+          },
+          {
+            "title": "undici vulnerable to Denial of Service via unbounded memory in the EventSource parser",
+            "url": "https://github.com/advisories/GHSA-4qv8-2p9j-2685",
+            "range": ">=7.0.0 <7.30.1"
+          },
+          {
+            "title": "undici vulnerable to Subresource Integrity bypass via non-lowercase algorithm tokens",
+            "url": "https://github.com/advisories/GHSA-f72v-6w45-q472",
+            "range": ">=7.15.0 <7.30.1"
+          },
+          {
+            "title": "undici vulnerable to Denial of Service via unhandled error on excessive content-encodings",
+            "url": "https://github.com/advisories/GHSA-xjj6-f33q-929c",
+            "range": ">=7.18.0 <7.30.1"
+          },
+          {
+            "title": "undici vulnerable to cache poisoning and cross-user disclosure via cross-origin redirects",
+            "url": "https://github.com/advisories/GHSA-4w7w-5xrc-9h26",
+            "range": ">=7.0.0 <7.30.1"
+          },
+          {
+            "title": "undici vulnerable to TLS certificate validation bypass via dropped tls options in Agent",
+            "url": "https://github.com/advisories/GHSA-2m5v-pch6-74hx",
+            "range": ">=7.0.0 <7.30.1"
+          },
+          {
+            "title": "undici vulnerable to Denial of Service via TLS 1.2 certificate-changing renegotiation",
+            "url": "https://github.com/advisories/GHSA-qrxm-fqhp-jwvm",
+            "range": ">=7.0.0 <7.30.1"
+          },
+          {
+            "title": "undici WebSocket client vulnerable to Denial of Service via unbounded automatic PONG buffering",
+            "url": "https://github.com/advisories/GHSA-9fm3-97px-rjf6",
+            "range": ">=7.0.0 <7.30.1"
+          },
+          {
+            "title": "undici vulnerable to Denial of Service via unhandled exception in the decompress interceptor",
+            "url": "https://github.com/advisories/GHSA-55wc-3pg8-jfw6",
+            "range": ">=7.15.0 <7.30.1"
+          }
+        ],
+        "via": []
+      },
+      {
+        "name": "vite",
+        "severity": "high",
+        "version": "8.1.5",
+        "baselineVersion": "8.1.5",
+        "developmentOnly": true,
+        "advisories": [
+          {
+            "title": "launch-editor: escapeCmdArgs() omits % escaping on Windows",
+            "url": "https://github.com/advisories/GHSA-698v-4r3x-3vcv",
+            "range": ">=8.0.0 <=8.1.5"
+          },
+          {
+            "title": "launch-editor: Editor CLI flag misinterpretation causing arbitrary command execution for some editors",
+            "url": "https://github.com/advisories/GHSA-r825-w8mm-5pxw",
+            "range": ">=8.0.0 <=8.1.5"
+          },
+          {
+            "title": "launch-editor: `fs.existsSync()` existence check can be bypassed on Windows",
+            "url": "https://github.com/advisories/GHSA-587h-7wmj-h5pm",
+            "range": ">=8.0.0 <=8.1.5"
+          },
+          {
+            "title": "Vite: Cross origin script execution through Vite custom middleware",
+            "url": "https://github.com/advisories/GHSA-9jrq-w75r-8gcw",
+            "range": ">=8.0.0 <=8.1.5"
+          },
+          {
+            "title": "Vite: Files outside `server.fs.allow` could be served when project paths match system paths on non-Windows machine",
+            "url": "https://github.com/advisories/GHSA-rq7h-c2jc-7f22",
+            "range": ">=8.0.0 <=8.1.5"
+          }
+        ],
+        "via": []
+      },
+      {
+        "name": "vitest",
+        "severity": "moderate",
+        "version": "4.1.10",
+        "baselineVersion": "4.1.10",
+        "developmentOnly": true,
+        "advisories": [
+          {
+            "title": "Vitest: Path Traversal / Arbitrary File Read via @vitest/mocker Redirect Mock",
+            "url": "https://github.com/advisories/GHSA-82fw-gwwq-j7x9",
+            "range": ">=2.1.0 <4.1.11"
+          }
+        ],
+        "via": [
+          "@vitest/mocker"
+        ]
+      },
+      {
+        "name": "wrangler",
+        "severity": "high",
+        "version": "4.111.0",
+        "baselineVersion": "4.111.0",
+        "developmentOnly": true,
+        "advisories": [],
+        "via": [
+          "miniflare"
+        ]
+      },
+      {
+        "name": "zod",
+        "severity": "high",
+        "version": "3.25.76",
+        "baselineVersion": "3.25.76",
+        "developmentOnly": true,
+        "advisories": [
+          {
+            "title": "Zod can exhaust memory while validating oversized constrained collections",
+            "url": "https://github.com/advisories/GHSA-mrhx-c7xc-m3w5",
+            "range": "<4.6.6"
+          }
+        ],
+        "via": []
+      }
+    ]
+  }
+}

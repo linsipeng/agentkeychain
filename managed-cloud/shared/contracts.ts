@@ -84,11 +84,6 @@ export async function boundedBody(request: Request): Promise<string> {
         throw new ApiError('invalid_request');
     }
 }
-/** Phase 2B placeholder only: no browser or account authentication implementation. */
-export interface AccountPrincipal {
-    readonly accountId: string;
-    readonly authentication: 'passkey';
-}
 export interface RecoveryContract {
     describe(): Promise<{
         component: string;

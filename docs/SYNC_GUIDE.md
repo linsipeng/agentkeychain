@@ -118,3 +118,20 @@ MemoryApprovals 不提供此生产保证。Managed Cloud 不打开旧 `sync.json
 The independent `managed-cloud/` workspace now tests atomic D1 acceptance, device-authenticated push/pull, isolation and a private Custodian skeleton on local workerd. This does not turn the Slice 1 client into a production client. Account login, enrollment, signed checkpoints and split-key recovery remain deferred. See [contracts](../managed-cloud/README.md) and [evidence](./MANAGED_CLOUD_PHASE2A_EVIDENCE.md).
 
 独立 `managed-cloud/` 已通过本地 workerd 验证 D1 原子接受、设备认证同步、隔离及私有 Custodian 骨架。Slice 1 客户端仍不是生产客户端；账号登录、设备注册、签名检查点与分钥恢复仍属于后续阶段。
+
+## Phase 2B account backend / 账号后端
+
+Phase 2B adds locally tested invitation-only Passkey registration/login, encrypted
+verified email, browser sessions, CSRF, action-bound step-up and shared D1 rate limits.
+Review repairs require discoverable credentials and trusted source bindings, reject
+verification races, add bounded retention, and execute the generated bundle locally.
+It uses the real pinned SimpleWebAuthn adapter in workerd with synthetic Ed25519 and
+ES256 authenticators. No React UI, email delivery, device enrollment or deployment is
+included. See [HTTP contracts](../managed-cloud/README.md#phase-2b-browser-authentication)
+and [test evidence and limitations](./MANAGED_CLOUD_PHASE2B_EVIDENCE.md).
+
+Phase 2B 已实现本地可测的邀请制 Passkey 注册/登录、加密已验证邮箱、浏览器会话、CSRF、
+动作绑定 step-up 与 D1 共享限流。复审修复要求可发现凭证及可信来源绑定，拒绝验证竞态，
+加入有界清理，并本地执行生成 bundle。使用固定版本的真实 SimpleWebAuthn 适配器及合成
+Ed25519/ES256 认证器，在 workerd 中验签；没有 React UI、真实邮件、设备注册或部署。
+验收范围与限制见上方契约和证据链接。
