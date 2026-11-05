@@ -1,7 +1,11 @@
+import type { DeviceContext } from '../api-worker/auth.ts';
+import { syntheticSigner } from './synthetic-signer.ts';
+const checkpointSigner = await syntheticSigner();
+const createRepository = (db: D1Database, ctx: DeviceContext) => repository(db, ctx, checkpointSigner);
 import { beforeEach, expect, test } from 'vitest';
 import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset } from 'cloudflare:test';
-import { createRepository } from '../api-worker/repository.ts';
+import { createRepository as repository } from '../api-worker/repository.ts';
 import { authenticate } from '../api-worker/auth.ts';
 import { canonicalOperation, type ManagedOperation } from '../../src/cloud/protocol.ts';
 import { digest, approvalDigest, proofBytes } from '../shared/contracts.ts';
@@ -13,8 +17,8 @@ const op = (extra: Partial<ManagedOperation> = {}): ManagedOperation => ({ proto
 async function sign(bytes: string) { return btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign('Ed25519', privateKey, new TextEncoder().encode(bytes))))); }
 async function signed(operation: ManagedOperation) { const canonical = canonicalOperation(operation); return { canonical, signature: await sign(canonical) }; }
 async function context(vault = 'v', body = '', path = `/v1/vaults/${vault}/sync/push`) {
-    const nonce = crypto.randomUUID(), sessionDigest = await digest(token);
-    const request = new Request('https://local.invalid' + path, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'x-device-nonce': nonce, 'x-device-proof': await sign(proofBytes('POST', path, await digest(body), nonce, sessionDigest)) } });
+    const nonce = crypto.randomUUID(), sessionDigest = await digest(token), timestamp = Math.floor(Date.now()/1000);
+    const request = new Request('https://local.invalid' + path, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'x-device-timestamp': String(timestamp), 'x-device-nonce': nonce, 'x-device-proof': await sign(proofBytes('POST', path, await digest(body), nonce, sessionDigest, timestamp)) } });
     return authenticate(db(), request, vault, body);
 }
 async function push(operation = op()) { const s = await signed(operation); return createRepository(db(), await context(operation.vaultId, JSON.stringify(s))).push(s); }
@@ -147,8 +151,8 @@ test.each([
 test('request proof is bound to method, path, body and nonce; bearer alone is insufficient', async () => {
     const request = new Request('https://local.invalid/v1/vaults/v/sync/push', { method: 'POST', headers: { authorization: `Bearer ${token}` } });
     await expect(authenticate(db(), request, 'v', '')).rejects.toThrow('unauthorized');
-    const nonce = 'nonce', sessionDigest = await digest(token);
-    const headers = { authorization: `Bearer ${token}`, 'x-device-nonce': nonce, 'x-device-proof': await sign(proofBytes('POST', '/v1/vaults/v/sync/push', await digest('original'), nonce, sessionDigest)) };
+    const nonce = 'nonce', sessionDigest = await digest(token), timestamp = Math.floor(Date.now()/1000);
+    const headers = { authorization: `Bearer ${token}`, 'x-device-timestamp': String(timestamp), 'x-device-nonce': nonce, 'x-device-proof': await sign(proofBytes('POST', '/v1/vaults/v/sync/push', await digest('original'), nonce, sessionDigest, timestamp)) };
     await expect(authenticate(db(), new Request(request, { headers }), 'v', 'tampered')).rejects.toThrow('invalid_signature');
     const ctx = await context();
     await createRepository(db(), ctx).pull(null, 1);
@@ -225,8 +229,8 @@ test('SQLite REPLACE cannot bypass pinned-key or append-only guards', async () =
 test('real HTTP push, retry, pull and cross-tenant IDs/cursors use authenticated context', async () => {
     const { SELF } = await import('cloudflare:test');
     async function call(path: string, method = 'GET', body = '') {
-        const nonce = crypto.randomUUID();
-        return SELF.fetch('https://local.invalid' + path, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-device-nonce': nonce, 'x-device-proof': await sign(proofBytes(method, path, await digest(body), nonce, await digest(token))) }, ...(body ? { body } : {}) });
+        const nonce = crypto.randomUUID(), timestamp = Math.floor(Date.now()/1000);
+        return SELF.fetch('https://local.invalid' + path, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-device-timestamp': String(timestamp), 'x-device-nonce': nonce, 'x-device-proof': await sign(proofBytes(method, path, await digest(body), nonce, await digest(token), timestamp)) }, ...(body ? { body } : {}) });
     }
     const body = JSON.stringify(await signed(op()));
     const receipts = await Promise.all([call('/v1/vaults/v/sync/push', 'POST', body), call('/v1/vaults/v/sync/push', 'POST', body)]);
@@ -282,4 +286,27 @@ test('concurrent distinct writes allocate contiguous sequences and receive-order
     expect(receipts.map(r => r.serverSequence).sort((a, b) => a - b)).toEqual(Array.from({ length: 12 }, (_, i) => i + 1));
     const last = receipts.find(r => r.serverSequence === 12)!;
     expect(await db().prepare('SELECT v.operation_id FROM heads h JOIN versions v ON v.tenant_id=h.tenant_id AND v.vault_id=h.vault_id AND v.sequence=h.sequence').first('operation_id')).toBe(last.operationId);
+});
+test('checkpoint acceptance is atomic and roots bind every exact signed version', async () => {
+    const { advanceRoot, genesisRoot, verifyCheckpointPage } = await import('../shared/checkpoints.ts');
+    const first = op();
+    await push(first);
+    const before = await count('sync_checkpoints'), nonceBefore = await count('device_nonces');
+    await db().exec("CREATE TRIGGER fail_checkpoint BEFORE INSERT ON sync_checkpoints WHEN NEW.sequence>0 BEGIN SELECT RAISE(ABORT,'injected'); END");
+    await expect(push()).rejects.toThrow();
+    expect(await count('versions')).toBe(1);
+    expect(await count('sync_checkpoints')).toBe(before);
+    expect(await count('device_nonces')).toBe(nonceBefore);
+    await db().exec('DROP TRIGGER fail_checkpoint');
+    await push();
+    const page = await createRepository(db(), await context()).pull(null, 100);
+    const root = await genesisRoot('t', 'v');
+    const verified = await verifyCheckpointPage(await checkpointSigner.key(), 't', 'v', 0, root, 2, page);
+    let expected = root;
+    for (const version of page.versions)
+        expected = (await advanceRoot(expected, version.serverSequence, version.signed)).root;
+    expect(verified.root).toBe(expected);
+    const receipt = await push(first);
+    expect(JSON.parse(receipt.checkpoint.canonical).sequence).toBe(1);
+    await expect(repository(db(), await context(), await syntheticSigner()).pull(null, 100)).rejects.toThrow();
 });

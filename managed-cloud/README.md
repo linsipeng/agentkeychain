@@ -1,19 +1,12 @@
-# Managed Cloud Phases 2A–2B
+# Managed Cloud Phases 2A–2C
 
-Local-testable backend foundation. This package is separate from the frozen legacy
-`worker/`. Phase 2B adds invitation-only Passkey accounts and browser sessions. It does not
-enroll devices, operate on a local Vault, or enable production recovery. No production resource identifiers are configured.
+Local-testable Workers/D1 backend, separate from the frozen legacy `worker/`.
+Phase 2C adds trusted device enrollment, 15-minute proof-bound device sessions,
+immutable encrypted key packages, and service-signed sync checkpoints. No ordinary-user
+React UI, local Vault integration, deployment or production signer provisioning is included.
+The Slice 1 in-memory client is unchanged; its production persistence/transport belongs to Phase 4.
 
-The public Worker has `MAIN` and a private `RECOVERY` Service Binding. The Custodian
-Worker has only `CUSTODIAN`. Both public/default Custodian HTTP and its named RPC
-entrypoint's `fetch` return 404. `describe()` is metadata-only and reports
-`recoveryEnabled: false`; there is no release, decrypt, key-share, or recovery-case
-mutation method. Main and Custodian migrations run in separate Workers test projects.
-
-## Local development
-
-Pinned dependencies and `package-lock.json` belong to this independent npm workspace.
-With dependencies available locally:
+## Local verification
 
 ```sh
 cd managed-cloud
@@ -21,162 +14,177 @@ CI=1 WRANGLER_SEND_METRICS=false npm test
 npm run typecheck
 npm run build
 npm run test:bundle
-npm audit --json
-npm audit --omit=dev --json
+npm audit --offline --json
+npm audit --offline --omit=dev --json
 ```
 
-Tests use the official `@cloudflare/vitest-plugin` integration and workerd,
-with disposable D1 and real Service Binding RPC. They require loopback listening.
-`remoteBindings` is false. `build` is an esbuild bundle, not a Wrangler deploy.
-Wrangler manifests use all-zero placeholder resource IDs, disable public workers.dev
-and preview URLs, and set D1 `remote = false`. They are not deployment authorization.
+Tests require loopback listening, use disposable real workerd/D1, and generate synthetic
+keys only in memory. No remote bindings or outbound services are used. Offline npm audit
+output does **not** establish current advisory coverage. Dependency versions and lockfile
+are unchanged from the reviewed Phase 2B baseline. A fresh online audit remains a release
+gate when network access is authorized. See [Phase 2C evidence](../docs/MANAGED_CLOUD_PHASE2C_EVIDENCE.md).
 
-Root `bun test` is explicitly scoped to `tests/`; Workers suites run separately.
-Root lint includes both packages. Shared canonical protocol implementation is reused
-from `src/cloud/protocol.ts`; its explicit `node:buffer` import works in workerd's
-`nodejs_compat` mode without changing wire bytes. Device signatures use native
-WebCrypto Ed25519 against the stored immutable public key.
+## Device HTTP contracts
 
-## HTTP contract
+All responses are JSON with `Cache-Control: no-store`; errors use
+`{"error":{"code":"..."}}` without exceptions, SQL or payloads. Device control routes
+reject cookies, query parameters, unknown fields and unsupported content types. Bodies
+are capped while streaming at 8 KiB, before JSON parsing, DB access or crypto. Trusted
+source attribution is required and source limits are 120/minute. Status/challenge requests
+also use an independent 30/minute identity limit. No public route accepts account, tenant
+or vault identifiers as authorization.
 
-The device sync routes below are unchanged; successful responses are 200 JSON with `Cache-Control:
-no-store`. All errors are exactly `{"error":{"code":"..."}}`, also no-store, with
-no SQL, exception, request content, token, or signature in the response or logs.
-No application logger is present.
-
-| Route | Request | Response |
+| Method / path | Request | Response |
 | --- | --- | --- |
-| `POST /v1/vaults/:vaultId/sync/push` | Exact `{canonical,signature}` JSON; no query parameters | Slice 1 `PushReceipt`: `{vaultId,deviceId,operationId,serverSequence}` |
-| `GET /v1/vaults/:vaultId/sync/pull?cursor=...&limit=...` | No body; cursor optional; limit integer 1–100, default 100; duplicate/unknown query fields rejected | `{versions:[{signed:{canonical,signature},serverSequence}],nextCursor,hasMore}` |
+| POST `/v1/devices/authorize` | `{signingKey,wrappingKey,platform,proof}`; platform is macos/linux/windows/other | `{requestId,deviceId,deviceCode,verificationUri,verificationCode,phrase,expiresIn:600,interval:5}` |
+| POST `/v1/devices/status` | `{deviceCode}` | `{state}`; approved result additionally includes deviceId, vaultId, requestId and consumes the code |
+| POST `/v1/devices/challenge` | `{deviceId}` | `{challengeId,challenge,deviceId,vaultId,expiresAt}` |
+| POST `/v1/devices/token` | `{challengeId,signature}` | `{token,tokenType:"DeviceProof",expiresIn:900,deviceId,vaultId}` |
+| POST `/v1/devices/enroll` | `{canonical,signature}` key package, authenticated device request | `{accepted:true}` |
+| GET `/v1/devices/key-packages` | No body; authenticated device request | Own current `{canonical,signature}` package, or 404 |
 
-Body bytes are capped at **384 KiB**, before JSON parsing, auth lookup, or signature
-verification. Both declared Content-Length and actual streamed bytes are checked;
-chunked bodies cannot bypass the limit. UTF-8 is strict; compressed bodies are not
-accepted. Push Content-Type is `application/json` (optional `charset=utf-8`).
-The decoded encrypted envelope (24-byte nonce plus ciphertext) is at most **256 KiB**.
-Canonical field validation, signature encoding and envelope limits precede DB work.
-Pull is capped at 100 versions and **512 KiB** serialized response; a SQL running byte
-budget also bounds materialized results, with framing/escaping overhead reserved.
+Codes are independent random 256-bit values stored only as SHA-256 digests. The six-word
+phrase is for comparison, never an authorization capability. The verification URI is
+`/v1/auth/devices/verification`: an authenticated, read-only GET returning the JSON
+landing contract `{authentication:"passkey",verificationCodeRequired:true,submitUri}`.
+Its submitUri is `/v1/auth/devices/pending`, which accepts the separate verification code. Expired, unknown, already delivered and too-fast
+polls fail closed with the same 401 response. Denial prevents approval; consumed pairing
+codes are unnecessary for later session reissuance. Challenges last 60 seconds, permit at
+most five signature attempts, and are consumed atomically with session issuance.
 
-| HTTP | Code | Meaning |
+Authorize proof signs `JSON.stringify(["AgentKeychain-device-authorize-v1",signingKey,
+wrappingKey,platform])`. Keys use canonical base64; signing is Ed25519, wrapping is X25519.
+Only public keys are submitted. Challenge proof signs
+`JSON.stringify(["AgentKeychain-device-challenge-v1",challengeId,SHA256(challenge),deviceId,
+vaultId,expiresAt])`. Possession of a code, device ID, challenge or session token alone
+cannot authenticate. Refresh is a new challenge/proof; there is no bearer refresh bypass.
+
+### Browser approval and revocation
+
+These POST routes reuse the complete Phase 2B session, exact Origin, JSON, double-submit
+CSRF, source/account rate limits and real Passkey step-up pipeline. They never issue a
+device session using a browser cookie. Approval, denial and revocation require `confirmed:true`, a fresh
+step-up over its returned digest, and atomic one-use consumption at acceptance.
+
+| `/v1/auth/` suffix | Exact request | Response |
 | --- | --- | --- |
-| 400 | `invalid_request` | Invalid JSON, canonical shape, encoding, query, cursor, UTF-8, or future cursor |
-| 401 | `unauthorized` | Missing/malformed device session or proof headers |
-| 401 | `invalid_signature` | Invalid request proof or operation signature |
-| 403 | `approval_required` | Missing required reference, expired/consumed/mismatched in-scope grant, or forbidden grant on put |
-| 404 | `not_found` | Unknown route or inaccessible session/vault/device/approval/cursor scope, including cross-tenant resources |
-| 405 | `method_not_allowed` | Wrong method on a sync route |
-| 409 | `idempotency_conflict` | Same operation identity with different canonical bytes/signature |
-| 409 | `invalid_transition` | Generation/tombstone/keyEpoch violation |
-| 409 | `replayed_request` | Reused session nonce |
-| 413 | `payload_too_large` | Request/envelope limit exceeded |
-| 415 | `unsupported_media_type` | Unsupported JSON Content-Type or Content-Encoding |
-| 500 | `internal_error` | Redacted storage failure or broken history invariant |
+| `devices/pending` | `{verificationCode,issuerDeviceId}` (null only for bootstrap) | `{requestId,deviceId,platform,phrase,canonical,actionDigest,denyActionDigest}` |
+| `devices/approve` | `{canonical,signature,confirmed:true}` (signature null only for bootstrap) | `{approved:true,deviceId}` |
+| `devices/deny` | `{requestId,confirmed:true}` | `{denied:true}` |
+| `devices/list` | `{}` | `{devices:[{id,public_key,wrapping_key,active,revokeActionDigest}]}` |
+| `devices/revoke` | `{deviceId,confirmed:true}` | `{revoked:true}` |
 
-A foreign approval reference is indistinguishable from a nonexistent in-scope
-reference (404). A known in-scope grant with an invalid binding/expiry is 403.
-Unknown routes return 404 before attempting to read their bodies.
+Pending binds the request to the authenticated account/tenant and its sole vault. An
+ambiguous multi-vault account fails closed instead of accepting a caller-selected vault.
+First device bootstrap is allowed only when the tenant has **no historical device**.
+Revoking every device never reopens bootstrap; recovery is a later phase.
 
-## Device authentication and retry contract
+The exact canonical enrollment grant has ordered fields:
+`version,requestId,accountId,tenantId,vaultId,deviceId,signingKey,wrappingKey,issuerDeviceId,
+keyEpoch,expiresAt`. Version is 1. A subsequent device requires an existing active device
+of the same account/vault to sign those exact UTF-8 bytes, plus browser step-up. Server
+records supply the expected fields; supplied IDs cannot change authorization. Action
+digest is SHA-256 of `JSON.stringify(["AgentKeychain-device-action-v1",action,canonical])`.
+Deny uses requestId as canonical; revoke uses the JSON array
+`[tenantId,accountId,deviceId,signingKey,wrappingKey]`. The target and authorizer are
+rechecked inside the D1 action trigger. Concurrent revocation wins if committed first.
 
-Phase 2A can consume pre-provisioned, short-lived **device** sessions. No public device-session issuer or enrollment endpoint exists. Fixtures provision
-device metadata directly in disposable D1. Browser authentication uses the isolated
-`/v1/auth/` routes documented below and never authorizes these device sync routes.
+### Device request proof
 
-Headers: `Authorization: Bearer <session-token>`, `X-Device-Nonce` (1–128 ASCII
-identifier characters), and `X-Device-Proof` (canonical base64 Ed25519 signature).
-D1 stores only SHA-256 session digests. The request proof signs UTF-8 bytes of:
+Every authenticated request carries `Authorization: Bearer <token>`, `X-Device-Nonce`,
+`X-Device-Timestamp` (integer Unix seconds), and canonical base64 `X-Device-Proof`.
+Proof signs the UTF-8 JSON array:
 
 ```text
-JSON.stringify([1, method, pathname + search, SHA256_HEX(exactBody), nonce, SHA256_HEX(sessionToken)])
+["AgentKeychain-device-request-v1", method, normalizedPathAndQuery,
+ SHA256_HEX(exactBody), timestamp, nonce, SHA256_HEX(sessionToken)]
 ```
 
-The token identifies an account/tenant/vault/device tuple; none is taken from an
-account/tenant body, query, or header. The route vault must match the stored tuple.
-The device public key is pinned; updates, deletes and SQLite REPLACE cannot change
-it. Both device signature and request proof are required for push; pull requires
-request proof. Session expiry, revocation and active membership are checked again
-inside the acceptance transaction. Token possession alone is insufficient.
+Normalization uses URL pathname and sorted URLSearchParams serialization. Duplicate or
+unknown query fields are rejected by sync routes. The timestamp may differ by at most
+300 seconds, checked both at authentication and inside nonce acceptance. Session tokens
+are random 256-bit values; only digests reach D1. Each `(session digest,nonce)` is one-use.
+An expired session needs a new signing-key proof. Revocation atomically disables every
+device session and vault membership, while both historical public keys remain immutable
+under UPDATE, DELETE and INSERT OR REPLACE. Cleanup deletes at most 64 nonces per device
+control request, only after session expiry plus the full skew window. Challenge cleanup
+is bounded at 32 after a 24-hour retention period. Successful audit evidence is retained.
 
-An operation retry retains identical `canonical` and `signature` but uses a **fresh
-request nonce/proof**. It returns the original receipt, without a new version,
-sequence, approval consumption or audit event. Replaying the entire HTTP proof is
-rejected with 409. This distinguishes operation idempotency from request replay.
-The nonce ledger currently has no cleanup job; bounded expiry-aware cleanup belongs
-to operational follow-up, and must never remove live-session replay protection.
+### Key packages
 
-Cursor is base64 JSON `[tenantId,vaultId,deviceId,sequence]`. It is an authorization
-scope marker, not a signed checkpoint or secret capability. Every pull authenticates
-and rechecks the tuple; editing the cursor cannot grant access. Current request
-proof binds the exact URL/query. Clients must URL-encode the cursor. No checkpoints
-are returned or implied in this phase.
+Canonical package fields in order: `version,vaultId,targetDeviceId,keyEpoch,wrappedVDK,
+issuerDeviceId,grantId`. Version is 1; wrappedVDK is canonical base64 encrypted bytes
+(48-byte minimum, 2048 encoded character maximum). The issuer signs exact canonical bytes.
+The server verifies the active trusted issuer, authenticated request, accepted enrollment
+grant, target, vault and epoch; it never decrypts the package. First-device packages are
+self-issued against the bootstrap grant. Later packages require that grant's authorizer.
+Epoch is currently 1 for enrollment; rotation is outside this phase. An accepted package
+is immutable; only an exact signed retry succeeds. Fetch has no target/vault parameters
+and can return only the authenticated device's own package while that device is active.
 
-## Durable acceptance and its exact limit
+## Durable sync and checkpoints
 
-No JavaScript `BEGIN`/callback transaction is claimed. D1 `batch` submits:
-
-1. Insert nonce: a BEFORE INSERT trigger rechecks live session, account membership,
-   device and vault-device status, and rejects nonce replay.
-2. Insert into the write-only `accept_operation` view. Its INSTEAD OF INSERT trigger
-   decides exact idempotency, validates head transitions and approval bindings,
-   increments the vault sequence, appends the immutable version, updates head,
-   consumes approval (using the Slice 1 `SHA256("AgentKeychain-approval-v1\0" + canonical)` digest), stores the exact receipt, and appends redacted audit metadata.
-3. Select that receipt using tenant/vault/device/operation identity.
-
-A single SQLite/D1 transaction contains all these effects; no approval state lives
-in a separate service store. Exact retries use `RAISE(IGNORE)` only to skip command
-execution, while authorization/nonce acceptance still runs. Abort at any later
-trigger rolls the entire batch back. The failure-injection test aborts audit insertion
-and observes unchanged nonce count, sequence, head, version, approval and audit;
-retrying the same pre-authenticated request then succeeds after removing the fault.
-Concurrent identical/distinct pushes and conflicting retries execute against real D1.
-
-Signature verification occurs before the transaction, using the immutable key;
-mutable authorization is rechecked inside it. A revocation committed before that
-check wins; one committed after an accepted write does not retroactively undo it.
-No cross-D1 transaction, multi-region staging behavior, power-loss simulation,
-replication failover, throughput/SLO or production deployment is proven here.
-
-The SQL adapter is a trusted boundary: D1 has no RLS, and a compromised Worker with
-a raw binding can issue arbitrary SQL. Application services receive only a scoped
-`SyncRepository`, never arbitrary SQL/table/transaction callbacks. Auth composition
-and repository factories own the raw D1 handles. DB triggers protect invariants,
-not against an administrator who can alter/drop the schema.
-
-## Isolation coverage
-
-| Tables | Runtime access and negative evidence |
+| Route | Contract |
 | --- | --- |
-| `accounts`, `tenants` | Root identities; no CRUD/read API; ownership represented by membership. Unknown identity routes 404. |
-| `memberships`, `vaults`, `devices`, `vault_devices` | Composite tenant keys; auth joins plus transactional recheck; cross-tenant relationship inserts fail; inactive memberships/devices/vault memberships reject writes and pulls. |
-| `device_sessions`, `device_nonces` | Digest selects stored account/tenant/vault/device; composite FKs; forged principal relationships fail; missing proof, expired/revoked sessions, nonce replay and foreign vaults rejected. |
-| `versions`, `heads`, `idempotency` | Every runtime query includes tenant/vault, identity lookup also device; foreign FKs fail; identical IDs in two tenants retain independent histories/receipts; cross-vault sequences independent. |
-| `approvals` | Scoped ID plus account, device, action, object, digest, expiry and unused state; foreign tenant/vault grants fail; consumed/expired/tampered grants cannot authorize. |
-| `audit` | Transactional metadata-only append; composite FK; no read API; UPDATE/DELETE/REPLACE rejected. |
-| `checkpoints` | Schema only; no runtime signing/read API; cross-tenant audit FK and append-only guards. |
-| `recovery_cases`, `recovery_events` | Orchestration metadata schema only; no runtime API; composite tenant/vault relationships reject foreign cases/targets. |
-| Custodian `custodian_cases`, `release_evidence` | Separate database/Worker with no data RPC; cross-tenant case references reject; evidence cannot update/delete/replace. |
+| POST `/v1/vaults/:vaultId/sync/push` | Exact `{canonical,signature}`; no query. Returns Slice 1 receipt plus `checkpoint:{canonical,signature}` |
+| GET `/v1/vaults/:vaultId/sync/pull?cursor=...&limit=...` | No body; limit 1–100. Returns `{versions,nextCursor,hasMore,checkpoint,pageCheckpoint}` |
 
-No universal service `get(table,id)` exists. Pull tests cover tenant/vault/device
-cursor binding, future/gap rejection, byte limits, and pagination without gaps.
+Sync requests retain the 384 KiB canonical request / 256 KiB encrypted-envelope limits.
+Pull pages are capped at 100 versions and 512 KiB with reserved checkpoint framing space.
+The route vault must match the authenticated session's stored vault. Cursor is base64 JSON
+`[tenantId,vaultId,deviceId,sequence]`; it is a scope marker, not an authorization capability.
+Exact operation retries require a fresh request nonce and return the original receipt and
+checkpoint without allocating another sequence or consuming another approval.
 
-## Deferred boundaries
+The mandatory `CHECKPOINT_SIGNER` private Service Binding exposes `key()` (keyId/publicKey)
+and `sign(canonical)`. It owns the Ed25519 private key; the API/D1 only receive signatures
+and public metadata. There is no checked-in production key or fallback signer. Key ID is
+SHA-256 of canonical base64 publicKey; D1 pins the service key immutably. Substitution or
+missing configuration fails closed. Key rotation needs a separately reviewed trust-root
+migration; it is not silently accepted. Local tests inject ephemeral signer Workers.
 
-- Account/passkey/browser sessions and action-bound step-up: implemented in Phase 2B
-  below; no real email provider or browser UI.
-- Device enrollment, session issuance/refresh, wrapping keys/packages, durable client
-  queue and signed checkpoint chains: Phase 2C and client phases.
-- Approval issuance/UI, richer risk classification (including rotation/overwrite),
-  two-party cryptographic recovery, notifications, cooldown/release saga: Phase 2D.
-  This backend preserves Slice 1 put/delete/restore semantics; it does not claim all
-  V1 high-risk policies are enforced yet.
-- Checkpoint rows are schema only. Audit is append-only/redacted, not cryptographically
-  checkpointed. Restore is a signed device operation with a pre-provisioned bound
-  approval; browser authorization alone cannot generate a restore signature.
-- No real user data, Vault keys, private device keys, production accounts, Cloudflare
-  resources, deployment, migration of existing local data or legacy Worker changes.
-- No UI was added. No built-in Chrome/DevTools tool is exposed in this session;
-  browser validation was unavailable, not replaced with the prohibited Hermes adapter.
+Checkpoint fields in order: `version,tenantId,vaultId,keyId,sequence,root,previousRoot,
+operationDigest`. Version is 1. The signature covers exactly that canonical JSON.
+
+```text
+genesis = SHA256(JSON.stringify(["AgentKeychain-sync-genesis-v1",tenantId,vaultId]))
+opDigest = SHA256(JSON.stringify(["AgentKeychain-signed-operation-v1",canonical,signature]))
+root = SHA256(JSON.stringify(["AgentKeychain-sync-chain-v1",previousRoot,sequence,opDigest]))
+```
+
+For each accepted version, one D1 batch rechecks live authorization/nonce/time, decides
+idempotency, validates transition and approval, allocates sequence, appends version, updates
+head, consumes approval, appends audit, and inserts its checkpoint. A stale predecessor
+aborts the entire batch and retries with the new root (at most 32 attempts). Signatures
+computed for aborted candidates are never published or stored. No transaction is held
+open across a service RPC. A genesis root is independently initialized at sequence zero;
+nonempty historical vaults without a checkpoint fail closed and require an explicit
+migration. This task does not backfill or alter existing production history.
+
+Pull reads its versions, current signed head, and signed page-end root in one D1 batch.
+Clients must verify the independently pinned service key, device operation signatures,
+contiguous chain, page-end root, high-water sequence and hasMore consistency.
+`verifyCheckpointPage` supplies the checkpoint/chain portion; Slice 1 operation signature
+validation remains separate. Persist the returned root/sequence and requiredThrough
+atomically with applied history. Known rollback, hidden suffix below an authenticated
+head, key substitution and altered pages are rejected. A wholly replayed old valid
+snapshot cannot prove its own staleness without a separately retained trusted anchor;
+this cryptographic limit is not claimed solved by a signature alone.
+
+The old Phase 2A `checkpoints` table remains reserved; Phase 2C uses `checkpoint_key`
+and `sync_checkpoints`. Device grants, browser actions, public keys, packages and device
+audit have immutable guards. Audit contains event names and opaque principal IDs only,
+never codes, tokens, signatures, public keys or package ciphertext. Raw D1 access remains
+a trusted repository boundary, not an RLS claim against a compromised administrator.
+
+## Remaining product and release boundaries
+
+- Phase 2D: broader operation risk approvals, checkpointed audit stream and two-party recovery.
+- Phase 3: ordinary-user UI including `/device`; no UI or real browser test is claimed.
+- Phase 4: secure local key storage, persistent client queue, checkpoint anchors and daemon.
+- Real trusted ingress/email/checkpoint services, domains, keys, independent security review,
+  online vulnerability audit, staging, remote migrations and deployment require their own gates.
+- No real keys, Vault, Keychain, sync.json, Cloudflare account or user data was accessed.
 
 ## Phase 2B browser authentication
 
@@ -318,9 +326,9 @@ to the repository factory and composition boundaries, as in Phase 2A; this is no
 ### Remaining phase boundaries
 
 Step-up records a five-minute action-bound fact on the rotated session. It is **not**
-a reusable grant, an approval issuer, or a device signing capability. Phase 2D must
+a reusable grant or a device signing capability. Phase 2C consumes it atomically for device actions; Phase 2D must
 consume/validate it with the actual one-use approval action in its own durable
-transaction; no protected-action endpoint exists yet. Recovery purposes are reserved
+transaction for sync-operation approvals. Recovery purposes are reserved
 in the challenge schema; recovery ceremonies belong to Phase 2D.
 
 No real email, domain/RP provisioning, browser hardware passkey, deployment, device

@@ -462,13 +462,15 @@ test('browser cookies and device bearer credentials never substitute for each ot
     const browser = await handle(new Request(origin + '/v1/auth/session', { headers: { authorization: 'Bearer ' + random() } }));
     expect(browser.status).toBe(401);
 });
-
 test('standards-conforming nonresident-only authenticator cannot create an account with issued options', async () => {
     const { options } = await registrationOptions();
     // Model the WebAuthn create algorithm's resident-key capability decision,
     // not an invented resident bit in signed authenticatorData.
     const create = async (supportsResident: boolean) => {
-        const selection = options.options.authenticatorSelection! as { residentKey: string; requireResidentKey?: boolean };
+        const selection = options.options.authenticatorSelection! as {
+            residentKey: string;
+            requireResidentKey?: boolean;
+        };
         if (!supportsResident && (selection.residentKey === 'required' || selection.requireResidentKey === true))
             throw new Error('ConstraintError');
         return (await virtualAuthenticator()).register(options.options.challenge);
@@ -486,7 +488,7 @@ test('explicit nonresident credential property is rejected by production adapter
     expect((await call('registration/verify', { challengeId: options.challengeId, userId: options.userId, response })).status).toBe(401);
     expect(await count('accounts')).toBe(0);
 });
-test.each(['consumed', 'expired'] as const)('invitation %s during suspended email verification never returns phantom id', async mode => {
+test.each(['consumed', 'expired'] as const)('invitation %s during suspended email verification never returns phantom id', async (mode) => {
     const data = await invite();
     let entered!: () => void, resume!: () => void;
     const started = new Promise<void>(r => { entered = r; });
@@ -501,26 +503,36 @@ test.each(['consumed', 'expired'] as const)('invitation %s during suspended emai
     expect(await response.json()).toEqual({ error: { code: 'unauthorized' } });
     expect(await count('account_verifications')).toBe(0);
 });
-test.each(['invalid-invitation', 'wrong-email', 'wrong-proof', 'valid', 'throw'] as const)('verifier invocation equivalent for %s', async mode => {
+test.each(['invalid-invitation', 'wrong-email', 'wrong-proof', 'valid', 'throw'] as const)('verifier invocation equivalent for %s', async (mode) => {
     const data = await invite(), verifier = config.verifyEmail;
     let calls = 0;
-    config.verifyEmail = async (e, p) => { calls++; if (mode === 'throw') throw new Error('private-provider-detail'); return verifier(e, p); };
-    if (mode === 'invalid-invitation') data.invitation = random();
-    if (mode === 'wrong-email') data.email = 'wrong@example.invalid';
-    if (mode === 'wrong-proof') data.proof = random();
+    config.verifyEmail = async (e, p) => {
+        calls++;
+        if (mode === 'throw')
+            throw new Error('private-provider-detail');
+        return verifier(e, p);
+    };
+    if (mode === 'invalid-invitation')
+        data.invitation = random();
+    if (mode === 'wrong-email')
+        data.email = 'wrong@example.invalid';
+    if (mode === 'wrong-proof')
+        data.proof = random();
     const response = await call('invitation/verify', data);
     expect(calls).toBe(1);
     expect(response.status).toBe(mode === 'valid' ? 200 : 401);
-    if (mode !== 'valid') expect(await response.json()).toEqual({ error: { code: 'unauthorized' } });
+    if (mode !== 'valid')
+        expect(await response.json()).toEqual({ error: { code: 'unauthorized' } });
 });
-test.each(['packed', 'malformed'] as const)('production adapter rejects actual %s attestation bytes', async mode => {
+test.each(['packed', 'malformed'] as const)('production adapter rejects actual %s attestation bytes', async (mode) => {
     const { options } = await registrationOptions(), a = await virtualAuthenticator();
     const response = await a.register(options.options.challenge, { attestationFormat: 'packed' });
-    if (mode === 'malformed') response.response.attestationObject = 'AA';
+    if (mode === 'malformed')
+        response.response.attestationObject = 'AA';
     expect((await call('registration/verify', { challengeId: options.challengeId, userId: options.userId, response })).status).toBe(401);
     expect(await count('accounts')).toBe(0);
 });
-test.each(['origin', 'content-type', 'x-csrf-token'])('duplicate and combined %s are rejected after workerd normalization', async header => {
+test.each(['origin', 'content-type', 'x-csrf-token'])('duplicate and combined %s are rejected after workerd normalization', async (header) => {
     await register();
     const headers = new Headers({ origin, 'content-type': 'application/json', cookie: cookies, 'x-csrf-token': csrf });
     const value = headers.get(header)!;
@@ -540,26 +552,41 @@ test('logout audit failure rolls back revocation and preserves session', async (
     expect(await response.json()).toEqual({ error: { code: 'unauthorized' } });
     expect((await current()).status).toBe(200);
 });
-test.each(['missing-source', 'non-string', 'empty', 'space', 'uppercase', 'oversized', 'unicode', 'throw', 'unstable', 'missing-verifier', 'malformed-key', 'short-key', 'equal-bootstrap-email', 'equal-bootstrap-lookup', 'equal-email-lookup'] as const)('production binding %s fails closed without leaking', async mode => {
+test.each(['missing-source', 'non-string', 'empty', 'space', 'uppercase', 'oversized', 'unicode', 'throw', 'unstable', 'missing-verifier', 'malformed-key', 'short-key', 'equal-bootstrap-email', 'equal-bootstrap-lookup', 'equal-email-lookup'] as const)('production binding %s fails closed without leaking', async (mode) => {
     const { browserFetch } = await import('../api-worker/browser-bindings.ts');
     const bindings = {
         MAIN: env.MAIN, AUTH_ORIGIN: origin, AUTH_RP_ID: 'local.invalid',
         AUTH_BOOTSTRAP_KEY: random(), AUTH_EMAIL_KEY: random(), AUTH_LOOKUP_KEY: random(),
-        EMAIL_VERIFIER: { verify: async () => true } as { verify: (e: string, p: string) => Promise<boolean> } | undefined,
-        TRUSTED_AUTH_SOURCE: { resolve: async () => 'synthetic-source' } as { resolve: (r: Request) => Promise<string> } | undefined,
+        EMAIL_VERIFIER: { verify: async () => true } as {
+            verify: (e: string, p: string) => Promise<boolean>;
+        } | undefined,
+        TRUSTED_AUTH_SOURCE: { resolve: async () => 'synthetic-source' } as {
+            resolve: (r: Request) => Promise<string>;
+        } | undefined,
     };
-    if (mode === 'missing-source') bindings.TRUSTED_AUTH_SOURCE = undefined;
-    if (mode === 'non-string') bindings.TRUSTED_AUTH_SOURCE = { resolve: async () => null as unknown as string };
-    if (mode === 'missing-verifier') bindings.EMAIL_VERIFIER = undefined;
-    if (mode === 'malformed-key') bindings.AUTH_EMAIL_KEY = '!'.repeat(43);
-    if (mode === 'short-key') bindings.AUTH_EMAIL_KEY = 'AA';
-    if (mode === 'equal-bootstrap-email') bindings.AUTH_EMAIL_KEY = bindings.AUTH_BOOTSTRAP_KEY;
-    if (mode === 'equal-bootstrap-lookup') bindings.AUTH_LOOKUP_KEY = bindings.AUTH_BOOTSTRAP_KEY;
-    if (mode === 'equal-email-lookup') bindings.AUTH_LOOKUP_KEY = bindings.AUTH_EMAIL_KEY;
+    if (mode === 'missing-source')
+        bindings.TRUSTED_AUTH_SOURCE = undefined;
+    if (mode === 'non-string')
+        bindings.TRUSTED_AUTH_SOURCE = { resolve: async () => null as unknown as string };
+    if (mode === 'missing-verifier')
+        bindings.EMAIL_VERIFIER = undefined;
+    if (mode === 'malformed-key')
+        bindings.AUTH_EMAIL_KEY = '!'.repeat(43);
+    if (mode === 'short-key')
+        bindings.AUTH_EMAIL_KEY = 'AA';
+    if (mode === 'equal-bootstrap-email')
+        bindings.AUTH_EMAIL_KEY = bindings.AUTH_BOOTSTRAP_KEY;
+    if (mode === 'equal-bootstrap-lookup')
+        bindings.AUTH_LOOKUP_KEY = bindings.AUTH_BOOTSTRAP_KEY;
+    if (mode === 'equal-email-lookup')
+        bindings.AUTH_LOOKUP_KEY = bindings.AUTH_EMAIL_KEY;
     const values: Record<string, string> = { empty: '', space: ' source ', uppercase: 'SOURCE', oversized: 'a'.repeat(129), unicode: '源' };
-    if (mode in values) bindings.TRUSTED_AUTH_SOURCE = { resolve: async () => values[mode]! };
-    if (mode === 'throw') bindings.TRUSTED_AUTH_SOURCE = { resolve: async () => { throw new Error('private-source-detail'); } };
-    if (mode === 'unstable') bindings.TRUSTED_AUTH_SOURCE = { resolve: async () => random().toLowerCase() };
+    if (mode in values)
+        bindings.TRUSTED_AUTH_SOURCE = { resolve: async () => values[mode]! };
+    if (mode === 'throw')
+        bindings.TRUSTED_AUTH_SOURCE = { resolve: async () => { throw new Error('private-source-detail'); } };
+    if (mode === 'unstable')
+        bindings.TRUSTED_AUTH_SOURCE = { resolve: async () => random().toLowerCase() };
     const bootstrap = await browserFetch(new Request(origin + '/v1/auth/bootstrap'), bindings);
     const outputModes = ['non-string', 'empty', 'space', 'uppercase', 'oversized', 'unicode', 'throw', 'unstable'];
     const response = outputModes.includes(mode) ? await (async () => {
@@ -576,8 +603,7 @@ test('wrong-purpose CryptoKeys cannot activate direct composition', async () => 
     const handler = createBrowserAuth(env.MAIN, { ...config, bootstrapKey: config.emailKey, emailKey: config.bootstrapKey });
     expect((await handler(new Request(origin + '/v1/auth/bootstrap'))).status).toBe(503);
 });
-
-test.each(['membership', 'email', 'passkey', 'bootstrap-used', 'bootstrap-expired'] as const)('authentication acceptance rechecks %s after actual crypto', async mode => {
+test.each(['membership', 'email', 'passkey', 'bootstrap-used', 'bootstrap-expired'] as const)('authentication acceptance rechecks %s after actual crypto', async (mode) => {
     const { authenticator } = await register();
     await bootstrap();
     const options = await loginOptions(), repo = browserRepository(env.MAIN);
@@ -587,11 +613,16 @@ test.each(['membership', 'email', 'passkey', 'bootstrap-used', 'bootstrap-expire
     const tenant = (await repo.membership(stored.account_id))!.tenant_id;
     const { webauthn, decode } = await import('../api-worker/webauthn.ts');
     const counter = await webauthn.authentication(config, challenge.challenge_digest, await authenticator.assert(options.options.challenge), { id: stored.id, publicKey: decode(stored.public_key), counter: stored.counter });
-    if (mode === 'membership') await env.MAIN.prepare('UPDATE memberships SET active=0').run();
-    if (mode === 'email') await env.MAIN.prepare('UPDATE account_emails SET lookup_hash=?').bind(await digest(random())).run();
-    if (mode === 'passkey') await env.MAIN.prepare('UPDATE passkeys SET active=0').run();
-    if (mode === 'bootstrap-used') await env.MAIN.prepare('INSERT INTO consumed_bootstraps VALUES(?,unixepoch()+300)').bind(sessionDigest).run();
-    if (mode === 'bootstrap-expired') await env.MAIN.prepare('UPDATE webauthn_challenges SET auth_expires=unixepoch()-1 WHERE id=?').bind(challenge.id).run();
+    if (mode === 'membership')
+        await env.MAIN.prepare('UPDATE memberships SET active=0').run();
+    if (mode === 'email')
+        await env.MAIN.prepare('UPDATE account_emails SET lookup_hash=?').bind(await digest(random())).run();
+    if (mode === 'passkey')
+        await env.MAIN.prepare('UPDATE passkeys SET active=0').run();
+    if (mode === 'bootstrap-used')
+        await env.MAIN.prepare('INSERT INTO consumed_bootstraps VALUES(?,unixepoch()+300)').bind(sessionDigest).run();
+    if (mode === 'bootstrap-expired')
+        await env.MAIN.prepare('UPDATE webauthn_challenges SET auth_expires=unixepoch()-1 WHERE id=?').bind(challenge.id).run();
     await expect(repo.accept({ challenge, account: stored.account_id, tenant, key: { ...stored, counter }, sessionDigest: await digest(random()), csrfDigest: await digest(random()), absoluteExpiry: Math.floor(Date.now() / 1000) + 43200, actionDigest: null })).rejects.toThrow();
     expect(await count('browser_sessions')).toBe(1);
     expect((await env.MAIN.prepare('SELECT consumed_at FROM webauthn_challenges WHERE id=?').bind(challenge.id).first())!.consumed_at).toBeNull();
@@ -633,7 +664,6 @@ test('cleanup does not delete expired verifications referenced by live challenge
     expect(await count('account_verifications')).toBe(1);
     expect((await env.MAIN.prepare('SELECT id FROM webauthn_challenges WHERE id=?').bind(options.challengeId).first())!.id).toBe(options.challengeId);
 });
-
 test('wrong-purpose lookup HMAC cannot sign an anonymous bootstrap', async () => {
     const { encode } = await import('../api-worker/webauthn.ts');
     const payload = encode(new TextEncoder().encode(JSON.stringify({ n: random(), e: Math.floor(Date.now() / 1000) + 300, c: await digest(csrf) })));
@@ -648,15 +678,16 @@ test('failed-request flood remains rate bounded without accumulating credential 
     let invocations = 0;
     config.verifyEmail = async () => { invocations++; return false; };
     const results = [];
-    for (let i = 0; i < 160; i++) results.push((await call('invitation/verify', data)).status);
+    for (let i = 0; i < 160; i++)
+        results.push((await call('invitation/verify', data)).status);
     expect(results.filter(s => s === 401)).toHaveLength(30);
     expect(results.filter(s => s === 429)).toHaveLength(130);
     expect(invocations).toBe(30);
     expect(await count('auth_audit')).toBe(120);
     expect(await count('auth_rate_windows')).toBe(2);
-    for (const table of ['accounts', 'passkeys', 'browser_sessions', 'account_verifications', 'webauthn_challenges']) expect(await count(table)).toBe(0);
+    for (const table of ['accounts', 'passkeys', 'browser_sessions', 'account_verifications', 'webauthn_challenges'])
+        expect(await count(table)).toBe(0);
 });
-
 test('competing successful registration consumes invitation while another verification awaits provider', async () => {
     const { options, invitation } = await registrationOptions(), authenticator = await virtualAuthenticator();
     const body = { challengeId: options.challengeId, userId: options.userId, response: await authenticator.register(options.options.challenge) };
@@ -677,4 +708,49 @@ test('competing successful registration consumes invitation while another verifi
     expect(await result.json()).toEqual({ error: { code: 'unauthorized' } });
     expect(await count('account_verifications')).toBe(1);
     expect(await count('accounts')).toBe(1);
+});
+test('device approval uses actual Passkey step-up, exact action digest, confirmation and existing CSRF boundary', async () => {
+    const { authenticator } = await register();
+    const { syntheticSigner } = await import('./synthetic-signer.ts');
+    const { deviceFetch } = await import('../api-worker/device-http.ts');
+    const { enrollmentProof } = await import('../shared/device-protocol.ts');
+    const signer = await syntheticSigner(), key = await signer.key(), wrappingKey = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
+    const authorized = await deviceFetch(new Request(origin + '/v1/devices/authorize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ signingKey: key.publicKey, wrappingKey, platform: 'linux', proof: await signer.sign(enrollmentProof(key.publicKey, wrappingKey, 'linux')) }) }), { MAIN: env.MAIN, AUTH_ORIGIN: origin, TRUSTED_AUTH_SOURCE: { resolve: async () => 'synthetic-device-source' } });
+    expect(authorized.status).toBe(200);
+    const pairing = await authorized.json() as {
+        verificationCode: string;
+    };
+    const pending = { verificationCode: pairing.verificationCode, issuerDeviceId: null };
+    expect((await call('devices/pending', pending, { 'x-csrf-token': '' })).status).toBe(401);
+    expect((await call('devices/pending', pending, { origin: 'https://foreign.invalid' })).status).toBe(401);
+    const p = await call('devices/pending', pending);
+    expect(p.status).toBe(200);
+    const grant = await p.json() as {
+        canonical: string;
+        actionDigest: string;
+    };
+    const approval = { canonical: grant.canonical, signature: null, confirmed: true };
+    expect((await call('devices/approve', approval)).status).toBe(401);
+    const step = async (actionDigest: string) => {
+        const opts = await (await call('step-up/options', { actionDigest })).json() as Options;
+        const verified = await call('step-up/verify', { challengeId: opts.challengeId, actionDigest, response: await authenticator.assert(opts.options.challenge) });
+        expect(verified.status).toBe(200);
+        remember(verified);
+    };
+    await step(await digest('wrong-device-action'));
+    expect((await call('devices/approve', approval)).status).toBe(401);
+    await step(grant.actionDigest);
+    expect((await call('devices/approve', { ...approval, confirmed: false })).status).toBe(400);
+    expect((await call('devices/approve', approval)).status).toBe(200);
+    expect((await call('devices/approve', approval)).status).toBe(404);
+    expect(await count('devices')).toBe(1);
+    expect(await count('device_actions')).toBe(1);
+});
+test('device verification URI has an authenticated read-only JSON landing contract', async () => {
+    await register();
+    const before = await count('device_requests');
+    const r = await handle(new Request(origin + '/v1/auth/devices/verification', { headers: { cookie: cookies } }));
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ authentication: 'passkey', verificationCodeRequired: true, submitUri: origin + '/v1/auth/devices/pending' });
+    expect(await count('device_requests')).toBe(before);
 });

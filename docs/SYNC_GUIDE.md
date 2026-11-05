@@ -115,9 +115,9 @@ MemoryApprovals 不提供此生产保证。Managed Cloud 不打开旧 `sync.json
 
 ## Phase 2A backend foundation / 后端基础
 
-The independent `managed-cloud/` workspace now tests atomic D1 acceptance, device-authenticated push/pull, isolation and a private Custodian skeleton on local workerd. This does not turn the Slice 1 client into a production client. Account login, enrollment, signed checkpoints and split-key recovery remain deferred. See [contracts](../managed-cloud/README.md) and [evidence](./MANAGED_CLOUD_PHASE2A_EVIDENCE.md).
+The independent `managed-cloud/` workspace now tests atomic D1 acceptance, device-authenticated push/pull, isolation and a private Custodian skeleton on local workerd. This does not turn the Slice 1 client into a production client. Account login arrived in Phase 2B; enrollment and signed checkpoints arrived in Phase 2C below. Split-key recovery remains deferred. See [contracts](../managed-cloud/README.md) and [evidence](./MANAGED_CLOUD_PHASE2A_EVIDENCE.md).
 
-独立 `managed-cloud/` 已通过本地 workerd 验证 D1 原子接受、设备认证同步、隔离及私有 Custodian 骨架。Slice 1 客户端仍不是生产客户端；账号登录、设备注册、签名检查点与分钥恢复仍属于后续阶段。
+独立 `managed-cloud/` 已通过本地 workerd 验证 D1 原子接受、设备认证同步、隔离及私有 Custodian 骨架。Slice 1 客户端仍不是生产客户端；账号登录已在 Phase 2B 实现，设备注册与签名检查点已在下文 Phase 2C 实现；分钥恢复仍属于后续阶段。
 
 ## Phase 2B account backend / 账号后端
 
@@ -135,3 +135,31 @@ Phase 2B 已实现本地可测的邀请制 Passkey 注册/登录、加密已验�
 加入有界清理，并本地执行生成 bundle。使用固定版本的真实 SimpleWebAuthn 适配器及合成
 Ed25519/ES256 认证器，在 workerd 中验签；没有 React UI、真实邮件、设备注册或部署。
 验收范围与限制见上方契约和证据链接。
+
+
+## Phase 2C devices and checkpoints / 设备与检查点
+
+The managed backend now implements browser-approved trusted-device grants, first-device
+bootstrap, 15-minute sessions requiring request signatures, immutable encrypted key
+packages, atomic revocation, and signed per-vault sync chains. Browser approval requires
+Passkey step-up over the exact action digest and explicit confirmation. Account/vault
+scope comes from authenticated records; the server never receives a private device key
+or VDK. The generated workerd bundle exercises the complete synthetic JSON flow.
+
+托管后端已实现浏览器批准的受信设备授权、首设备初始化、15 分钟请求签名会话、不可变加密
+密钥包、原子吊销与每 Vault 签名同步链。浏览器批准需要绑定完整动作摘要的 Passkey
+step-up 和显式确认；账号/Vault 范围来自认证记录，服务端不接收设备私钥或 VDK。
+生成的 workerd bundle 已验证完整合成 JSON 流程。
+
+The Slice 1 client and its earlier limitations above remain unchanged. Production client
+checkpoint persistence and the ordinary-user `/device` UI are later phases. A retained
+trusted anchor is necessary to reject an entirely replayed old signed snapshot. No online
+audit or real browser/platform-authenticator validation is claimed under this task's
+no-network constraint and unavailable built-in browser tools.
+
+上文 Slice 1 客户端及其限制保持不变；生产客户端检查点持久化和普通用户 `/device` 界面属于
+后续阶段。拒绝整个旧签名快照的回放需要独立保存的可信锚点。本任务禁止网络，且未提供内置
+浏览器工具，因此不声称完成在线漏洞审计或真实浏览器/平台认证器验收。
+
+See [current backend contracts](../managed-cloud/README.md) and
+[Phase 2C evidence](./MANAGED_CLOUD_PHASE2C_EVIDENCE.md).

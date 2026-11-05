@@ -1,3 +1,4 @@
+import { browserDevice } from './device-http.ts';
 import type { RegistrationResponseJSON, AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { ApiError, boundedBody, digest, errorResponse } from '../shared/contracts.ts';
 import { browserRepository, type SessionRow, type ChallengeRow } from './browser-repository.ts';
@@ -17,8 +18,12 @@ export const unavailable = () => Response.json({ error: { code: 'unavailable' } 
 // the trusted ingress adapter's contract; there is no client-controlled fallback.
 async function resolveSource(config: BrowserConfig, request: Request) {
     const values = await Promise.allSettled([Promise.resolve().then(() => config.trustedSource(request.clone() as Request)), Promise.resolve().then(() => config.trustedSource(request.clone() as Request))]);
-    if (values.some(v => v.status !== 'fulfilled')) throw new Error('invalid_auth_configuration');
-    const [a, b] = values as [PromiseFulfilledResult<string>, PromiseFulfilledResult<string>];
+    if (values.some(v => v.status !== 'fulfilled'))
+        throw new Error('invalid_auth_configuration');
+    const [a, b] = values as [
+        PromiseFulfilledResult<string>,
+        PromiseFulfilledResult<string>
+    ];
     if (typeof a.value !== 'string' || !/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(a.value) || a.value !== b.value)
         throw new Error('invalid_auth_configuration');
     return a.value;
@@ -73,7 +78,7 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
             const url = new URL(request.url), route = url.pathname.replace('/v1/auth/', '');
             if (url.search || url.origin !== config.origin)
                 throw unauthorized();
-            const routes = ['bootstrap', 'session', 'invitation/verify', 'registration/options', 'registration/verify', 'authentication/options', 'authentication/verify', 'step-up/options', 'step-up/verify', 'logout', 'session/refresh'];
+            const routes = ['bootstrap', 'session', 'invitation/verify', 'registration/options', 'registration/verify', 'authentication/options', 'authentication/verify', 'step-up/options', 'step-up/verify', 'logout', 'session/refresh', 'devices/pending', 'devices/approve', 'devices/deny', 'devices/list', 'devices/revoke', 'devices/verification'];
             if (!routes.includes(route))
                 throw new ApiError('not_found');
             if (route === 'bootstrap') {
@@ -84,9 +89,10 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
                 const csrf = random(), payload = encode(text.encode(JSON.stringify({ n: random(), e: Math.floor(Date.now() / 1000) + 300, c: await digest(csrf) })));
                 return response({ authenticated: false }, `p.${payload}.${await mac(config.bootstrapKey, 'bootstrap\0' + payload)}`, csrf, 300);
             }
-            if (route === 'session' && request.method !== 'GET')
+            const safe = route === 'session' || route === 'devices/verification';
+            if (safe && request.method !== 'GET')
                 throw new ApiError('method_not_allowed');
-            if (route !== 'session' && request.method !== 'POST')
+            if (!safe && request.method !== 'POST')
                 throw new ApiError('method_not_allowed');
             const token = cookie(request, '__Host-akc_session'), sessionHash = await digest(token);
             let session: SessionRow | null = null, csrfDigest: string;
@@ -110,6 +116,11 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
                     throw unauthorized();
                 csrfDigest = session.csrf_digest;
             }
+            if (route === 'devices/verification') {
+                if (!session)
+                    throw unauthorized();
+                return response({ authentication: 'passkey', verificationCodeRequired: true, submitUri: config.origin + '/v1/auth/devices/pending' });
+            }
             if (route === 'session')
                 return response(session ? { authenticated: true, accountId: session.account_id, tenantId: session.tenant_id, authentication: 'passkey', absoluteExpires: session.absolute_expires, stepUp: session.step_up_expires !== null && session.step_up_expires > Math.floor(Date.now() / 1000) } : { authenticated: false });
             if (request.headers.get('origin') !== config.origin || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(request.headers.get('content-type') ?? '') || request.headers.get('sec-fetch-site') === 'cross-site')
@@ -118,14 +129,18 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
             if (csrf !== request.headers.get('x-csrf-token') || await digest(csrf) !== csrfDigest)
                 throw unauthorized();
             let sourceIdentity: string;
-            try { sourceIdentity = await resolveSource(config, request); }
-            catch { return unavailable(); }
+            try {
+                sourceIdentity = await resolveSource(config, request);
+            }
+            catch {
+                return unavailable();
+            }
             const source = await mac(config.lookupKey, 'source\0' + sourceIdentity);
             if (!await repo.rate('source', source, 120))
                 return Response.json({ error: { code: 'rate_limited' } }, { status: 429, headers: { 'cache-control': 'no-store' } });
             await repo.cleanup();
             auditFailure = true;
-            const raw = await boundedBody(request);
+            const raw = await boundedBody(request, 32768);
             if (text.encode(raw).length > 32768)
                 throw unauthorized();
             const body = JSON.parse(raw) as Record<string, unknown>;
@@ -138,6 +153,12 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
                 if (!await repo.rate('identity', identity, 30))
                     throw new AuthRateError();
             };
+            if (route.startsWith('devices/')) {
+                if (!session)
+                    throw unauthorized();
+                await rateIdentity(accountIdentity!);
+                return response(await browserDevice(db, session, route, body));
+            }
             if (route === 'logout' || route === 'session/refresh') {
                 exact(body, []);
                 if (!session)

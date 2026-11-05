@@ -28,3 +28,9 @@ entrypoint = "EmailVerifier"
 binding = "TRUSTED_AUTH_SOURCE"
 service = "agentkeychain-auth-trust"
 entrypoint = "TrustedAuthSource"
+
+# Service owns its signing key; the API receives signatures and public metadata only.
+[[services]]
+binding = "CHECKPOINT_SIGNER"
+service = "agentkeychain-checkpoint-signer"
+entrypoint = "CheckpointSigner"

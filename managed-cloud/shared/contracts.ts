@@ -1,3 +1,4 @@
+import { requestProof } from './device-protocol.ts';
 import { base64, exactFields, parseCanonicalOperation, type SignedManagedOperation } from '../../src/cloud/protocol.ts';
 export const REQUEST_MAX = 384 * 1024;
 export const PAYLOAD_MAX = 256 * 1024;
@@ -9,7 +10,7 @@ export class ApiError extends Error {
 }
 export function errorResponse(error: unknown) { const code = error instanceof ApiError ? error.code : 'internal_error'; return Response.json({ error: { code } }, { status: statuses[code], headers: { 'cache-control': 'no-store' } }); }
 export async function digest(text: string) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))), v => v.toString(16).padStart(2, '0')).join(''); }
-export function proofBytes(method: string, path: string, bodyDigest: string, nonce: string, sessionDigest: string) { return JSON.stringify([1, method, path, bodyDigest, nonce, sessionDigest]); }
+export function proofBytes(method: string, path: string, bodyDigest: string, nonce: string, sessionDigest: string, timestamp: number) { return requestProof(method, new URL(path, 'https://local.invalid'), bodyDigest, timestamp, nonce, sessionDigest); }
 export async function verify(publicKey: string, signature: string, message: string) {
     try {
         base64(publicKey, 32, 32);
@@ -42,11 +43,11 @@ export function validateSigned(input: unknown): SignedManagedOperation {
     }
 }
 /** Hard byte cap applies to declared and streamed lengths, including chunked bodies. */
-export async function boundedBody(request: Request): Promise<string> {
+export async function boundedBody(request: Request, max = REQUEST_MAX): Promise<string> {
     const length = request.headers.get('content-length');
     if (length !== null && (!/^\d+$/.test(length) || !Number.isSafeInteger(Number(length))))
         throw new ApiError('invalid_request');
-    if (length !== null && Number(length) > REQUEST_MAX)
+    if (length !== null && Number(length) > max)
         throw new ApiError('payload_too_large');
     if (request.headers.has('content-encoding'))
         throw new ApiError('unsupported_media_type');
@@ -61,7 +62,7 @@ export async function boundedBody(request: Request): Promise<string> {
             if (done)
                 break;
             size += value.byteLength;
-            if (size > REQUEST_MAX) {
+            if (size > max) {
                 await reader.cancel();
                 throw new ApiError('payload_too_large');
             }
