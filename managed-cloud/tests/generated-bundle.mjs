@@ -1,3 +1,4 @@
+import { assertSafeView } from '../web/src/safe-view.ts';
 /** Executes the built API module in standalone workerd, with manifest-derived
  * dates, flags, D1 and service bindings. No Vitest loader or compatibility extras.
  * All keys/proofs are ephemeral synthetic data; no outbound network is allowed. */
@@ -11,7 +12,7 @@ import { unstable_getMiniflareWorkerOptions as manifest, unstable_splitSqlQuery 
 await build({entryPoints:['tests/synthetic-recovery.ts'],outfile:'dist/test-recovery.mjs',bundle:true,format:'esm',platform:'neutral',external:['cloudflare:workers','node:buffer'],target:'es2022'});
 await build({entryPoints:['shared/recovery-crypto.ts','shared/recovery.ts'],outdir:'dist/test-shared',bundle:true,format:'esm',platform:'node',target:'es2022'});
 const {seal,open,encode64,splitRecoveryKey,joinRecoveryKey,wrapVaultKey,unwrapVaultKey}=await import('../dist/test-shared/recovery-crypto.js');
-const {packageContext,releaseContext,recoveryAction,vaultKeyContext}=await import('../dist/test-shared/recovery.js');
+const {packageContext,releaseContext,vaultKeyContext}=await import('../dist/test-shared/recovery.js');
 await build({entryPoints:['tests/synthetic-checkpoint.ts'],outfile:'dist/test-checkpoint.mjs',bundle:true,format:'esm',platform:'neutral',external:['cloudflare:workers','node:buffer'],target:'es2022'});
 await build({ entryPoints: ['tests/virtual-authenticator.ts'], outfile: 'dist/test-authenticator.mjs', bundle: true, format: 'esm', platform: 'node', target: 'es2022' });
 const { virtualAuthenticator } = await import('../dist/test-authenticator.mjs');
@@ -44,6 +45,10 @@ const mf = new Miniflare(convertV4MiniflareOptions({
     host: '127.0.0.1', port: 0, inspectorPort: 0,
     workers: [
         { ...api, modules: true, modulesRoot: resolve('dist'), scriptPath: resolve('dist/api-worker/index.js'), bindings, outboundService: noOutbound },
+        // Test-only native-device transport: Node/Undici injects sec-fetch-mode
+        // even on stub fetches. Construct device requests inside workerd instead.
+        {name:'synthetic-device-transport',modules:true,compatibilityDate:api.compatibilityDate,serviceBindings:{API:api.name},outboundService:noOutbound,
+            script:`export default {async fetch(request,env){const {route,body}=await request.json();return env.API.fetch(new Request('https://local.invalid/v1/devices/'+route,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}));}};`},
         {name:'agentkeychain-checkpoint-signer',modules:true,modulesRoot:resolve('dist'),scriptPath:resolve('dist/test-checkpoint.mjs'),compatibilityDate:api.compatibilityDate,compatibilityFlags:api.compatibilityFlags,outboundService:noOutbound},
         ...['agentkeychain-api-recovery','agentkeychain-custody-recovery'].map(name=>({name,modules:true,modulesRoot:resolve('dist'),scriptPath:resolve('dist/test-recovery.mjs'),compatibilityDate:api.compatibilityDate,compatibilityFlags:api.compatibilityFlags,outboundService:noOutbound})),
         { ...recovery, modules: true, modulesRoot: resolve('dist'), scriptPath: resolve('dist/recovery-worker/index.js'), outboundService: noOutbound },
@@ -65,6 +70,13 @@ try {
     for(const name of (await readdir('recovery-worker/migrations')).filter(n=>n.endsWith('.sql')).sort()){await custodyDb.batch(splitSql(await readFile('recovery-worker/migrations/'+name,'utf8')).map(sql=>custodyDb.prepare(sql)));}
     // Public fetch dispatch avoids the internal /cdn-cgi proxy Origin policy.
     const worker = { fetch: (input, init) => mf.dispatchFetch(input, init) };
+    for (const route of ['/sign-in','/app/requests/synthetic','/recovery/synthetic']) {
+        const page=await worker.fetch(origin+route,{headers:{accept:'text/html'}});
+        assert.equal(page.status,200);const html=await page.text();assert.match(html,/<div id="root"><\/div>/);assert.equal(page.headers.get('cache-control'),'no-store');assert.match(page.headers.get('content-security-policy'),/frame-ancestors 'none'/);
+        const asset=html.match(/src="([^"]+\.js)"/)[1];const js=await worker.fetch(origin+asset);assert.equal(js.status,200);assert.ok((await js.text()).length>1000);
+    }
+    assert.equal((await worker.fetch(origin+'/assets/source.map')).status,404);
+    assert.equal((await worker.fetch(origin+'/src/main.tsx')).status,404);
     let cookies, csrf;
     const remember = r => {
         cookies = r.headers.getSetCookie().map(c => c.split(';')[0]).join('; ');
@@ -76,8 +88,12 @@ try {
     const lookupKey = await crypto.subtle.importKey('raw', Buffer.from(bindings.AUTH_LOOKUP_KEY, 'base64url'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
     const lookup = Buffer.from(await crypto.subtle.sign('HMAC', lookupKey, new TextEncoder().encode('email\0' + email))).toString('base64url');
     const invitation = raw();
-    await db.prepare('INSERT INTO invitations VALUES(?,?,unixepoch()+600,NULL)').bind(await sha(invitation), lookup).run();
+    const emailKey=await crypto.subtle.importKey('raw',Buffer.from(bindings.AUTH_EMAIL_KEY,'base64url'),{name:'AES-GCM'},false,['encrypt']);
+    const iv=crypto.getRandomValues(new Uint8Array(12));
+    const encrypted=Buffer.from(iv).toString('base64url')+'.'+Buffer.from(await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:new TextEncoder().encode(lookup)},emailKey,new TextEncoder().encode(email))).toString('base64url');
+    await db.prepare('INSERT INTO invitations(digest,email_lookup,encrypted_email,expires_at) VALUES(?,?,?,unixepoch()+600)').bind(await sha(invitation),lookup,encrypted).run();
     await bootstrap();
+    const display=await post('invitation/detail',{invitation});assert.equal(display.status,200);assert.equal((await display.json()).maskedEmail,'b***@e***.invalid');
     const verified = await post('invitation/verify', { invitation, email, proof });
     assert.equal(verified.status, 200);
     const registration = await post('registration/options', await verified.json());
@@ -99,7 +115,8 @@ try {
     assert.equal(authenticated.status, 200);
     remember(authenticated);
     // Generated API device/bootstrap, actual passkey step-up and signed sync.
-    const devicePost=(route,body)=>worker.fetch(origin+'/v1/devices/'+route,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    const deviceWorker=await mf.getWorker('synthetic-device-transport');
+    const devicePost=(route,body)=>deviceWorker.fetch(origin,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({route,body})});
     const keys=await crypto.subtle.generateKey('Ed25519',true,['sign','verify']);
     const wrapping=await crypto.subtle.generateKey('X25519',true,['deriveBits']);
     const signingKey=Buffer.from(await crypto.subtle.exportKey('raw',keys.publicKey)).toString('base64');
@@ -157,21 +174,38 @@ try {
     assert.equal((await deviceCall('/v1/devices/recovery-package',JSON.stringify({canonical:packageCanonical,signature:await sign(packageCanonical)}))).status,200);
     const targetSigning=await crypto.subtle.generateKey('Ed25519',true,['sign','verify']),targetWrapping=await crypto.subtle.generateKey('X25519',true,['deriveBits']);
     const recoveryRequest={id:raw(),packageId:recoveryPackage.packageId,targetDeviceId:raw(),signingKey:encode64(new Uint8Array(await crypto.subtle.exportKey('raw',targetSigning.publicKey))),wrappingKey:encode64(new Uint8Array(await crypto.subtle.exportKey('raw',targetWrapping.publicKey))),nonce:raw()};
-    await stepFor(await recoveryAction('start',JSON.stringify(recoveryRequest)));
-    const startedResponse=await post('recovery/start',recoveryRequest);assert.equal(startedResponse.status,200);const started=await startedResponse.json();
-    const releasedResponse=await post('recovery/release',{id:recoveryRequest.id,evidence:{mode:'device',confirmerId:session.deviceId,signature:await sign(JSON.stringify(['AgentKeychain-recovery-confirm-v1',started.canonical])),proof:null}});assert.equal(releasedResponse.status,200);const released=await releasedResponse.json();
+    const targetSign=async value=>encode64(new Uint8Array(await crypto.subtle.sign('Ed25519',targetSigning.privateKey,new TextEncoder().encode(value))));
+    const targetSignature=await targetSign(JSON.stringify(['AgentKeychain-recovery-target-v1',recoveryRequest]));
+    const possessionResponse=await devicePost('recovery-target-challenge',{target:recoveryRequest,signature:targetSignature});assert.equal(possessionResponse.status,200,await possessionResponse.clone().text());const possession=await possessionResponse.json();
+    const possessionProof=encode64(await open(targetWrapping.privateKey,possession.box,'AgentKeychain-recovery-target-possession-v1\0'+possession.challengeRef+'\0'+JSON.stringify(recoveryRequest)));
+    const prepared=await devicePost('recovery-target',{target:recoveryRequest,signature:targetSignature,challengeRef:possession.challengeRef,proof:possessionProof});assert.equal(prepared.status,200);
+    const {requestRef}=await prepared.json();
+    for(const route of ['start','detail','release','finish','status','notifications','review','cancel']) {
+        const denied=await post('recovery/'+route,recoveryRequest);assert.equal(denied.status,['start','status','cancel'].includes(route)?401:404);assertSafeView(await denied.json());
+    }
+    const normalCookies=cookies;
+    await bootstrap();
+    const restricted=await post('recovery/verify',{email,proof,requestRef});assert.equal(restricted.status,200);assertSafeView(await restricted.clone().json());remember(restricted);
+    const startedResponse=await post('recovery/start',{});assert.equal(startedResponse.status,200);assertSafeView(await startedResponse.json());
+    const targetCall=async(route,extra={})=>{const body={requestRef,...extra};const r=await devicePost(route,{...body,signature:await targetSign(JSON.stringify(['AgentKeychain-recovery-target-call-v1',route,body]))});assert.equal(r.status,200);return r.json();};
+    const started=await targetCall('recovery-target-status');
+    const released=await targetCall('recovery-target-release',{evidence:{mode:'device',confirmerId:session.deviceId,signature:await sign(JSON.stringify(['AgentKeychain-recovery-confirm-v1',started.canonical])),proof:null}});
+    assertSafeView(await(await post('recovery/status',{id:recoveryRequest.id})).json());
+    // Only the synthetic target device decrypts and proves possession.
     assert.deepEqual(joinRecoveryKey(await open(targetWrapping.privateKey,released.api,releaseContext(started.canonical,'api')),await open(targetWrapping.privateKey,released.custodian,releaseContext(started.canonical,'custodian'))),recoveryKey);
     assert.deepEqual(await unwrapVaultKey(recoveryKey,released.wrappedVDK,vaultKeyContext(recoveryPackage)),syntheticVDK);
     assert.equal((await db.prepare('SELECT count(*) n FROM devices').first()).n,1);
     const recoveryProof=encode64(await open(targetWrapping.privateKey,started.challenge,releaseContext(started.canonical,'api')+'proof'));
     const recoverySignature=encode64(new Uint8Array(await crypto.subtle.sign('Ed25519',targetSigning.privateKey,new TextEncoder().encode(JSON.stringify(['AgentKeychain-recovery-proof-v1',started.canonical,recoveryProof])))));
-    assert.equal((await post('recovery/finish',{id:recoveryRequest.id,proof:recoveryProof,signature:recoverySignature})).status,200);
+    await targetCall('recovery-target-finish',{proof:recoveryProof,completionSignature:recoverySignature});
     assert.equal((await db.prepare('SELECT count(*) n FROM devices').first()).n,2);
-    assert.equal((await worker.fetch(origin+'/v1/auth/session',{headers:{cookie:cookies}})).status,401);
+    assert.equal((await worker.fetch(origin+'/v1/auth/session',{headers:{cookie:normalCookies}})).status,401);
     await bootstrap();const relogin=await(await post('authentication/options',{email})).json();const logged=await post('authentication/verify',{challengeId:relogin.challengeId,response:await authenticator.assert(relogin.options.challenge,{userHandle:options.userId})});assert.equal(logged.status,200);remember(logged);
-    const review=await(await post('recovery/detail',{id:recoveryRequest.id})).json();assert.equal(review.reviewRequired,true);
-    await stepFor(review.reviewDigest);assert.equal((await post('recovery/review',{id:recoveryRequest.id,confirmed:true})).status,200);
-    assert.equal((await(await post('recovery/detail',{id:recoveryRequest.id})).json()).reviewRequired,false);
+    const review=await(await post('web/query',{view:'recovery',id:recoveryRequest.id})).json();assertSafeView(review);assert.equal(review.reviewRequired,true);
+    const reviewOptions=await(await post('web/options',{ref:review.reviewRef})).json();
+    const reviewVerified=await post('web/verify',{ref:review.reviewRef,challengeId:reviewOptions.challengeId,response:await authenticator.assert(reviewOptions.options.challenge)});assert.equal(reviewVerified.status,200);remember(reviewVerified);
+    const reviewed=await post('web/execute',{ref:review.reviewRef,confirmed:true});assert.equal(reviewed.status,200);assertSafeView(await reviewed.json());
+    const afterReview=await(await post('web/query',{view:'recovery',id:recoveryRequest.id})).json();assertSafeView(afterReview);assert.equal(afterReview.reviewRequired,false);
     const recoveredChallengeResponse=await devicePost('challenge',{deviceId:recoveryRequest.targetDeviceId});assert.equal(recoveredChallengeResponse.status,200);const recoveredChallenge=await recoveredChallengeResponse.json();
     const recoveredSignature=encode64(new Uint8Array(await crypto.subtle.sign('Ed25519',targetSigning.privateKey,new TextEncoder().encode(JSON.stringify(['AgentKeychain-device-challenge-v1',recoveredChallenge.challengeId,await sha(recoveredChallenge.challenge),recoveredChallenge.deviceId,recoveredChallenge.vaultId,recoveredChallenge.expiresAt])))));
     assert.equal((await devicePost('token',{challengeId:recoveredChallenge.challengeId,signature:recoveredSignature})).status,200);

@@ -90,13 +90,22 @@ AgentKeychain 正在转向唯一的官方托管云模式。目标体验是登录
 自动同步加密凭证。Slice 1 通过内存服务与客户端实现并测试协议、独立设备签名、
 服务器接收顺序与历史、幂等重试、分页、删除屏障以及明确批准后的恢复。
 
-本阶段没有已部署的云服务、账号登录、账号恢复、审批界面或持久化同步队列。
+Phase 3 已在 `managed-cloud/web` 实现本地可测的账号登录、恢复与审批界面；尚无已部署云服务或持久化本地同步队列。
 v0.6.2 本地 Vault 行为保持不变；现有 CLI/MCP 读取仍会向受信任的本地调用方返回明文。
 新的审批契约尚未接入现有 CLI/MCP 操作。
 
 `agentkeychain sync status` 只在本地报告安全兼容状态。旧同步
 `init/connect/push/pull/disconnect` 命令已禁用；已有配置原样保留，不连接旧端点，
 也不上传数据。本阶段不自动迁移。详见[托管云指南](./docs/SYNC_GUIDE.md)。
+
+独立的 `managed-cloud/` 工作区现已包含本地测试的 Phase 2 Workers 和 Phase 3
+双语 Web 控制中心，支持仅邀请的通行密钥、隔离的设备/请求/活动视图及受限账号恢复。
+普通账号浏览器仅通过 web 合约查看恢复安全元数据、复核或取消；受限公开恢复只能
+启动目标设备签名绑定的 requestRef。恢复材料、解密及激活全部留在目标设备接口。
+设备更新状态依据认证拉取时间及设备报告的已处理历史，不代表本地磁盘持久化证明。
+这是未提交的本地实现证据，不表示服务已部署，也不改变已安装的 v0.6.2 CLI。
+原生浏览器验收和 Phase 4 本地客户端集成仍是独立关卡。详见
+[Phase 3 证据](./docs/MANAGED_CLOUD_PHASE3_EVIDENCE.md)。
 
 ### 换新 Mac（或第二台电脑）怎么迁移
 
@@ -289,4 +298,4 @@ Managed Cloud Slice 1 使用独立受信注册入口固定的设备公钥校验�
 并实施重放检查和删除屏障。快照保留完整签名历史；持久化存储及回滚保护尚未实现。
 生产审批消费与版本接受必须共用一个持久化事务；内存服务并非生产适配器。
 
-Phase 2A 新增独立的 `managed-cloud/` Workers/D1 本地可测后端，包含设备认证原子同步和私有恢复骨架。Phase 2B 已增加本地可测的邀请制 Passkey 账号、浏览器会话、CSRF 和动作绑定 step-up。复审修复要求可发现凭证及可信来源绑定，加入有界清理，并本地执行生成的 Worker bundle；Phase 2C 已增加本地可测的受信设备注册、15 分钟签名证明会话、不可变加密密钥包与原子签名同步检查点。Phase 2D 已增加精确一次性审批 API、按账号隔离且使用不透明事件 ID 的签名脱敏活动，以及经过本地测试的双 Worker/双 D1 分钥恢复状态机、目标设备持钥证明、持久化激活意图与独立签名取消授权。恢复拒绝复用历史设备身份；激活后的完成重试可收敛，但不承诺跨 D1 原子性。普通用户界面与生产配置仍留待后续阶段。详见 [Phase 2D 实现及限制](./docs/MANAGED_CLOUD_PHASE2D_EVIDENCE.md)。详见 [Phase 2C 契约及证据](./docs/MANAGED_CLOUD_PHASE2C_EVIDENCE.md)。详见 [Phase 2B 验收及限制](./docs/MANAGED_CLOUD_PHASE2B_EVIDENCE.md)。详见 [Phase 2A 验收记录](./docs/MANAGED_CLOUD_PHASE2A_EVIDENCE.md)。
+Phase 2A 新增独立的 `managed-cloud/` Workers/D1 本地可测后端，包含设备认证原子同步和私有恢复骨架。Phase 2B 已增加本地可测的邀请制 Passkey 账号、浏览器会话、CSRF 和动作绑定 step-up。复审修复要求可发现凭证及可信来源绑定，加入有界清理，并本地执行生成的 Worker bundle；Phase 2C 已增加本地可测的受信设备注册、15 分钟签名证明会话、不可变加密密钥包与原子签名同步检查点。Phase 2D 已增加精确一次性审批 API、按账号隔离且使用不透明事件 ID 的签名脱敏活动，以及经过本地测试的双 Worker/双 D1 分钥恢复状态机、目标设备持钥证明、持久化激活意图与独立签名取消授权。恢复拒绝复用历史设备身份；激活后的完成重试可收敛，但不承诺跨 D1 原子性。Phase 3 已实现本地 Web 控制中心；生产配置仍留待后续阶段。详见 [Phase 3 证据及验收限制](./docs/MANAGED_CLOUD_PHASE3_EVIDENCE.md)。详见 [Phase 2D 实现及限制](./docs/MANAGED_CLOUD_PHASE2D_EVIDENCE.md)。详见 [Phase 2C 契约及证据](./docs/MANAGED_CLOUD_PHASE2C_EVIDENCE.md)。详见 [Phase 2B 验收及限制](./docs/MANAGED_CLOUD_PHASE2B_EVIDENCE.md)。详见 [Phase 2A 验收记录](./docs/MANAGED_CLOUD_PHASE2A_EVIDENCE.md)。

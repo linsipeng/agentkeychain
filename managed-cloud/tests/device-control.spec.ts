@@ -1,3 +1,4 @@
+import { assertSafeView } from '../web/src/safe-view.ts';
 import { beforeEach, expect, test } from 'vitest';
 import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset } from 'cloudflare:test';
@@ -301,4 +302,21 @@ test('failed signing proofs exhaust challenge attempts; cross-account revocation
     const signature = await d.sign(challengeProof(c.challengeId, await digest(c.challenge), c.deviceId, c.vaultId, c.expiresAt));
     expect((await api('token', { challengeId: c.challengeId, signature })).status).toBe(401);
     expect(await db().prepare('SELECT count(*) n FROM device_sessions').first('n')).toBe(0);
+});
+test('short pairing code and three words, existing-device confirmation stays off the browser response',async()=>{
+    const s=await account(),first=await enroll(s),issued=await session(first),next=await authorize();
+    expect(next.verificationCode).toHaveLength(12);expect(next.phrase.split(' ')).toHaveLength(3);
+    await deviceRepository(db()).pending(s,await digest(next.verificationCode),first.deviceId);
+    const bindings={MAIN:db(),AUTH_ORIGIN:origin,TRUSTED_AUTH_SOURCE:{resolve:async()=> 'synthetic-device-source'}};
+    const detail=await deviceFetch(await deviceRequest(first,issued.token,'/v1/devices/pairing-detail',JSON.stringify({id:next.requestId})),bindings);
+    expect(detail.status).toBe(200);const {canonical}=await detail.json() as {canonical:string};
+    const confirm=await deviceFetch(await deviceRequest(first,issued.token,'/v1/devices/pairing-confirm',JSON.stringify({id:next.requestId,signature:await first.sign(canonical)})),bindings);expect(confirm.status).toBe(200);
+    const {webRepository}=await import('../api-worker/web-repository.ts');
+    const web=webRepository(db(),{} as import('../api-worker/browser-auth.ts').BrowserConfig,s);
+    for(const view of ['devices','device']) assertSafeView(await web.query({view,...(view==='device'?{id:first.deviceId}:{})}));
+    const safe=await web.pairing({code:next.verificationCode});expect(safe.confirmRef).toBeTypeOf('string');expect(JSON.stringify(safe)).not.toMatch(/canonical|signature|signingKey|wrappingKey/);
+    const a=await web.resolve(safe.confirmRef);
+    await db().prepare('UPDATE browser_sessions SET step_up_digest=?,step_up_expires=unixepoch()+300 WHERE digest=?').bind(a.action_digest,s.digest).run();
+    expect(await web.execute(safe.confirmRef)).toEqual({approved:true});
+    await expect(web.execute(safe.confirmRef)).rejects.toThrow();
 });

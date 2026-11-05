@@ -1,3 +1,4 @@
+import { assertSafeView } from '../web/src/safe-view.ts';
 import { beforeEach, expect, test } from 'vitest';
 import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset } from 'cloudflare:test';
@@ -98,4 +99,13 @@ test('concurrent checkpoint creation serializes a single cumulative chain', asyn
     expect((await env.MAIN.prepare('SELECT count FROM activity_checkpoints ORDER BY through_id').all<{
         count: number;
     }>()).results.map(c => c.count)).toEqual([100, 200, 205]);
+});
+
+test('populated activity and event Web projections recursively exclude sensitive fields',async()=>{
+    await env.MAIN.prepare("INSERT INTO activity(tenant_id,account_id,event,reference) VALUES('t','a','approval.pending','r')").run();
+    const {webRepository}=await import('../api-worker/web-repository.ts');
+    const web=webRepository(env.MAIN,{checkpointSigner:await syntheticSigner()} as import('../api-worker/browser-auth.ts').BrowserConfig,s);
+    const page=await web.query({view:'activity'}) as {events:{id:string}[]};
+    assertSafeView(page);expect(page.events).toHaveLength(1);
+    assertSafeView(await web.query({view:'event',id:page.events[0]!.id}));
 });

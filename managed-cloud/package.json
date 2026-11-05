@@ -5,13 +5,15 @@
   "workspaces": [
     "shared",
     "api-worker",
-    "recovery-worker"
+    "recovery-worker",
+    "web"
   ],
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "build": "node build.mjs",
-    "test:bundle": "npm run build && node tests/generated-bundle.mjs"
+    "test:bundle": "npm run build && node tests/generated-bundle.mjs",
+    "test:recovery-resources": "node tests/recovery-resources.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261104.1",

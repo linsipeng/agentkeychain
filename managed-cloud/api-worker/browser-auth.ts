@@ -1,5 +1,7 @@
-import { recoveryRepository, type RecoveryBindings, type StartRequest } from './recovery-repository.ts';
-import type { CancelAuthorization, RecoveryEvidence } from '../shared/recovery.ts';
+import { webRepository } from './web-repository.ts';
+import { publicRecovery, type RestrictedSession } from './public-recovery.ts';
+import { invitationDetail } from './invitations.ts';
+import { type RecoveryBindings } from './recovery-repository.ts';
 import { auditRepository } from './audit-repository.ts';
 import type { CheckpointSigner } from '../shared/checkpoints.ts';
 import { approvalRepository, decisionDigest } from './approval-repository.ts';
@@ -86,7 +88,7 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
             const url = new URL(request.url), route = url.pathname.replace('/v1/auth/', '');
             if (url.search || url.origin !== config.origin)
                 throw unauthorized();
-            const routes = ['bootstrap', 'session', 'invitation/verify', 'registration/options', 'registration/verify', 'authentication/options', 'authentication/verify', 'step-up/options', 'step-up/verify', 'logout', 'session/refresh', 'devices/pending', 'devices/approve', 'devices/deny', 'devices/list', 'devices/revoke', 'devices/verification', 'approvals/list', 'approvals/pending', 'approvals/recent', 'approvals/detail', 'approvals/approve', 'approvals/deny', 'approvals/cancel', 'activity/list', 'activity/detail', 'recovery/start', 'recovery/detail', 'recovery/release', 'recovery/cancel', 'recovery/finish', 'recovery/notifications', 'recovery/review'];
+            const routes = ['web/query', 'web/pairing', 'web/execute', 'web/options', 'web/verify', 'bootstrap', 'session', 'invitation/detail', 'invitation/verify', 'registration/options', 'registration/verify', 'authentication/options', 'authentication/verify', 'step-up/options', 'step-up/verify', 'logout', 'session/refresh', 'devices/pending', 'devices/approve', 'devices/deny', 'devices/list', 'devices/revoke', 'devices/verification', 'approvals/list', 'approvals/pending', 'approvals/recent', 'approvals/detail', 'approvals/approve', 'approvals/deny', 'approvals/cancel', 'activity/list', 'activity/detail', 'recovery/verify', 'recovery/status', 'recovery/start', 'recovery/cancel'];
             if (!routes.includes(route))
                 throw new ApiError('not_found');
             if (route === 'bootstrap') {
@@ -105,6 +107,8 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
             const token = cookie(request, '__Host-akc_session'), sessionHash = await digest(token);
             let session: SessionRow | null = null, csrfDigest: string;
             let bootstrapExpires = 0;
+            let restricted: RestrictedSession | null = null;
+            const recoveryPublic = publicRecovery(db, config);
             if (token.startsWith('p.')) {
                 const parts = token.split('.');
                 if (parts.length !== 3 || !await crypto.subtle.verify('HMAC', config.bootstrapKey, decode(parts[2]!), text.encode('bootstrap\0' + parts[1])))
@@ -117,6 +121,11 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
                     throw unauthorized();
                 csrfDigest = payload.c;
                 bootstrapExpires = payload.e;
+            }
+            else if (token.startsWith('r.')) {
+                restricted = await recoveryPublic.session(sessionHash);
+                if (!restricted || !['recovery/start','recovery/status','recovery/cancel'].includes(route)) throw unauthorized();
+                csrfDigest = restricted.csrf_digest;
             }
             else {
                 session = await repo.session(sessionHash);
@@ -161,20 +170,33 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
                 if (!await repo.rate('identity', identity, 30))
                     throw new AuthRateError();
             };
-            if (route.startsWith('recovery/')) {
+            if (route.startsWith('web/')) {
                 if (!session) throw unauthorized();
                 await rateIdentity(accountIdentity!);
-                const recovery = recoveryRepository(db,config.recovery??{});
-                if (route==='recovery/start') return response(await recovery.start(session,body as unknown as StartRequest));
-                if (route==='recovery/notifications') {exactFields(body,['after']);return response(await recovery.notifications(session,body.after as number));}
-                const fields=route==='recovery/release'?['id','evidence']:route==='recovery/finish'?['id','proof','signature']:route==='recovery/cancel'?['id','confirmed','authorization']:route==='recovery/review'?['id','confirmed']:['id'];
-                exactFields(body,fields); identifier(body.id);
-                if(route==='recovery/detail') return response(await recovery.detail(session,body.id as string));
-                if(route==='recovery/release') return response(await recovery.release(session,body.id as string,body.evidence as RecoveryEvidence));
-                if(route==='recovery/finish') return response(await recovery.finish(session,body.id as string,body.proof as string,body.signature as string));
-                if(body.confirmed!==true)throw new ApiError('approval_required');
-                return response(route==='recovery/review'?await recovery.review(session,body.id as string):await recovery.cancel(session,body.id as string,body.authorization as CancelAuthorization));
+                const web = webRepository(db, config, session);
+                if (route === 'web/query') return response(await web.query(body));
+                if (route === 'web/pairing') return response(await web.pairing(body));
+                exact(body, route === 'web/verify' ? ['ref','challengeId','response'] : route === 'web/execute' ? ['ref','confirmed', ...(body.confirmationRef === undefined ? [] : ['confirmationRef'])] : ['ref']);
+                if (route === 'web/execute') {
+                    if (body.confirmed !== true) throw unauthorized();
+                    return response(await web.execute(body.ref, body.confirmationRef));
+                }
+                const a = await web.resolve(body.ref);
+                const headers = new Headers(request.headers);
+                const next = route === 'web/options' ? { actionDigest: a.action_digest } : { actionDigest: a.action_digest, challengeId: body.challengeId, response: body.response };
+                return createBrowserAuth(db, config)(new Request(config.origin + '/v1/auth/step-up/' + (route === 'web/options' ? 'options' : 'verify'), { method: 'POST', headers, body: JSON.stringify(next) }));
             }
+            if (route === 'recovery/verify') {
+                if (session || restricted) throw unauthorized();
+                await rateIdentity(await emailLookup(config, body.email as string));
+                const result = await recoveryPublic.verify(body, sessionHash, bootstrapExpires);
+                return response({ accepted: true }, result.token, result.csrf, 600);
+            }
+            if (restricted) {
+                await rateIdentity(await mac(config.lookupKey,'restricted-recovery\0'+restricted.digest));
+                return response(await recoveryPublic.route(restricted, route, body));
+            }
+            if (route.startsWith('recovery/')) throw unauthorized();
             if (route.startsWith('activity/')) {
                 if (!session) throw unauthorized();
                 await rateIdentity(accountIdentity!);
@@ -222,6 +244,11 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
                 if (!await repo.touch(sessionHash))
                     throw unauthorized();
                 return response({ ok: true });
+            }
+            if (route === 'invitation/detail') {
+                if (session) throw unauthorized();
+                exact(body, ['invitation']);
+                return response(await invitationDetail(db, config, body.invitation));
             }
             if (route === 'invitation/verify') {
                 if (session)

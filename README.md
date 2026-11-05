@@ -95,8 +95,13 @@ Slice 1 implements and tests the protocol, independent device signatures,
 server receive-order history, idempotent retries, pagination, deletion barriers,
 and explicit approved restore using an in-memory service and clients.
 
-There is no deployed cloud, account sign-in, recovery, approval UI or persistent
-sync queue in this slice. Existing v0.6.2 local Vault behavior remains unchanged;
+Phase 3 adds local account sign-in, recovery and approval UI under `managed-cloud/web`.
+Account browsers only read safe recovery metadata and review/cancel through web
+contracts. Restricted public recovery starts only a target-device-signed requestRef;
+all recovery material, decryption and activation stay on target-device endpoints.
+Device update status uses authenticated pull time and device-reported processed
+history; it is not proof of local persistence.
+There is no deployed cloud or persistent local sync queue. Existing v0.6.2 local Vault behavior remains unchanged;
 existing CLI/MCP secret reads still return plaintext to their trusted local caller.
 The new approval contract does not retrofit existing CLI/MCP actions.
 
@@ -104,6 +109,13 @@ The new approval contract does not retrofit existing CLI/MCP actions.
 `init/connect/push/pull/disconnect` sync commands are disabled; existing configuration
 is preserved, without contacting its endpoint or uploading data. No automatic
 migration is available. See [the managed-cloud guide](./docs/SYNC_GUIDE.md).
+
+The separate `managed-cloud/` workspace now also includes locally tested Phase 2
+Workers and the Phase 3 bilingual Web control center: invitation-only Passkeys,
+scoped device/request/activity views and restricted account recovery. This is
+uncommitted local implementation evidence, not a deployed service or a change to
+the installed v0.6.2 CLI. Native browser acceptance and Phase 4 local-client
+integration remain separate gates. See [Phase 3 evidence](./docs/MANAGED_CLOUD_PHASE3_EVIDENCE.md).
 
 ### Moving to a new Mac (or a second machine)
 
@@ -300,4 +312,4 @@ Snapshots retain full signed history; storage and rollback protection are not ye
 implemented. Production approval consumption and version acceptance must share a
 single durable transaction; the memory-only service is not a production adapter.
 
-Phase 2A adds an independent, locally tested Workers/D1 backend under `managed-cloud/`, with atomic device-authenticated sync and a private recovery skeleton. Phase 2B adds locally tested invitation-only Passkey accounts, browser sessions, CSRF and action-bound step-up. Review repairs require discoverable credentials and trusted source bindings, add bounded retention, and verify the generated Worker bundle locally; Phase 2C now adds local-testable trusted enrollment, 15-minute proof-bound device sessions, immutable encrypted key packages and atomic signed sync checkpoints. Phase 2D adds exact one-use approval APIs, account-scoped signed/redacted activity with opaque event IDs and a locally tested two-Worker/two-D1 recovery saga with target-key proof, durable activation intent and independently signed cancellation. Recovery rejects historical target identities; completion retries after activation converge without a cross-D1 atomicity claim. The ordinary-user UI and production provisioning remain deferred. See [Phase 2D implementation and limits](./docs/MANAGED_CLOUD_PHASE2D_EVIDENCE.md). See [Phase 2C contracts and evidence](./docs/MANAGED_CLOUD_PHASE2C_EVIDENCE.md). See [Phase 2B evidence and limits](./docs/MANAGED_CLOUD_PHASE2B_EVIDENCE.md). See [Phase 2A evidence](./docs/MANAGED_CLOUD_PHASE2A_EVIDENCE.md).
+Phase 2A adds an independent, locally tested Workers/D1 backend under `managed-cloud/`, with atomic device-authenticated sync and a private recovery skeleton. Phase 2B adds locally tested invitation-only Passkey accounts, browser sessions, CSRF and action-bound step-up. Review repairs require discoverable credentials and trusted source bindings, add bounded retention, and verify the generated Worker bundle locally; Phase 2C now adds local-testable trusted enrollment, 15-minute proof-bound device sessions, immutable encrypted key packages and atomic signed sync checkpoints. Phase 2D adds exact one-use approval APIs, account-scoped signed/redacted activity with opaque event IDs and a locally tested two-Worker/two-D1 recovery saga with target-key proof, durable activation intent and independently signed cancellation. Recovery rejects historical target identities; completion retries after activation converge without a cross-D1 atomicity claim. Phase 3 implements the local Web control center; production provisioning remains deferred. See [Phase 3 evidence and acceptance limits](./docs/MANAGED_CLOUD_PHASE3_EVIDENCE.md). See [Phase 2D implementation and limits](./docs/MANAGED_CLOUD_PHASE2D_EVIDENCE.md). See [Phase 2C contracts and evidence](./docs/MANAGED_CLOUD_PHASE2C_EVIDENCE.md). See [Phase 2B evidence and limits](./docs/MANAGED_CLOUD_PHASE2B_EVIDENCE.md). See [Phase 2A evidence](./docs/MANAGED_CLOUD_PHASE2A_EVIDENCE.md).

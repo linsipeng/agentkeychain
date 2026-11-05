@@ -38,6 +38,7 @@ export function browserRepository(db: D1Database) {
             // Remove acceptance children before their expired challenge parents.
             const expiredChallenges = 'SELECT id FROM webauthn_challenges WHERE expires_at<unixepoch()-86400 ORDER BY expires_at,id LIMIT 32';
             await db.batch([
+                db.prepare('DELETE FROM recovery_sessions WHERE digest IN(SELECT digest FROM recovery_sessions WHERE expires_at<unixepoch()-86400 ORDER BY expires_at LIMIT 32)'),
                 db.prepare(`DELETE FROM auth_acceptances WHERE challenge_id IN(${expiredChallenges})`),
                 db.prepare(`DELETE FROM webauthn_challenges WHERE id IN(${expiredChallenges})`),
                 db.prepare(`DELETE FROM account_verifications WHERE id IN(SELECT v.id FROM account_verifications v WHERE v.expires_at<unixepoch()-86400 AND NOT EXISTS(SELECT 1 FROM webauthn_challenges c WHERE c.verification_id=v.id) ORDER BY v.expires_at,v.id LIMIT 32)`),

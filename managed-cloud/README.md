@@ -1,10 +1,11 @@
-# Managed Cloud Phases 2A–2D
+# Managed Cloud Phases 2A–3
 
 Local-testable Workers/D1 backend, separate from the frozen legacy `worker/`.
 Phase 2C adds trusted device enrollment, 15-minute proof-bound device sessions,
 immutable encrypted key packages, and service-signed sync checkpoints. Phase 2D adds
-exact approval APIs, signed activity and two-party recovery. No ordinary-user
-React UI, local Vault integration, deployment or production signer provisioning is included.
+exact approval APIs, signed activity and two-party recovery. Phase 3 adds the local
+React control center. Local Vault integration, deployment and production signer
+provisioning remain separate gates.
 The Slice 1 in-memory client is unchanged; its production persistence/transport belongs to Phase 4.
 
 ## Local verification
@@ -183,7 +184,7 @@ a trusted repository boundary, not an RLS claim against a compromised administra
 ## Remaining product and release boundaries
 
 - Phase 2D JSON approval, activity and two-party recovery contracts are implemented below.
-- Phase 3: ordinary-user UI including `/device`; no UI or real browser test is claimed.
+- Phase 3: local ordinary-user Web UI, with `/app/devices`; see the current evidence for controller browser acceptance limits.
 - Phase 4: secure local key storage, persistent client queue, checkpoint anchors and daemon.
 - Real trusted ingress/email/checkpoint services, domains, keys, independent security review,
   online vulnerability audit, staging, remote migrations and deployment require their own gates.
@@ -192,7 +193,7 @@ a trusted repository boundary, not an RLS claim against a compromised administra
 ## Phase 2B browser authentication
 
 Evidence: [Phase 2B](../docs/MANAGED_CLOUD_PHASE2B_EVIDENCE.md). This is a backend
-contract, with no ordinary-user UI. `@simplewebauthn/server` is pinned to **14.0.3**;
+contract; the ordinary-user UI is implemented in Phase 3 below. `@simplewebauthn/server` is pinned to **14.0.3**;
 its production adapter runs in workerd, with no fake verification or hand-written
 CBOR/COSE verifier. Tests generate Ed25519 and ES256 virtual-authenticator keys only
 in memory. Attestation `none` is required and other formats are rejected using the
@@ -334,8 +335,8 @@ consumes/validates it with the actual one-use approval action in its own durable
 transaction for sync-operation approvals. Recovery purposes are reserved
 in the challenge schema; recovery ceremonies belong to Phase 2D.
 
-No real email, domain/RP provisioning, browser hardware passkey, deployment, React UI
-or persistent cross-device sync client is included. Device enrollment and cryptographic
+No real email, domain/RP provisioning, browser hardware passkey, deployment
+or persistent cross-device sync client is included. The React UI is implemented in Phase 3. Device enrollment and cryptographic
 recovery are implemented in the subsequent backend sections.
 Cleanup runs after the source rate gate on unsafe requests, never on GET/HEAD.
 Each atomic sweep removes at most 32 rows per table: challenges (and their
@@ -369,7 +370,7 @@ and runtime npm audit reports are clean as of the recorded local run.
 
 Current implementation/evidence: [Phase 2D](../docs/MANAGED_CLOUD_PHASE2D_EVIDENCE.md).
 These local backend contracts supersede the earlier phase-specific deferral notes.
-No UI, deployment or production provider is enabled.
+Phase 3 supplies the local UI; no deployment or production provider is enabled.
 
 All browser routes below are POST `/v1/auth/<suffix>` with the existing Session,
 Origin, JSON, double-submit CSRF, trusted-source and account-rate checks. Unknown
@@ -383,13 +384,17 @@ Foreign resources return 404. All successful responses are JSON/no-store.
 | `approvals/approve`, `approvals/deny`, `approvals/cancel` | `{id,confirmed:true}` | Decision metadata; exact action-bound Passkey step-up consumed once |
 | `activity/list` | `{after,limit,minimum}` | Events, cursor, signed checkpoint, through, `verification` |
 | `activity/detail` | `{id,minimum}` | One event and explicit checkpoint verification |
-| `recovery/start` | `{id,packageId,targetDeviceId,signingKey,wrappingKey,nonce}` | Case canonical, target-encrypted challenge, state |
-| `recovery/detail` | `{id}` | Canonical, state, challenge, review flag, cancel/review action digests |
-| `recovery/notifications` | `{after}` | Bounded durable account/device notification records |
-| `recovery/release` | `{id,evidence}` | API/Custodian target-encrypted shares and wrapped VDK |
-| `recovery/cancel` | `{id,confirmed:true,authorization}` | Exact step-up plus independent signed cancel authorization |
-| `recovery/review` | `{id,confirmed:true}` | Exact step-up-bound completed-device review acknowledgement |
-| `recovery/finish` | `{id,proof,signature}` | Completion and required device review; all browser sessions revoked |
+
+The old normal-session recovery start/detail/release/finish/notifications/review/
+cancel routes are removed or denied. Account browsers use `web/query` (`recovery`
+and `account`) for safe state, notification and review/cancel references, followed
+by `web/options`, `web/verify`, `web/execute` for exact step-up actions. Cancellation
+also requires a same-account, unexpired device-issued `confirmationRef`. No account
+browser may submit target keys or receive recovery cryptographic material.
+Restricted public recovery alone permits `recovery/start {}`, `recovery/status {id}`
+and `recovery/cancel {id,confirmed:true,confirmationRef}` after email verification
+bound to the signed target device's requestRef. Direct target/authorization bodies
+are rejected. See the target-device handoff contract below.
 
 Device POST routes retain timestamped signing-key proof, no cookies, and stored
 account/tenant/vault authority:
@@ -490,8 +495,9 @@ has completed and before Main's final transition. Expiry does not undo a committ
 activation intent. Before activation, expired/revoked/stale-epoch cases remain
 fail-closed; transient activation errors are retryable only while eligibility still
 holds. This is not an unconditional guarantee for every partial recovery failure.
-A caller must retry with the same target proof; after final session revocation it
-must reauthenticate to inspect/retry/review. No recovery session is issued.
+The target device retries with the same target proof via its signed target-device
+transport. After completion, the account browser signs in again to review safe
+metadata. Recovery never issues a normal account session.
 
 Cancel authorization is `{action:"cancel",nonce,expiresAt,deviceId,signature}`.
 A currently trusted device, or the independent account verifier when `deviceId` is
@@ -517,4 +523,132 @@ Private binding names in the manifests are deployment contracts only. Their loca
 bundle implementations are synthetic and generated only from `tests/`. Production
 operator separation, trust-registry/email adapters, key custody/rotation ceremony,
 remote migrations and deployment require independent review and approval. The
-React control center and persistent local client/daemon remain later phases.
+React control center is implemented in Phase 3 below; the persistent local client/daemon remains Phase 4.
+
+## Phase 3 Web control center / Web 控制中心
+
+`web/` is a separately typechecked Vite/React/Router/TanStack Query app. The API
+Worker serves its built static assets, including SPA deep links, with no-store,
+CSP, no-referrer and nosniff headers. Source maps/source paths are rejected.
+`npm run build` builds both the SPA and Workers; `npm run test:bundle` exercises
+those exact artifacts in local workerd. Run Web checks with
+`npm test --prefix web` and `npm run typecheck --prefix web` from this directory.
+No production bindings or deployment are created by these commands.
+
+The Web uses `/v1/auth/web/{query,pairing,options,verify,execute}`. Query views
+cover Home, requests, devices, activity, contextual history, account and recovery
+review. References for actions and pagination are account/tenant scoped, expire
+in five minutes, and resolve server-side. Passkey step-up still authorizes the
+original exact Phase 2 transaction; denial also retains its existing step-up gate.
+The Web reads back removal, decisions and recovery states. It never signs a
+restore: a device-created restore request must exist before the user can allow it.
+Updates without durable fresh device acknowledgements remain “Not recently
+checked”; an empty device list means “Waiting for a device”. Lists are bounded;
+requests, activity and versions have continuation controls. Device/account metadata
+is limited to 100 records, recovery summaries to 20. Activity verification receipts
+are retained in memory and sent back to detect known rollback within the session.
+
+本地 Web 提供完整中英文路由、确认界面和控制面数据投影。页面不接收凭证正文、
+加密载荷或恢复分片。旧 CLI 的持久化和本机设备交接集成仍属于 Phase 4；没有部署
+云服务，也不会访问真实账号、Vault 或 Keychain。
+
+### Invitation provisioning
+
+Migration `0009` adds `invitations.encrypted_email`. The local provisioning helper
+`seedInvitation` uses the existing auth email AES-GCM key and HMAC lookup key;
+tokens remain digest-only. `invitation/detail` accepts only the complete capability
+under bootstrap cookie + Origin + CSRF, and returns `{maskedEmail,status,expiresAt}`.
+Missing, expired, consumed, corrupted and legacy hash-only display metadata fail
+closed with generic unauthorized. Legacy records are not guessed or backfilled;
+reissue locally with the helper when the address is available through an authorized
+provisioning boundary. Verification still requires the user's full email and an
+independent EMAIL_VERIFIER proof matching the invitation's lookup exactly.
+
+### Public recovery and device handoff
+
+1. A new device prepares public target keys and posts `recovery-target-challenge`
+   to the device API with a signature over `['AgentKeychain-recovery-target-v1',target]`.
+   It decrypts the returned challenge using its wrapping private key, then posts
+   `{target,signature,challengeRef,proof}` to `recovery-target`. The challenge is
+   target-bound, one-use and expires in five minutes. Only after both proofs
+   succeed is a 48-hour `requestRef` issued; only its digest is stored. The target includes
+   the recovery package, case, target device, two independent public keys and nonce.
+2. The browser submits `{email,proof,requestRef}` to `recovery/verify` using its
+   five-minute bootstrap + CSRF. Direct target objects (including mixed target +
+   reference bodies), unknown references and expired references are rejected.
+   Both known and unknown/failed-proof verification
+   attempts perform the same verifier/query/token/batch shape and return
+   `{accepted:true}` with identical cookie attributes. Unknown/failed attempts
+   create only unprivileged decoy rows, never accounts, normal sessions or cases.
+3. Real verification creates a ten-minute `r.` recovery cookie, with only token,
+   CSRF and independent-proof digests retained. Account/tenant/vault come from the
+   verified stored lookup. The exact target and request digest are immutable.
+   Bootstrap/proof reservation is atomic and single-use. Restrictions are checked
+   before routing: only start/status/cancel are possible, with independent source
+   and restricted-session rate limits. This cookie cannot authenticate a passkey,
+   become a normal session, or access devices, requests, activity, sync or releases.
+4. `recovery/start {}` uses the exact verified target. `recovery/status {id}`
+   returns only case/state/review metadata. Case substitution fails. Verification
+   alone never means recovery succeeded. Reverification with a fresh independent
+   proof is needed after the restricted session expires, including long cooldowns.
+5. Only the target device calls `recovery-target-status/release/finish`. Every call
+   requires the target capability and signature over
+   `['AgentKeychain-recovery-target-call-v1',route,bodyWithoutSignature]`, with an
+   exact request-digest match against the stored case. Device recovery transports
+   reject Cookie, Origin and browser Fetch Metadata headers. These are browser
+   isolation checks, not hardware attestation: a non-browser client can generate
+   keys but must prove both private keys and satisfy independent recovery authorization. Existing two-party evidence, cooldown, release and target
+   proof transactions remain authoritative; the browser never receives their data.
+6. An enrolled device may prepare `recovery-cancel-confirmation {id,authorization}`
+   using its normal signed device session and independently verified cancellation
+   authorization. Its short-lived opaque reference is accepted by browser cancel
+   with explicit confirmation; normal sessions additionally require exact Passkey
+   step-up. Restricted cancellation stays retryable after partial custody failure.
+   Activation locks cancellation. Completion revokes both normal and restricted
+   sessions; the user must sign in normally and review devices.
+
+Pairing now produces a 12-character, 72-bit code and three independent words from
+an exact-pinned 2048-word list (33 comparison bits). The old complete 43-character
+codes remain accepted. Enrolled devices obtain a scoped `pairing-detail`, sign
+its exact grant and submit `pairing-confirm`; only the server retains the signed
+grant. Web confirmation requires phrase matching and a Passkey, then uses the
+original device transaction. First-device initialization remains explicit.
+
+Independent email verification, recovery authorities and platform passkeys still
+need their separately provisioned production adapters. The checked-in tests use
+synthetic local bindings only. Evidence and acceptance limits:
+[Phase 3 evidence](../docs/MANAGED_CLOUD_PHASE3_EVIDENCE.md).
+
+### Phase 3 review repairs
+
+Requests has visible attention/recent tabs. Devices lists Needs attention, Active
+devices and Removed devices: active devices with stale/waiting/paused/unavailable
+status need attention and appear only in that section. Fresh current/updating
+devices appear in Active devices; removed devices appear only in Removed devices.
+Migration `0012` stores successful authenticated pull observations. The input cursor
+reports processed history; newly delivered data does not count as acknowledgement.
+Within 300 seconds, a device at the vault head is current and a device behind it is
+updating. Older observations are stale; no observation is waiting; disabled vault
+membership is paused; missing/inconsistent observations are unavailable. All device
+vaults contribute to status. This is a device report, not proof of local disk writes.
+Phase 4 must supply periodic pulls for continued freshness. Account
+shows at most 20 stored recovery notification records, scoped to account and tenant;
+these records are not evidence of delivery. Activity links remain available.
+Activity verification failures persist through pending/error responses and clear
+on a later verified response. Session expiry clears account risk, queries and
+receipt state before reauthentication. All Web data responses undergo recursive
+sensitive-field checks, including alternate casing/separators.
+
+Migration `0011` adds digest-only wrapping-possession challenges and invalidates
+older local recovery handoff references and restricted recovery sessions that
+lacked that proof; normal sessions are preserved. No existing Vault
+is touched. Recovery RPC data results are copied and explicitly disposed; run
+`npm run test:recovery-resources` for captured host workerd diagnostics.
+
+The recursive safe-view guard rejects recovery proof/challenge/authorization,
+cancelAuthorization, completionSignature, signatures, canonical payloads,
+wrappedVDK/wrapped_vdk, shares, sealed/ciphertext/encrypted and private/public key
+fields, including spelling variants in nested objects and arrays. WebAuthn options
+are a separate authentication contract; their passkey challenge is not recovery
+material. Real GET `/v1/auth/session` 401 clears queries, activity receipts and the
+account risk warning before redirect; a different-account regression covers it.

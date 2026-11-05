@@ -152,6 +152,7 @@ export function createRepository(db: D1Database, ctx: DeviceContext, signer: Che
                 }[]).find(c => c.sequence === next);
                 if (!head || !end || head.sequence !== high)
                     throw new ApiError('internal_error');
+                await db.prepare('INSERT INTO device_sync_progress VALUES(?,?,?,unixepoch(),?) ON CONFLICT(tenant_id,vault_id,device_id) DO UPDATE SET last_seen=unixepoch(),acknowledged=max(acknowledged,excluded.acknowledged)').bind(...scope, ctx.deviceId, after).run();
                 return { checkpoint: { canonical: head.canonical, signature: head.signature }, pageCheckpoint: { canonical: end.canonical, signature: end.signature }, versions: rows.map(r => ({ serverSequence: r.sequence, signed: { canonical: r.canonical, signature: r.signature } })), nextCursor: btoa(JSON.stringify([...scope, ctx.deviceId, next])), hasMore: next < high };
             }
             catch (error) {

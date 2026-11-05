@@ -1,3 +1,5 @@
+import { rpcData } from '../shared/rpc-data.ts';
+import { assertSafeView } from '../web/src/safe-view.ts';
 import { random } from '../api-worker/webauthn.ts';
 import { expect, test } from 'vitest';
 import { splitRecoveryKey, joinRecoveryKey, seal, open, wrapVaultKey, unwrapVaultKey } from '../shared/recovery-crypto.ts';
@@ -109,7 +111,7 @@ test.each(['prepared', 'released'])('cancellation at %s is durable and retryable
 test('partial RPC failure resumes without a second share or premature activation', async () => {
     const c = await started(), e = await evidence(c.canonical);
     const rpc = env.RECOVERY;
-    const failing = recoveryRepository(db(), { ...env, RECOVERY: { key: () => rpc.key(), enroll: (a, b) => rpc.enroll(a, b), prepare: (a) => rpc.prepare(a), cancel: (a, b) => rpc.cancel(a, b), complete: (a, p, s) => rpc.complete(a, p, s), release: async (a, b) => { await rpc.release(a, b); throw new Error('synthetic_response_loss'); } } });
+    const failing = recoveryRepository(db(), { ...env, RECOVERY: { key: () => rpc.key(), enroll: (a, b) => rpc.enroll(a, b), prepare: (a) => rpc.prepare(a), cancel: (a, b) => rpc.cancel(a, b), complete: (a, p, s) => rpc.complete(a, p, s), release: async (a, b) => { await rpcData(rpc.release(a, b)); throw new Error('synthetic_response_loss'); } } });
     await expect(failing.release(s, c.input.id, e)).rejects.toThrow('synthetic_response_loss');
     expect(await db().prepare('SELECT state FROM recovery_sagas').first('state')).toBe('confirmed');
     const first = await env.CUSTODIAN_TEST.prepare('SELECT release FROM recovery_sagas').first('release');
@@ -148,7 +150,7 @@ test('completion response loss resumes activating saga, and cross-account access
     await repo().release(s, c.input.id, await evidence(c.canonical));
     await expect(repo().detail({ ...s, account_id: 'foreign' }, c.input.id)).rejects.toThrow('not_found');
     const rpc = env.RECOVERY;
-    const failing = recoveryRepository(db(), { ...env, RECOVERY: { key: () => rpc.key(), enroll: (a, b) => rpc.enroll(a, b), prepare: (a) => rpc.prepare(a), release: (a, b) => rpc.release(a, b), cancel: (a, b) => rpc.cancel(a, b), complete: async (a, p, s) => { await rpc.complete(a, p, s); throw new Error('synthetic_loss'); } } });
+    const failing = recoveryRepository(db(), { ...env, RECOVERY: { key: () => rpc.key(), enroll: (a, b) => rpc.enroll(a, b), prepare: (a) => rpc.prepare(a), release: (a, b) => rpc.release(a, b), cancel: (a, b) => rpc.cancel(a, b), complete: async (a, p, s) => { await rpcData(rpc.complete(a, p, s)); throw new Error('synthetic_loss'); } } });
     const proof = encode64(await open(target.privateKey, c.challenge, releaseContext(c.canonical, 'api') + 'proof')), signature = await sign(targetSigning, JSON.stringify(['AgentKeychain-recovery-proof-v1', c.canonical, proof]));
     await expect(failing.finish(s, c.input.id, proof, signature)).rejects.toThrow('synthetic_loss');
     expect(await db().prepare('SELECT state FROM recovery_sagas').first('state')).toBe('activating');
@@ -259,7 +261,7 @@ test.each(['before_main', 'after_main', 'before_custody', 'after_custody', 'befo
     const interrupted = recoveryRepository(db(), { ...env, RECOVERY: { ...rpc, complete: async (a, p, s) => {
                 if (stage === 'after_main' || stage === 'before_custody')
                     throw new Error('injected');
-                await rpc.complete(a, p, s);
+                await rpcData(rpc.complete(a, p, s));
                 if (stage === 'after_custody')
                     throw new Error('injected');
             } } });
@@ -410,4 +412,154 @@ test('cancel racing from a stale preactivation read returns completed status wit
     const racing = recoveryRepository(db(), { ...env, RECOVERY_AUTH: { enrollment: (a, b) => auth.enrollment(a, b), authorize: (a, b) => auth.authorize(a, b), complete: (a, p, s) => auth.complete(a, p, s), cancel: async (a, b) => { const valid = await auth.cancel(a, b); await repo().finish(s, c.input.id, p.proof, p.signature); return valid; } } });
     expect(await racing.cancel(s, c.input.id, await cancelAuth(c.canonical))).toEqual({ cancelled: false, state: 'completed' });
     expect(await env.CUSTODIAN_TEST.prepare('SELECT state FROM recovery_sagas').first('state')).toBe('completed');
+});
+test('restricted recovery starts exact target once, cancels with independent authorization and never grants browser authority', async()=>{
+    const m=await enrolled();
+    const input={id:crypto.randomUUID(),packageId:m.packageId,targetDeviceId:random(),signingKey:await publicKey(targetSigning),wrappingKey:await publicKey(target),nonce:crypto.randomUUID()};
+    const rs={...s,digest:'restricted'};
+    await db().prepare("INSERT INTO recovery_sessions(digest,csrf_digest,bootstrap_digest,proof_digest,account_id,tenant_id,vault_id,case_id,request_digest,expires_at) VALUES('restricted','anti','boot','proof','a','t','v',?,?,unixepoch()+600)").bind(input.id,await recoveryAction('start',JSON.stringify(input))).run();
+    const c=await repo().start(rs,input);
+    expect(c.state).toBe('prepared');
+    expect(await db().prepare("SELECT started FROM recovery_sessions WHERE digest='restricted'").first('started')).toBe(1);
+    await expect(repo().start(rs,{...input,id:random(),nonce:random()})).rejects.toThrow();
+    await expect(repo().cancel(rs,input.id)).rejects.toThrow();
+    expect(await repo().cancel(rs,input.id,await cancelAuth(c.canonical))).toEqual({cancelled:true});
+    expect(await repo().cancel(rs,input.id,await cancelAuth(c.canonical))).toEqual({cancelled:true});
+    expect(await db().prepare("SELECT 1 FROM browser_sessions WHERE digest='restricted'").first()).toBeNull();
+});
+test('public email recovery completes through target-only HTTP delivery without a browser Passkey or browser share response',async()=>{
+    const {createBrowserAuth,emailLookup}=await import('../api-worker/browser-auth.ts');
+    const {deviceFetch}=await import('../api-worker/device-http.ts');
+    const origin='https://local.invalid';
+    const config={origin,rpId:'local.invalid',bootstrapKey:await crypto.subtle.generateKey({name:'HMAC',hash:'SHA-256'},false,['sign','verify']),lookupKey:await crypto.subtle.generateKey({name:'HMAC',hash:'SHA-256'},false,['sign','verify']),emailKey:await crypto.subtle.generateKey({name:'AES-GCM',length:256},false,['encrypt','decrypt']),verifyEmail:async(e:string,p:string)=>['synthetic@example.invalid','other@example.invalid'].includes(e)&&p==='synthetic-independent-proof',trustedSource:async()=> 'synthetic-public-source',recovery:env};
+    await db().prepare("INSERT INTO account_emails VALUES('a','synthetic-unread-email',?,1)").bind(await emailLookup(config,'synthetic@example.invalid')).run();
+    const m=await enrolled(),input={id:random(),packageId:m.packageId,targetDeviceId:random(),signingKey:await publicKey(targetSigning),wrappingKey:await publicKey(target),nonce:random()};
+    const deviceCall=(route:string,body:unknown,headers:Record<string,string>={})=>deviceFetch(new Request(origin+'/v1/devices/'+route,{method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify(body)}),{...env,MAIN:db(),AUTH_ORIGIN:origin,TRUSTED_AUTH_SOURCE:{resolve:async()=> 'synthetic-public-target'}});
+    const prepare = async(t: typeof input, signer: CryptoKeyPair) => {
+        const signature=await sign(signer,JSON.stringify(['AgentKeychain-recovery-target-v1',t]));
+        expect((await deviceCall('recovery-target-challenge',{target:t,signature},{origin})).status).toBe(401);
+        const challenge=await deviceCall('recovery-target-challenge',{target:t,signature});expect(challenge.status).toBe(200);
+        const {challengeRef,box}=await challenge.json() as {challengeRef:string;box:Parameters<typeof open>[1]};
+        const context='AgentKeychain-recovery-target-possession-v1\0'+challengeRef+'\0'+JSON.stringify(t);
+        const browser=await crypto.subtle.generateKey('X25519',true,['deriveBits']) as CryptoKeyPair;
+        await expect(open(browser.privateKey,box,context)).rejects.toThrow();
+        const proof=encode64(await open(target.privateKey,box,context));
+        const body={target:t,signature,challengeRef,proof};
+        expect((await deviceCall('recovery-target',{...body,proof:encode64(new Uint8Array(43))})).status).not.toBe(200);
+        for(const headers of [{origin}, {'sec-fetch-site':'same-origin'}, {cookie:'browser=synthetic'}] as Record<string,string>[]) {
+            expect((await deviceCall('recovery-target',body,headers)).status).toBe(401);
+        }
+        const prepared=await deviceCall('recovery-target',body);expect(prepared.status).toBe(200);
+        expect((await deviceCall('recovery-target',body)).status).not.toBe(200);
+        return await prepared.json() as {requestRef:string};
+    };
+    const substituted={...input,signingKey:await publicKey(signing)};
+    await prepare(substituted,signing);
+    const {requestRef}=await prepare(input,targetSigning);
+    const auth=createBrowserAuth(db(),config);let cookies='',csrf='';
+    const remember=(r:Response)=>{cookies=r.headers.getSetCookie().map(x=>x.split(';')[0]).join('; ');csrf=/__Host-akc_csrf=([^;]+)/.exec(cookies)![1]!;};
+    const call=(route:string,body:unknown)=>auth(new Request(origin+'/v1/auth/'+route,{method:'POST',headers:{origin,cookie:cookies,'x-csrf-token':csrf,'content-type':'application/json'},body:JSON.stringify(body)}));
+    await db().batch([db().prepare("INSERT INTO accounts VALUES('other')"),db().prepare("INSERT INTO tenants VALUES('other-tenant')"),db().prepare("INSERT INTO memberships VALUES('other-tenant','other',1)"),db().prepare("INSERT INTO vaults VALUES('other-tenant','other-vault',0)"),db().prepare("INSERT INTO account_emails VALUES('other','synthetic-unread-email',?,1)").bind(await emailLookup(config,'other@example.invalid'))]);
+    remember(await auth(new Request(origin+'/v1/auth/bootstrap')));
+    const browserSigning=await crypto.subtle.generateKey('Ed25519',true,['sign','verify']) as CryptoKeyPair;
+    const browserWrapping=await crypto.subtle.generateKey('X25519',true,['deriveBits']) as CryptoKeyPair;
+    const browserTarget={...input,signingKey:await publicKey(browserSigning),wrappingKey:await publicKey(browserWrapping)};
+    for(const extra of [{}, {requestRef}]) {
+        expect((await call('recovery/verify',{email:'synthetic@example.invalid',proof:'synthetic-independent-proof',target:browserTarget,...extra})).status).not.toBe(200);
+    }
+    expect((await call('recovery/start',browserTarget)).status).not.toBe(200);
+    expect(await db().prepare('SELECT count(*) n FROM recovery_sagas').first('n')).toBe(0);
+    const foreign=await call('recovery/verify',{email:'other@example.invalid',proof:'synthetic-independent-proof',requestRef});expect(foreign.status).toBe(200);remember(foreign);
+    expect((await call('recovery/start',{})).status).toBe(401);
+    expect(await db().prepare('SELECT count(*) n FROM recovery_sagas').first('n')).toBe(0);
+    remember(await auth(new Request(origin+'/v1/auth/bootstrap')));
+    const verified=await call('recovery/verify',{email:'synthetic@example.invalid',proof:'synthetic-independent-proof',requestRef});expect(verified.status).toBe(200);remember(verified);
+    expect((await call('recovery/start',input)).status).not.toBe(200);
+    expect((await call('recovery/cancel',{id:input.id,confirmed:true,authorization:{}})).status).not.toBe(200);
+    const start=await call('recovery/start',{});expect(start.status).toBe(200);assertSafeView(await start.clone().json());expect(await start.json()).toEqual({id:input.id,state:'prepared',reviewRequired:true});
+    expect((await call('recovery/status',{id:random()})).status).toBe(401);
+    expect((await call('recovery/release',{id:input.id,evidence:{}})).status).toBe(404);
+    const targetCall=async(route:string,extra:Record<string,unknown>={})=>{const body={requestRef,...extra};return deviceCall(route,{...body,signature:await sign(targetSigning,JSON.stringify(['AgentKeychain-recovery-target-call-v1',route,body]))});};
+    const detail=await targetCall('recovery-target-status');expect(detail.status).toBe(200);const c=await detail.json() as {canonical:string;challenge:Parameters<typeof open>[1]};
+    expect((await deviceCall('recovery-target-status',{requestRef,signature:await sign(signing,'wrong')})).status).toBe(401);
+    const early=await targetCall('recovery-target-release',{evidence:{mode:'cooldown',confirmerId:null,signature:null,proof:await sign(signing,'early')}});expect(early.status).not.toBe(200);
+    for(const route of ['recovery-target-status','recovery-target-release','recovery-target-finish']) {
+        const body={requestRef,...(route.endsWith('release')?{evidence:{}}:route.endsWith('finish')?{proof:'fake',completionSignature:'fake'}:{})};
+        expect((await deviceCall(route,{...body,signature:await sign(browserSigning,JSON.stringify(['AgentKeychain-recovery-target-call-v1',route,body]))})).status).not.toBe(200);
+    }
+    const released=await targetCall('recovery-target-release',{evidence:await evidence(c.canonical)});expect(released.status).toBe(200);
+    const delivery=await released.json() as {api:Parameters<typeof open>[1];custodian:Parameters<typeof open>[1];wrappedVDK:string};
+    for(const party of ['api','custodian'] as const) await expect(open(browserWrapping.privateKey,delivery[party],releaseContext(c.canonical,party))).rejects.toThrow();
+    const a=await open(target.privateKey,delivery.api,releaseContext(c.canonical,'api'));
+    const b=await open(target.privateKey,delivery.custodian,releaseContext(c.canonical,'custodian'));
+    await expect(unwrapVaultKey(joinRecoveryKey(a,crypto.getRandomValues(new Uint8Array(32))),delivery.wrappedVDK,vaultKeyContext(m))).rejects.toThrow();
+    expect(await unwrapVaultKey(joinRecoveryKey(a,b),delivery.wrappedVDK,vaultKeyContext(m))).toEqual(vaultKey);
+    const proof=encode64(await open(target.privateKey,c.challenge,releaseContext(c.canonical,'api')+'proof'));
+    const finished=await targetCall('recovery-target-finish',{proof,completionSignature:await sign(targetSigning,JSON.stringify(['AgentKeychain-recovery-proof-v1',c.canonical,proof]))});expect(finished.status).toBe(200);
+    expect((await call('recovery/status',{id:input.id})).status).toBe(401);
+    expect(await db().prepare("SELECT count(*) n FROM browser_sessions WHERE revoked=0").first('n')).toBe(0);
+    expect(await db().prepare('SELECT state FROM recovery_sagas WHERE id=?').bind(input.id).first('state')).toBe('completed');
+});
+
+test('recovery and account notification Web views expose bounded safe persisted metadata',async()=>{
+    const c=await started();
+    const {webRepository}=await import('../api-worker/web-repository.ts');
+    const web=webRepository(db(),{recovery:env} as unknown as import('../api-worker/browser-auth.ts').BrowserConfig,s);
+    assertSafeView(await web.query({view:'recovery',id:c.input.id}));
+    for(let i=0;i<25;i++) await db().prepare("INSERT INTO recovery_notifications(case_id,tenant_id,account_id,event) VALUES(?,'t','a','started')").bind(c.input.id).run();
+    await db().prepare("INSERT INTO recovery_notifications(case_id,tenant_id,account_id,event) VALUES(?,'t','foreign','cancelled')").bind(c.input.id).run();
+    const account=await web.query({view:'account'}) as {notifications:{event:string;createdAt:number}[]};
+    assertSafeView(account);expect(account.notifications).toHaveLength(20);
+    expect(account.notifications.every(n=>n.event==='started' && n.createdAt>0)).toBe(true);
+});
+test('RPC data ownership releases successful resources even when a later operation throws',async()=>{
+    const {rpcData}=await import('../shared/rpc-data.ts');
+    let disposed=0;
+    const value={nested:{state:'released'},[Symbol.dispose](){disposed++;}};
+    const result=await rpcData(Promise.resolve(value));
+    expect(disposed).toBe(1);expect(result.nested).toEqual({state:'released'});
+    expect(Symbol.dispose in result).toBe(false);
+    await expect((async()=>{await rpcData(Promise.resolve(value));throw new Error('later failure');})()).rejects.toThrow('later failure');
+    expect(disposed).toBe(2);
+    await expect(rpcData(Promise.resolve({bad:()=>{},[Symbol.dispose](){disposed++;}}))).rejects.toThrow();
+    expect(disposed).toBe(3);
+});
+
+test('device web status follows scoped backend progress and vault availability',async()=>{
+    await db().prepare("INSERT INTO device_keys(tenant_id,device_id,wrapping_key) VALUES('t','d',?)").bind(await publicKey(target)).run();
+    const {webRepository}=await import('../api-worker/web-repository.ts');
+    const web=webRepository(db(),{} as import('../api-worker/browser-auth.ts').BrowserConfig,s);
+    const status=async()=>{const r=await web.query({view:'device',id:'d'}) as {status:string};assertSafeView(r);return r.status;};
+    expect(await status()).toBe('waiting');
+    await db().prepare("INSERT INTO device_sync_progress VALUES('t','v','d',unixepoch(),0)").run();
+    expect(await status()).toBe('current');
+    expect((await web.query({view:'status'}) as {status:string}).status).toBe('current');
+    await db().prepare("UPDATE vaults SET sequence=1 WHERE id='v'").run();
+    expect(await status()).toBe('updating');
+    await db().prepare("UPDATE device_sync_progress SET last_seen=unixepoch()-301").run();
+    expect(await status()).toBe('stale');
+    await db().prepare("UPDATE vault_devices SET active=0 WHERE device_id='d'").run();
+    expect(await status()).toBe('paused');
+    await db().prepare("DELETE FROM device_sessions WHERE device_id='d'").run();
+    await db().prepare("DELETE FROM vault_devices WHERE device_id='d'").run();
+    expect(await status()).toBe('unavailable');
+    await db().prepare("UPDATE devices SET active=0 WHERE id='d'").run();
+    expect(await status()).toBe('removed');
+    expect((await web.query({view:'status'}) as {status:string}).status).toBe('waiting');
+});
+
+test('web cancellation resolves only same-account confirmation and still requires exact step-up',async()=>{
+    const c=await started();
+    const {webRepository}=await import('../api-worker/web-repository.ts');
+    const {digest}=await import('../shared/contracts.ts');
+    const web=webRepository(db(),{recovery:env} as unknown as import('../api-worker/browser-auth.ts').BrowserConfig,s);
+    const view=await web.query({view:'recovery',id:c.input.id}) as {cancelRef:string};assertSafeView(view);
+    const confirmation=random();
+    await db().prepare("INSERT INTO recovery_cancel_confirmations VALUES(?,?,'a','t',?,unixepoch()+300)").bind(await digest(confirmation),c.input.id,JSON.stringify(await cancelAuth(c.canonical))).run();
+    await expect(web.execute(view.cancelRef,random())).rejects.toThrow('approval_required');
+    await expect(web.execute(view.cancelRef,confirmation)).rejects.toThrow('approval_required');
+    await step('cancel',c.canonical);
+    const result=await web.execute(view.cancelRef,confirmation);assertSafeView(result);
+    expect(result).toMatchObject({id:c.input.id,state:'cancelled'});
+    assertSafeView(await web.query({view:'recovery',id:c.input.id}));
 });

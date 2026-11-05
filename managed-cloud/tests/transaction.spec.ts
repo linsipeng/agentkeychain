@@ -312,3 +312,14 @@ test('checkpoint acceptance is atomic and roots bind every exact signed version'
     expect(JSON.parse(receipt.checkpoint.canonical).sequence).toBe(1);
     await expect(repository(db(), await context(), await syntheticSigner()).pull(null, 100)).rejects.toThrow();
 });
+
+test('successful pull records only device-reported processed cursor, not newly delivered data',async()=>{
+    await push();
+    const first=await createRepository(db(),await context()).pull(null,100);
+    expect(await db().prepare("SELECT acknowledged FROM device_sync_progress WHERE tenant_id='t' AND vault_id='v' AND device_id='d'").first('acknowledged')).toBe(0);
+    await createRepository(db(),await context()).pull(first.nextCursor,100);
+    const progress=await db().prepare("SELECT acknowledged,last_seen FROM device_sync_progress WHERE tenant_id='t' AND vault_id='v' AND device_id='d'").first<{acknowledged:number;last_seen:number}>();
+    expect(progress!.acknowledged).toBe(1);expect(progress!.last_seen).toBeGreaterThan(Date.now()/1000-10);
+    await expect(createRepository(db(),await context()).pull(btoa(JSON.stringify(['t','v','d',999])),100)).rejects.toThrow();
+    expect(await db().prepare("SELECT acknowledged FROM device_sync_progress WHERE tenant_id='t' AND vault_id='v' AND device_id='d'").first('acknowledged')).toBe(1);
+});

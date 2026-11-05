@@ -7,6 +7,7 @@ import { authenticate } from './auth.ts';
 import { createRepository } from './repository.ts';
 export interface Env extends BrowserBindings {
     MAIN: D1Database;
+    ASSETS?: Fetcher;
     CHECKPOINT_SIGNER?: CheckpointSigner;
     RECOVERY: RecoveryContract & import('../shared/recovery.ts').RecoveryRPC;
 }
@@ -17,6 +18,18 @@ export default {
                 return await deviceFetch(request, env);
             if (new URL(request.url).pathname.startsWith('/v1/auth/'))
                 return await browserFetch(request, env);
+            const path = new URL(request.url).pathname;
+            if (!path.startsWith('/v1/') && env.ASSETS && ['GET','HEAD'].includes(request.method)) {
+                if (path.endsWith('.map') || path.includes('/src/') || path.includes('/.')) throw new ApiError('not_found');
+                const asset = await env.ASSETS.fetch(request);
+                const headers = new Headers(asset.headers);
+                headers.set('cache-control','no-store');
+                headers.set('content-security-policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+                headers.set('referrer-policy','no-referrer');
+                headers.set('x-content-type-options','nosniff');
+                headers.set('permissions-policy','camera=(), microphone=(), geolocation=()');
+                return new Response(asset.body,{status:asset.status,headers});
+            }
             const url = new URL(request.url), match = url.pathname.match(/^\/v1\/vaults\/([A-Za-z0-9_-]{1,128})\/sync\/(push|pull)$/);
             if (!match)
                 throw new ApiError('not_found');

@@ -1,3 +1,5 @@
+import { seal } from '../shared/recovery-crypto.ts';
+import { wordlist } from '@scure/bip39/wordlists/english.js';
 import type { CancelAuthorization } from '../shared/recovery.ts';
 import { recoveryRepository } from './recovery-repository.ts';
 import type { SessionRow as RecoverySession } from './browser-repository.ts';
@@ -5,7 +7,7 @@ import { approvalRepository } from './approval-repository.ts';
 import { validateSigned } from '../shared/contracts.ts';
 import { ApiError, boundedBody, digest, errorResponse, verify } from '../shared/contracts.ts';
 import { base64, exactFields, identifier } from '../../src/cloud/protocol.ts';
-import { challengeProof, enrollmentProof } from '../shared/device-protocol.ts';
+import { canonicalGrant, challengeProof, enrollmentProof } from '../shared/device-protocol.ts';
 import { deviceRepository } from './device-repository.ts';
 import { browserRepository, type SessionRow } from './browser-repository.ts';
 import { random } from './webauthn.ts';
@@ -16,7 +18,7 @@ export async function browserDevice(db: D1Database, s: SessionRow, route: string
     const repo = deviceRepository(db);
     if (route === 'devices/pending') {
         exactFields(b, ['verificationCode', 'issuerDeviceId']);
-        if (typeof b.verificationCode !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(b.verificationCode))
+        if (typeof b.verificationCode !== 'string' || !/^(?:[A-Za-z0-9_-]{12}|[A-Za-z0-9_-]{43})$/.test(b.verificationCode))
             throw new ApiError('invalid_request');
         if (b.issuerDeviceId !== null)
             identifier(b.issuerDeviceId);
@@ -48,13 +50,13 @@ export async function deviceFetch(request: Request, env: BrowserBindings) {
     let auditFailure = false;
     try {
         const url = new URL(request.url), route = url.pathname.slice('/v1/devices/'.length);
-        if (!['authorize', 'status', 'challenge', 'token', 'enroll', 'key-packages', 'approvals', 'recovery-keys', 'recovery-package', 'recovery-cancel', 'recovery-notifications'].includes(route))
+        if (!['pairing-detail', 'pairing-confirm', 'recovery-target', 'recovery-target-challenge', 'recovery-target-status', 'recovery-target-release', 'recovery-target-finish', 'recovery-cancel-confirmation', 'authorize', 'status', 'challenge', 'token', 'enroll', 'key-packages', 'approvals', 'recovery-keys', 'recovery-package', 'recovery-cancel', 'recovery-notifications'].includes(route))
             throw new ApiError('not_found');
         if (url.search)
             throw new ApiError('invalid_request');
         if (request.method !== (route === 'key-packages' ? 'GET' : 'POST'))
             throw new ApiError('method_not_allowed');
-        if (request.headers.has('cookie'))
+        if ((route.startsWith('recovery-target') && (request.headers.has('origin') || request.headers.has('sec-fetch-mode') || request.headers.has('sec-fetch-site'))) || request.headers.has('cookie'))
             throw new ApiError('unauthorized');
         const bodyLimit = route === 'approvals' ? 384 * 1024 : 8192;
         const raw = await boundedBody(request, bodyLimit);
@@ -84,7 +86,68 @@ export async function deviceFetch(request: Request, env: BrowserBindings) {
         if (!b || typeof b !== 'object' || Array.isArray(b))
             throw new ApiError('invalid_request');
         let result: unknown;
-        if (route === 'authorize') {
+        if (route === 'pairing-detail' || route === 'pairing-confirm') {
+            exactFields(b,route==='pairing-detail'?['id']:['id','signature']);identifier(b.id);
+            const c=await authenticate(env.MAIN,request,null,raw);
+            const r=await env.MAIN.prepare("SELECT * FROM device_requests WHERE id=? AND account_id=? AND tenant_id=? AND vault_id=? AND state='bound' AND expires_at>unixepoch()").bind(b.id,c.accountId,c.tenantId,c.vaultId).first<{id:string;device_id:string;signing_key:string;wrapping_key:string;key_epoch:number;expires_at:number;phrase:string}>();
+            if(!r)throw new ApiError('not_found');
+            const canonical=canonicalGrant({version:1,requestId:r.id,accountId:c.accountId,tenantId:c.tenantId,vaultId:c.vaultId,deviceId:r.device_id,signingKey:r.signing_key,wrappingKey:r.wrapping_key,issuerDeviceId:c.deviceId,keyEpoch:r.key_epoch,expiresAt:r.expires_at});
+            const nonce=env.MAIN.prepare('INSERT INTO accept_device_nonce VALUES(?,?,?,?,?,?,?)').bind(c.sessionDigest,c.tenantId,c.vaultId,c.deviceId,c.accountId,c.nonce,c.timestamp);
+            if(route==='pairing-confirm') {
+                base64(b.signature,64,64);if(!await verify(c.publicKey,b.signature,canonical))throw new ApiError('invalid_signature');
+                await env.MAIN.batch([nonce,env.MAIN.prepare('INSERT INTO pairing_confirmations VALUES(?,?,?,?,?,?)').bind(r.id,c.tenantId,c.accountId,c.deviceId,canonical,b.signature)]);
+                result={confirmed:true};
+            }else{await nonce.run();result={canonical,phrase:r.phrase};}
+        }
+        else if (route.startsWith('recovery-target-') && route !== 'recovery-target-challenge') {
+            exactFields(b,route==='recovery-target-status'?['requestRef','signature']:route==='recovery-target-release'?['requestRef','signature','evidence']:['requestRef','signature','proof','completionSignature']);
+            if(typeof b.requestRef!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(b.requestRef))throw new ApiError('unauthorized');
+            base64(b.signature,64,64);
+            const target=await env.MAIN.prepare('SELECT target FROM recovery_targets WHERE digest=? AND expires_at>unixepoch()').bind(await digest(b.requestRef)).first<string>('target');
+            if(!target)throw new ApiError('unauthorized');
+            const t=JSON.parse(target) as {id:string;signingKey:string};
+            const {signature,...signed}=b;
+            if(!await verify(t.signingKey,signature as string,JSON.stringify(['AgentKeychain-recovery-target-call-v1',route,signed])))throw new ApiError('invalid_signature');
+            const row=await env.MAIN.prepare("SELECT account_id,tenant_id FROM recovery_sagas WHERE id=? AND request_digest=?").bind(t.id,await import('../shared/recovery.ts').then(m=>m.recoveryAction('start',target))).first<{account_id:string;tenant_id:string}>();
+            if(!row)throw new ApiError('not_found');
+            const recovery=recoveryRepository(env.MAIN,env),s=row as RecoverySession;
+            result=route==='recovery-target-status'?await recovery.detail(s,t.id):route==='recovery-target-release'?await recovery.release(s,t.id,b.evidence as import('../shared/recovery.ts').RecoveryEvidence):await recovery.finish(s,t.id,b.proof as string,b.completionSignature as string);
+        }
+        else if (route === 'recovery-cancel-confirmation') {
+            exactFields(b,['id','authorization']);identifier(b.id);
+            const c=await authenticate(env.MAIN,request,null,raw);
+            const r=await recoveryRepository(env.MAIN,env).detail({account_id:c.accountId,tenant_id:c.tenantId} as RecoverySession,b.id as string);
+            if(!env.RECOVERY_AUTH||!await env.RECOVERY_AUTH.cancel(r.canonical,b.authorization as CancelAuthorization))throw new ApiError('approval_required');
+            const confirmationRef=random();
+            await env.MAIN.batch([env.MAIN.prepare('INSERT INTO accept_device_nonce VALUES(?,?,?,?,?,?,?)').bind(c.sessionDigest,c.tenantId,c.vaultId,c.deviceId,c.accountId,c.nonce,c.timestamp),env.MAIN.prepare('INSERT INTO recovery_cancel_confirmations VALUES(?,?,?,?,?,unixepoch()+300)').bind(await digest(confirmationRef),b.id,c.accountId,c.tenantId,JSON.stringify(b.authorization))]);
+            result={confirmationRef};
+        }
+        else if (route === 'recovery-target' || route === 'recovery-target-challenge') {
+            exactFields(b,route === 'recovery-target-challenge' ? ['target','signature'] : ['target','signature','challengeRef','proof']);
+            const t=b.target as Record<string,unknown>;
+            exactFields(t,['id','packageId','targetDeviceId','signingKey','wrappingKey','nonce']);
+            for(const f of ['id','packageId','targetDeviceId','nonce'])identifier(t[f]);
+            base64(t.signingKey,32,32);base64(t.wrappingKey,32,32);base64(b.signature,64,64);
+            if(!await verify(t.signingKey,b.signature,JSON.stringify(['AgentKeychain-recovery-target-v1',t])))throw new ApiError('invalid_signature');
+            if (t.signingKey === t.wrappingKey || typeof t.targetDeviceId !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(t.targetDeviceId)) throw new ApiError('invalid_request');
+            if (route === 'recovery-target-challenge') {
+                const challengeRef=random(), proof=random();
+                const box=await seal(t.wrappingKey as string,new TextEncoder().encode(proof),'AgentKeychain-recovery-target-possession-v1\0'+challengeRef+'\0'+JSON.stringify(t));
+                await env.MAIN.batch([
+                    env.MAIN.prepare('DELETE FROM recovery_target_challenges WHERE digest IN(SELECT digest FROM recovery_target_challenges WHERE expires_at<=unixepoch() LIMIT 100)'),
+                    env.MAIN.prepare('INSERT INTO recovery_target_challenges VALUES(?,?,?,unixepoch()+300)').bind(await digest(challengeRef),JSON.stringify(t),await digest(btoa(proof))),
+                ]);
+                return Response.json({challengeRef,box},{headers:{'cache-control':'no-store'}});
+            }
+            identifier(b.challengeRef); base64(b.proof,43,43);
+            const consumed=await env.MAIN.prepare('DELETE FROM recovery_target_challenges WHERE digest=? AND target=? AND proof_digest=? AND expires_at>unixepoch() RETURNING digest').bind(await digest(b.challengeRef as string),JSON.stringify(t),await digest(b.proof as string)).first();
+            if (!consumed) throw new ApiError('unauthorized');
+            const requestRef=random();
+            await env.MAIN.prepare('DELETE FROM recovery_targets WHERE digest IN(SELECT digest FROM recovery_targets WHERE expires_at<=unixepoch() LIMIT 100)').run();
+            await env.MAIN.prepare('INSERT INTO recovery_targets VALUES(?,?,unixepoch()+172800)').bind(await digest(requestRef),JSON.stringify(t)).run();
+            result={requestRef,expiresIn:172800};
+        }
+        else if (route === 'authorize') {
             exactFields(b, ['signingKey', 'wrappingKey', 'platform', 'proof']);
             base64(b.signingKey, 32, 32);
             base64(b.wrappingKey, 32, 32);
@@ -93,11 +156,11 @@ export async function deviceFetch(request: Request, env: BrowserBindings) {
                 throw new ApiError('invalid_request');
             if (!await verify(b.signingKey, b.proof, enrollmentProof(b.signingKey, b.wrappingKey, b.platform as string)))
                 throw new ApiError('invalid_signature');
-            const deviceCode = random(), verificationCode = random();
-            const words = 'amber apple birch blue brook cedar cloud coral dawn dune elm fern field flame frost gold green hill lake leaf lime maple moon moss oak pine plum rain reed river rose snow'.split(' ');
-            const phrase = Array.from(crypto.getRandomValues(new Uint8Array(6)), v => words[v & 31]).join(' ');
+            const deviceCode = random(), verificationCode = random().slice(0,12);
+            // Three independent 11-bit words preserve 33 bits of comparison entropy.
+            const phrase = Array.from(crypto.getRandomValues(new Uint16Array(3)), v => wordlist[v & 2047]).join(' ');
             const r = await repo.request({ code: await digest(deviceCode), verification: await digest(verificationCode), phrase, signing: b.signingKey, wrapping: b.wrappingKey, platform: b.platform as string });
-            result = { ...r, deviceCode, verificationUri: env.AUTH_ORIGIN + '/v1/auth/devices/verification', verificationCode, phrase, expiresIn: 600, interval: 5 };
+            result = { ...r, deviceCode, verificationUri: env.AUTH_ORIGIN + '/v1/auth/devices/verification', verificationCode, phrase, browserUri: env.AUTH_ORIGIN + '/app/devices/add?code=' + encodeURIComponent(verificationCode), expiresIn: 600, interval: 5 };
         }
         else if (route === 'status' || route === 'challenge') {
             const field = route === 'status' ? 'deviceCode' : 'deviceId';

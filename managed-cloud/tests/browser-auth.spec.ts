@@ -1,7 +1,10 @@
+import { assertSafeView } from '../web/src/safe-view.ts';
+import { signedRecoveryTarget } from './recovery-target.ts';
+import { seedInvitation } from '../api-worker/invitations.ts';
 import { beforeEach, expect, test } from 'vitest';
 import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset } from 'cloudflare:test';
-import { createBrowserAuth, type BrowserConfig, emailLookup } from '../api-worker/browser-auth.ts';
+import { createBrowserAuth, type BrowserConfig } from '../api-worker/browser-auth.ts';
 import { virtualAuthenticator, type VectorOptions } from './virtual-authenticator.ts';
 import { random } from '../api-worker/webauthn.ts';
 import { browserRepository } from '../api-worker/browser-repository.ts';
@@ -24,7 +27,9 @@ function remember(response: Response) {
     }
 }
 async function call(path: string, body: unknown = {}, headers: Record<string, string> = {}) {
-    return handle(new Request(origin + '/v1/auth/' + path, { method: 'POST', headers: { origin, 'content-type': 'application/json', cookie: cookies, 'x-csrf-token': csrf, ...headers }, body: JSON.stringify(body) }));
+    const response = await handle(new Request(origin + '/v1/auth/' + path, { method: 'POST', headers: { origin, 'content-type': 'application/json', cookie: cookies, 'x-csrf-token': csrf, ...headers }, body: JSON.stringify(body) }));
+    if(path === 'web/query' && response.ok) assertSafeView(await response.clone().json());
+    return response;
 }
 beforeEach(async () => {
     await reset();
@@ -93,11 +98,37 @@ interface Options {
     };
 }
 const email = 'synthetic@example.invalid';
+// Phase 3 prerequisite characterization: these preserve the Phase 2 boundary,
+// rather than granting a public recovery caller an authenticated browser session.
+test('public recovery start cannot bypass account verification', async () => {
+    let verificationCalls = 0;
+    config.verifyEmail = async () => { verificationCalls++; return true; };
+    const response = await call('recovery/start', {
+        id: 'synthetic-case', packageId: 'synthetic-package',
+        targetDeviceId: 'A'.repeat(43), signingKey: 'synthetic-public-signing-key',
+        wrappingKey: 'synthetic-public-wrapping-key', nonce: 'synthetic-request',
+    });
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: { code: 'unauthorized' } });
+    expect(verificationCalls).toBe(0);
+    expect(await count('recovery_sagas')).toBe(0);
+    expect(await count('browser_sessions')).toBe(0);
+    expect((await call('recovery/verify', { email, proof: 'synthetic-proof' })).status).toBe(401);
+});
+test('invitation display is masked and verification still requires user-provided email', async () => {
+    const data = await invite();
+    const detail = await call('invitation/detail', { invitation: data.invitation });
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toEqual({ maskedEmail: 's***@e***.invalid', status: 'available', expiresAt: expect.any(Number) });
+    expect((await call('invitation/verify', { invitation: data.invitation, proof: data.proof })).status).toBe(401);
+    expect(await count('account_verifications')).toBe(0);
+    expect(await count('accounts')).toBe(0);
+});
 async function bootstrap() { const r = await handle(new Request(origin + '/v1/auth/bootstrap')); remember(r); }
 async function invite(address = email) {
     const invitation = random(), proof = random();
     config.verifyEmail = async (e, p) => e === address && p === proof;
-    await env.MAIN.prepare('INSERT INTO invitations VALUES(?,?,unixepoch()+600,NULL)').bind(await digest(invitation), await emailLookup(config, address)).run();
+    await seedInvitation(env.MAIN, config, invitation, address, Math.floor(Date.now()/1000)+600);
     return { invitation, email: address, proof };
 }
 async function registrationOptions(address = email) {
@@ -754,7 +785,7 @@ test('device verification URI has an authenticated read-only JSON landing contra
     expect(await r.json()).toEqual({ authentication: 'passkey', verificationCodeRequired: true, submitUri: origin + '/v1/auth/devices/pending' });
     expect(await count('device_requests')).toBe(before);
 });
-test.each(['approvals/approve','approvals/deny','approvals/cancel','recovery/start','recovery/release','activity/list'])('Phase 2D %s preserves session, CSRF and trusted origin boundary',async route=>{
+test.each(['approvals/approve','approvals/deny','approvals/cancel','recovery/start','activity/list'])('Phase 2D %s preserves session, CSRF and trusted origin boundary',async route=>{
  expect((await call(route,{id:'unknown',confirmed:true})).status).toBe(401);
  await register();
  for(const headers of [{origin:'https://foreign.invalid'},{'x-csrf-token':''},{cookie:''},{'content-type':'text/plain'}] as Record<string,string>[]) expect((await call(route,{id:'unknown',confirmed:true},headers)).status).toBe(401);
@@ -764,4 +795,123 @@ test('approval JSON rejects batch/permanent authority and foreign identifiers',a
  expect((await call('approvals/approve',{id:'unknown',confirmed:true,permanent:true})).status).not.toBe(200);
  expect((await call('approvals/approve',{ids:['unknown'],confirmed:true})).status).not.toBe(200);
  expect((await call('approvals/detail',{id:'foreign'})).status).toBe(404);
+});
+
+const recoveryTarget = () => ({ id: random(), packageId: random(), targetDeviceId: random(), signingKey: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))), wrappingKey: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))), nonce: random() });
+test('recovery bootstrap has identical public response for real, unknown and failed email proof; no normal session', async () => {
+    await register();
+    const normal = await count('browser_sessions');
+    for (const [address, valid] of [[email,true],['unknown@example.invalid',true],[email,false]] as const) {
+        await bootstrap();
+        config.verifyEmail = async () => valid;
+        const r = await call('recovery/verify', { email: address, proof: random(), requestRef: (await signedRecoveryTarget()).requestRef });
+        expect(r.status).toBe(200);
+        expect(await r.json()).toEqual({ accepted: true });
+        remember(r);
+        expect(cookies).toContain('__Host-akc_session=r.');
+        for (const route of ['devices/list','approvals/list','activity/list','authentication/options','step-up/options','registration/options','session/refresh','recovery/release','recovery/finish','invitation/detail']) expect((await call(route, {})).status).toBe(['recovery/release','recovery/finish'].includes(route)?404:401);
+        expect((await current()).status).toBe(401);
+    }
+    expect(await count('browser_sessions')).toBe(normal);
+    const rows = (await env.MAIN.prepare('SELECT * FROM recovery_sessions').all()).results;
+    expect(rows.filter(r=>r.account_id!==null)).toHaveLength(1);
+    expect(JSON.stringify(rows)).not.toContain(csrf);
+});
+test('recovery proof and bootstrap are one use, expire and cannot cross cases', async () => {
+    await register(); await bootstrap(); config.verifyEmail = async () => true;
+    const proof = random(), {target, requestRef} = await signedRecoveryTarget(), initialCookies = cookies, initialCsrf = csrf;
+    const result = await call('recovery/verify', { email, proof, requestRef });
+    expect(result.status).toBe(200); remember(result);
+    expect((await call('recovery/status', {id: random()})).status).toBe(401);
+    expect((await call('recovery/start', {...target, nonce: random()})).status).toBe(401);
+    expect((await call('recovery/verify', {email,proof,requestRef}, {cookie:initialCookies,'x-csrf-token':initialCsrf})).status).toBe(401);
+    await bootstrap();
+    expect((await call('recovery/verify',{email,proof,requestRef})).status).toBe(401);
+    expect(await count('recovery_sagas')).toBe(0);
+});
+test.each(['wrong','expired','used','authenticated'])('invitation detail fails generically: %s', async mode => {
+    const data = await invite();
+    if(mode==='wrong')data.invitation=random();
+    if(mode==='expired')await env.MAIN.prepare('UPDATE invitations SET expires_at=0').run();
+    if(mode==='used')await env.MAIN.prepare('UPDATE invitations SET consumed_at=unixepoch()').run();
+    if(mode==='authenticated')await register('second@example.invalid');
+    const r=await call('invitation/detail',{invitation:data.invitation});
+    expect(r.status).toBe(401);expect(await r.json()).toEqual({error:{code:'unauthorized'}});
+});
+test('expired restricted cookie and invalid origin/CSRF never reach recovery', async () => {
+    const token='r.'+random(), anti=random();
+    await env.MAIN.prepare('INSERT INTO recovery_sessions(digest,csrf_digest,bootstrap_digest,proof_digest,case_id,request_digest,expires_at) VALUES(?,?,?,?,?,?,unixepoch()-1)').bind(await digest(token),await digest(anti),random(),random(),random(),random()).run();
+    expect((await call('recovery/status',{id:random()},{cookie:`__Host-akc_session=${token}; __Host-akc_csrf=${anti}`,'x-csrf-token':anti})).status).toBe(401);
+    for(const headers of [{origin:'https://foreign.invalid'},{'x-csrf-token':'wrong'}] as Record<string,string>[]) expect((await call('recovery/verify',{email,proof:random(),target:recoveryTarget()},headers)).status).toBe(401);
+    expect(await count('recovery_sessions')).toBe(1);
+});
+test('web read models require normal authentication and project safe account-scoped metadata',async()=>{
+    expect((await call('web/query',{view:'home'})).status).toBe(401);
+    await register();
+    const response=await call('web/query',{view:'account'});
+    expect(response.status).toBe(200);
+    const value=await response.json();
+    expect(JSON.stringify(value)).not.toMatch(/public_key|encrypted_email|lookup_hash|csrf|digest|ciphertext/);
+    expect(value).toMatchObject({passkeys:[{active:true}],sessions:[{current:true}]});
+    expect((await call('web/query',{view:'device',id:'foreign'})).status).toBe(404);
+    expect((await call('web/query',{view:'history',id:'foreign'})).status).toBe(404);
+    const status=await call('web/query',{view:'status'});
+    expect(await status.json()).toMatchObject({status:'waiting'});
+});
+test('legacy hash-only invitations and changed encrypted metadata fail display closed',async()=>{
+    const data=await invite();
+    await env.MAIN.prepare('UPDATE invitations SET encrypted_email=NULL').run();
+    expect((await call('invitation/detail',{invitation:data.invitation})).status).toBe(401);
+    await env.MAIN.prepare("UPDATE invitations SET encrypted_email='invalid.invalid'").run();
+    expect((await call('invitation/detail',{invitation:data.invitation})).status).toBe(401);
+    expect(await count('account_verifications')).toBe(0);
+});
+test('concurrent public recovery proof consumption reserves one token and audits no submitted identity or proof',async()=>{
+    config.verifyEmail=async()=>true;
+    const proof=random(),{target,requestRef}=await signedRecoveryTarget(),input={email:'unknown@example.invalid',proof,requestRef};
+    const results=await Promise.all([call('recovery/verify',input),call('recovery/verify',input)]);
+    expect(results.map(r=>r.status).sort()).toEqual([200,401]);
+    expect(await count('recovery_sessions')).toBe(1);
+    expect(await count('browser_sessions')).toBe(0);
+    const audit=JSON.stringify((await env.MAIN.prepare('SELECT * FROM auth_audit').all()).results);
+    expect(audit).not.toContain(input.email);expect(audit).not.toContain(proof);expect(audit).not.toContain(target.id);
+});
+
+test.each([{}, {requestRef:'x'.repeat(43)}])('public recovery rejects every direct target including mixed reference %j', async extra => {
+    config.verifyEmail=async()=>true;
+    for (const target of [recoveryTarget(), {}, null, [], 'target']) {
+        expect((await call('recovery/verify',{email,proof:random(),target,...extra})).status).not.toBe(200);
+    }
+    expect(await count('recovery_sessions')).toBe(0);
+});
+test('missing and expired target references cannot authorize recovery',async()=>{
+    const {requestRef}=await signedRecoveryTarget();
+    await env.MAIN.prepare('UPDATE recovery_targets SET expires_at=0').run();
+    for(const ref of [requestRef,random()]) expect((await call('recovery/verify',{email,proof:random(),requestRef:ref})).status).not.toBe(200);
+    expect(await count('recovery_sessions')).toBe(0);
+});
+
+test.each(['home','requests','requests-recent','devices','status','activity','account'])('web/query %s recursively contains only safe metadata',async view=>{
+    await register();
+    const response=await call('web/query',{view});expect(response.status).toBe(200);
+    assertSafeView(await response.json());
+});
+test('proof migration invalidates older handoffs and restricted sessions without revoking normal sessions',async()=>{
+    await reset();
+    await applyD1Migrations(env.MAIN,env.MIGRATIONS.filter(m=>m.name<'0011'));
+    await register();
+    const token='r.'+random();
+    await env.MAIN.prepare('INSERT INTO recovery_sessions(digest,csrf_digest,bootstrap_digest,proof_digest,case_id,request_digest,expires_at) VALUES(?,?,?,?,?,?,unixepoch()+600)').bind(await digest(token),random(),random(),random(),random(),random()).run();
+    await env.MAIN.prepare('INSERT INTO recovery_targets VALUES(?,?,unixepoch()+600)').bind(random(),JSON.stringify(recoveryTarget())).run();
+    await applyD1Migrations(env.MAIN,env.MIGRATIONS);
+    expect(await count('recovery_targets')).toBe(0);
+    expect(await env.MAIN.prepare('SELECT revoked FROM recovery_sessions').first('revoked')).toBe(1);
+    expect(await env.MAIN.prepare('SELECT count(*) n FROM browser_sessions WHERE revoked=0').first('n')).toBe(1);
+});
+
+test.each(['start','detail','release','finish','status','notifications','review','cancel'])('normal browser cannot use legacy recovery/%s', async route => {
+    await register();
+    const response = await call('recovery/'+route, {id:'synthetic',signingKey:'forbidden',wrappingKey:'forbidden'});
+    expect(response.status).toBe(route === 'start' || route === 'status' || route === 'cancel' ? 401 : 404);
+    assertSafeView(await response.json());
 });

@@ -1,3 +1,4 @@
+import { assertSafeView } from '../web/src/safe-view.ts';
 import { beforeEach, expect, test } from 'vitest';
 import { env } from 'cloudflare:workers';
 import { applyD1Migrations, reset } from 'cloudflare:test';
@@ -125,4 +126,33 @@ test('concurrent exact creation retries return one original request', async () =
     const results = await Promise.all([repo().create(fresh(), op, 300), repo().create(fresh(), op, 300)]);
     expect(results[0]).toEqual(results[1]);
     expect(await db().prepare('SELECT count(*) n FROM approval_requests').first('n')).toBe(1);
+});
+test('Web opaque approval references are account-bound, step-up-bound, one-use and omit internal fields',async()=>{
+    const {webRepository}=await import('../api-worker/web-repository.ts');
+    const config={} as import('../api-worker/browser-auth.ts').BrowserConfig;
+    await repo().create(fresh(),await signed(),300);
+    const web=webRepository(db(),config,s);
+    const result=await web.query({view:'request',id:'r'}) as {allowRef:string;denyRef:string};
+    expect(JSON.stringify(result)).not.toMatch(/digest|ordinal|canonical|signature|ciphertext/);
+    assertSafeView(result);
+    for(const view of ['home','requests','requests-recent','devices','status','account']) assertSafeView(await web.query({view}));
+    const other=webRepository(db(),config,{...s,account_id:'other'});
+    await expect(other.resolve(result.allowRef)).rejects.toThrow('not_found');
+    await expect(other.query({view:'request',id:'r'})).rejects.toThrow('not_found');
+    await expect(web.execute(result.allowRef)).rejects.toThrow();
+    await step();expect(await web.execute(result.allowRef)).toMatchObject({state:'approved'});
+    await expect(web.execute(result.allowRef)).rejects.toThrow();
+    await expect(web.execute(result.denyRef)).rejects.toThrow();
+});
+test('Web history returns concurrent versions and deleted current state without envelope data',async()=>{
+    const signer=await syntheticSigner();
+    await createRepository(db(),fresh(),signer).push(await signed('put',null));
+    const removal=await signed();await repo().create(fresh(),removal,300);await step();await repo().decide(s,'r','approve');await createRepository(db(),fresh(),signer).push(removal);
+    const {webRepository}=await import('../api-worker/web-repository.ts');
+    const config={} as import('../api-worker/browser-auth.ts').BrowserConfig;
+    const result=await webRepository(db(),config,s).query({view:'history',id:'o'}) as {versions:{kind:string;current:boolean}[]};
+    assertSafeView(result);
+    expect(result.versions).toHaveLength(2);expect(result.versions[0]).toMatchObject({kind:'delete',current:true});
+    expect(JSON.stringify(result)).not.toMatch(/canonical|envelope|ciphertext|sequence|signature/);
+    await expect(webRepository(db(),config,{...s,account_id:'other'}).query({view:'history',id:'o'})).rejects.toThrow('not_found');
 });

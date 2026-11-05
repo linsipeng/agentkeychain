@@ -1,0 +1,90 @@
+{
+  "full": {
+    "auditReportVersion": 2,
+    "vulnerabilities": {},
+    "metadata": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0,
+        "total": 0
+      },
+      "dependencies": {
+        "prod": 46,
+        "dev": 219,
+        "optional": 90,
+        "peer": 13,
+        "peerOptional": 0,
+        "total": 264
+      }
+    }
+  },
+  "runtime": {
+    "auditReportVersion": 2,
+    "vulnerabilities": {},
+    "metadata": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0,
+        "total": 0
+      },
+      "dependencies": {
+        "prod": 46,
+        "dev": 219,
+        "optional": 90,
+        "peer": 13,
+        "peerOptional": 0,
+        "total": 264
+      }
+    }
+  },
+  "rootBunAudit": {
+    "command": "bun audit --json",
+    "exitCode": 0,
+    "vulnerabilities": {},
+    "notes": "Controller-updated package.json and bun.lock preserved; no dependency edits in final repair."
+  },
+  "finalRepairBrowserAudit": {
+    "freshRun": false,
+    "reason": "No Codex built-in Chrome / DevTools tool available in this session. No external Chrome or Hermes adapter used.",
+    "priorControllerMeasurements": "Historical visual checks retained in evidence; not rerun after final repair.",
+    "nativePasskey": "Not performed",
+    "deployment": "Not performed"
+  },
+  "finalRepairValidation": {
+    "backend": {
+      "passed": 268,
+      "failed": 0,
+      "files": 9
+    },
+    "web": {
+      "passed": 90,
+      "failed": 0,
+      "files": 3
+    },
+    "root": {
+      "passed": 111,
+      "failed": 0,
+      "files": 25,
+      "assertions": 509
+    },
+    "recoveryResources": {
+      "passed": 7,
+      "skipped": 41,
+      "undisposedWarnings": 0
+    },
+    "generatedBundle": "passed; target-device-only crypto and safe browser review",
+    "typechecks": "backend, Web and root passed",
+    "builds": "managed Workers/SPA and root CLI passed",
+    "lint": "passed",
+    "diffCheck": "passed",
+    "sensitiveFieldVariants": 43,
+    "browserQueryViewsTested": 12,
+    "restrictedRecoveryResponseContractsTested": 4
+  }
+}

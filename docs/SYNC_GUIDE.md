@@ -4,7 +4,11 @@
 
 AgentKeychain has one planned cloud product mode: the official managed service.
 Users will sign in and synchronize encrypted credentials across approved devices.
-This branch contains only a local, in-memory protocol/service/client implementation.
+The original Slice 1 implements the local in-memory protocol/service/client.
+The separate `managed-cloud/` workspace now includes locally tested Phase 2
+Workers and the Phase 3 bilingual Web control center, without production deployment.
+See [Phase 3 evidence](./MANAGED_CLOUD_PHASE3_EVIDENCE.md); persistent local-client
+integration and native browser acceptance remain separate gates.
 There is no cloud deployment or account connection command to run yet.
 
 Implemented and tested:
@@ -126,14 +130,14 @@ verified email, browser sessions, CSRF, action-bound step-up and shared D1 rate 
 Review repairs require discoverable credentials and trusted source bindings, reject
 verification races, add bounded retention, and execute the generated bundle locally.
 It uses the real pinned SimpleWebAuthn adapter in workerd with synthetic Ed25519 and
-ES256 authenticators. No React UI, email delivery, device enrollment or deployment is
-included. See [HTTP contracts](../managed-cloud/README.md#phase-2b-browser-authentication)
+ES256 authenticators. The React UI and device enrollment are implemented in later
+sections below; real email delivery and deployment remain separate gates. See [HTTP contracts](../managed-cloud/README.md#phase-2b-browser-authentication)
 and [test evidence and limitations](./MANAGED_CLOUD_PHASE2B_EVIDENCE.md).
 
 Phase 2B 已实现本地可测的邀请制 Passkey 注册/登录、加密已验证邮箱、浏览器会话、CSRF、
 动作绑定 step-up 与 D1 共享限流。复审修复要求可发现凭证及可信来源绑定，拒绝验证竞态，
 加入有界清理，并本地执行生成 bundle。使用固定版本的真实 SimpleWebAuthn 适配器及合成
-Ed25519/ES256 认证器，在 workerd 中验签；没有 React UI、真实邮件、设备注册或部署。
+Ed25519/ES256 认证器，在 workerd 中验签；设备注册及 React UI 见后续阶段章节，仍无真实邮件或部署。
 验收范围与限制见上方契约和证据链接。
 
 
@@ -152,7 +156,7 @@ step-up 和显式确认；账号/Vault 范围来自认证记录，服务端不�
 生成的 workerd bundle 已验证完整合成 JSON 流程。
 
 The Slice 1 client and its earlier limitations above remain unchanged. Production client
-checkpoint persistence and the ordinary-user `/device` UI are later phases. A retained
+checkpoint persistence remains Phase 4; Phase 3 implements the ordinary-user `/app/devices` UI. A retained
 trusted anchor is necessary to reject an entirely replayed old signed snapshot. No online
 audit or real browser/platform-authenticator validation is claimed under this task's
 no-network constraint and unavailable built-in browser tools.
@@ -202,3 +206,40 @@ Phase 2D 复审修复：浏览器活动及签名检查点计数按账号隔离�
 `activating` 意图与本地激活原子提交，再幂等完成 Custodian；取消不能越过该边界。
 取消需要独立精确签名、Custodian 独立验签和 nonce 防重放；未投递成功且已过期
 的取消授权需要重新签名。激活前资格失效仍拒绝执行，不再笼统承诺部分失败均可续跑。
+
+## Phase 3 本地实现补充
+
+独立 managed-cloud 工作区已提供本地测试的双语 Web 控制中心及邀请显示、受限恢复
+前置契约。没有部署服务、自动迁移或真实数据访问；Phase 4 本地客户端集成及原生浏览器
+验收仍需单独完成。[证据与限制](./MANAGED_CLOUD_PHASE3_EVIDENCE.md)。
+
+
+### Phase 3 review boundary / 复审边界
+
+Public recovery accepts only `{email,proof,requestRef}`. The target device first
+signs its exact target and decrypts a five-minute one-use wrapping-key challenge;
+only then does the device API issue the handoff reference. Direct browser target
+objects are rejected. Browser email proof authorizes recovery but never creates
+target keys or delivers shares. See the [current evidence](./MANAGED_CLOUD_PHASE3_EVIDENCE.md)
+for local test counts and outstanding controller/native Passkey acceptance.
+
+公开恢复仅接受设备完成签名及包装私钥持有证明后取得的 `requestRef`，不接受浏览器
+直接提交目标公钥。通知页面展示有界的真实恢复记录，不声称通知已送达；活动验证
+成功后解除警告，登录过期时清空账号风险和查询缓存。没有部署或使用真实数据。
+
+## Final Phase 3 recovery boundary / 最终恢复边界
+
+Normal account browsers use safe web query/action contracts for recovery metadata,
+notifications, review and cancellation only. They cannot start recovery, submit
+target keys, obtain cryptographic recovery material or finish activation. Restricted
+public recovery verifies a target-device-signed requestRef, then permits only
+start/status/cancel. The target-device endpoints perform all cryptographic steps.
+Cancellation carries an opaque device-issued confirmation reference, never a signed
+authorization body. Device status follows authenticated pull time and reported
+processed cursors, with a 300-second freshness window; delivery alone is not an ack.
+
+普通账号浏览器只通过安全 web 合约查看元数据、通知、复核及取消，不可启动恢复、
+提交目标密钥、取得恢复材料或完成激活。受限公开恢复绑定目标设备签名的 requestRef，
+仅允许启动、状态及取消；所有密码学步骤走目标设备接口。取消只传设备签发的引用，
+不传签名授权正文。设备状态来自认证拉取时间和已处理游标，时效窗口为 300 秒；
+服务器发送数据不等于设备已确认。尚未部署，原生浏览器/Passkey 验收仍有限制。

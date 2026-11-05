@@ -5,7 +5,7 @@ import tsparser from "@typescript-eslint/parser";
 export default [
   js.configs.recommended,
   {
-    files: ["src/**/*.ts", "tests/**/*.ts", "bin/**/*.ts", "managed-cloud/**/*.ts"],
+    files: ["src/**/*.ts", "tests/**/*.ts", "bin/**/*.ts", "managed-cloud/**/*.ts", "managed-cloud/**/*.tsx"],
     languageOptions: {
       parser: tsparser,
       parserOptions: {
@@ -37,10 +37,11 @@ export default [
       "@typescript-eslint/no-unused-vars": ["error", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
       "no-console": ["warn", { "allow": ["warn", "error"] }],
       "prefer-const": "error",
+      "no-useless-assignment": "off",
     },
   },
   {
-    files: ["managed-cloud/**/*.ts", "managed-cloud/**/*.mjs"],
+    files: ["managed-cloud/**/*.ts", "managed-cloud/**/*.mjs", "managed-cloud/**/*.tsx"],
     rules: { "no-undef": "off", "no-unused-vars": "off" },
   },
   {

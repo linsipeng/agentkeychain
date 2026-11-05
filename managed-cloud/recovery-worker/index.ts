@@ -1,3 +1,4 @@
+import { rpcData } from '../shared/rpc-data.ts';
 import { digest } from '../shared/contracts.ts';
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import { manifest, packageContext, recoveryCase, releaseContext, type CancelAuthorization, type RecoveryAuthority, type RecoveryEvidence, type RecoveryKeys } from '../shared/recovery.ts';
@@ -13,7 +14,7 @@ export class Custodian extends WorkerEntrypoint<Env> {
     async key() {
         if (!this.env.RECOVERY_KEYS)
             throw new Error('unavailable');
-        return this.env.RECOVERY_KEYS.key();
+        return rpcData(this.env.RECOVERY_KEYS.key());
     }
     async enroll(canonical: string, signature: string) {
         const m = manifest(canonical);
@@ -70,7 +71,7 @@ export class Custodian extends WorkerEntrypoint<Env> {
             throw new Error('not_found');
         if (row.release)
             return JSON.parse(row.release) as SealedShare;
-        const m = manifest(row.package), box = await this.env.RECOVERY_KEYS.rewrap(m.custodianKeyId, m.custodianShare, packageContext(m, 'custodian'), c.wrappingKey, releaseContext(canonical, 'custodian'));
+        const m = manifest(row.package), box = await rpcData(this.env.RECOVERY_KEYS.rewrap(m.custodianKeyId, m.custodianShare, packageContext(m, 'custodian'), c.wrappingKey, releaseContext(canonical, 'custodian')));
         if (!await this.env.RECOVERY_AUTH.authorize(canonical, evidence))
             throw new Error('unauthorized');
         const accepted = await this.env.CUSTODIAN.prepare("UPDATE recovery_sagas SET release=COALESCE(release,?),state='released' WHERE id=? AND canonical=? AND state IN('prepared','released') AND expires_at>unixepoch() AND package_id IN(SELECT id FROM recovery_packages p WHERE p.key_epoch=(SELECT max(key_epoch) FROM recovery_packages WHERE tenant_id=p.tenant_id AND vault_id=p.vault_id)) RETURNING release").bind(JSON.stringify(box), c.id, canonical).first<{
