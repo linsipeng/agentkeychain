@@ -115,9 +115,9 @@ MemoryApprovals 不提供此生产保证。Managed Cloud 不打开旧 `sync.json
 
 ## Phase 2A backend foundation / 后端基础
 
-The independent `managed-cloud/` workspace now tests atomic D1 acceptance, device-authenticated push/pull, isolation and a private Custodian skeleton on local workerd. This does not turn the Slice 1 client into a production client. Account login arrived in Phase 2B; enrollment and signed checkpoints arrived in Phase 2C below. Split-key recovery remains deferred. See [contracts](../managed-cloud/README.md) and [evidence](./MANAGED_CLOUD_PHASE2A_EVIDENCE.md).
+The independent `managed-cloud/` workspace now tests atomic D1 acceptance, device-authenticated push/pull, isolation and a private Custodian skeleton on local workerd. This does not turn the Slice 1 client into a production client. Account login arrived in Phase 2B; enrollment and signed checkpoints arrived in Phase 2C below. Split-key recovery now has a local Phase 2D backend; see the current section below. See [contracts](../managed-cloud/README.md) and [evidence](./MANAGED_CLOUD_PHASE2A_EVIDENCE.md).
 
-独立 `managed-cloud/` 已通过本地 workerd 验证 D1 原子接受、设备认证同步、隔离及私有 Custodian 骨架。Slice 1 客户端仍不是生产客户端；账号登录已在 Phase 2B 实现，设备注册与签名检查点已在下文 Phase 2C 实现；分钥恢复仍属于后续阶段。
+独立 `managed-cloud/` 已通过本地 workerd 验证 D1 原子接受、设备认证同步、隔离及私有 Custodian 骨架。Slice 1 客户端仍不是生产客户端；账号登录已在 Phase 2B 实现，设备注册与签名检查点已在下文 Phase 2C 实现；分钥恢复现已实现本地可测的 Phase 2D 后端，见下文。
 
 ## Phase 2B account backend / 账号后端
 
@@ -163,3 +163,42 @@ no-network constraint and unavailable built-in browser tools.
 
 See [current backend contracts](../managed-cloud/README.md) and
 [Phase 2C evidence](./MANAGED_CLOUD_PHASE2C_EVIDENCE.md).
+
+
+## Phase 2D approvals, activity and recovery / 审批、活动与恢复
+
+The local backend now implements pending/recent exact one-use approvals, atomic
+approval consumption for existing-object updates/delete/restore, normalized
+append-only activity with signed checkpoints, and a two-Worker/two-D1 recovery
+saga. Recovery has independent operator authorization, a 24-hour no-device
+cooldown, device confirmation/cancellation, target-only encrypted share release,
+private-key proof, session revocation and device review state. Scope/rotation
+changes carried in encrypted updates require the same exact approval. Device
+control retains its exact transactional action authorization. No cross-D1
+atomicity is claimed. No production service, ordinary-user UI, or persistent
+client integration is delivered by this backend phase.
+
+本地后端现已实现待办/最近一次性精确审批、更新/删除/恢复的事务内消费、
+统一追加式脱敏活动与签名检查点，以及双 Worker/双 D1 恢复状态机。
+恢复包含独立授权、无设备路径至少 24 小时冷却、设备确认/取消、仅向目标设备
+加密释放份额、持钥证明、浏览器会话撤销与设备复核状态。加密更新携带的 scope
+或密钥轮换同样要求精确审批；设备控制沿用事务内动作授权。不存在跨 D1 原子
+事务保证。本阶段不交付生产服务、普通用户界面或持久化客户端集成。
+
+See [JSON contracts](../managed-cloud/README.md#phase-2d-json-contracts) and
+[actual local evidence and deployment limits](./MANAGED_CLOUD_PHASE2D_EVIDENCE.md).
+
+Phase 2D review repair: browser activity and signed checkpoint counts are account-scoped;
+public event IDs/cursors are opaque and contain no global database ordinals. Recovery
+rejects existing/historical targets at start and activation. Main atomically records
+`activating` with local activation before idempotent Custodian completion; cancellation
+cannot cross that boundary. Cancel requires a separate exact signed authorization,
+independently verified by Custodian with nonce replay protection. An undelivered,
+expired cancel authorization needs a fresh signature. Pre-activation eligibility
+failures remain fail-closed; there is no unconditional partial-failure resume claim.
+
+Phase 2D 复审修复：浏览器活动及签名检查点计数按账号隔离，公开事件 ID/游标不暴露
+全局数据库序号。恢复在开始和激活时均拒绝已存在或历史设备身份。Main 将
+`activating` 意图与本地激活原子提交，再幂等完成 Custodian；取消不能越过该边界。
+取消需要独立精确签名、Custodian 独立验签和 nonce 防重放；未投递成功且已过期
+的取消授权需要重新签名。激活前资格失效仍拒绝执行，不再笼统承诺部分失败均可续跑。

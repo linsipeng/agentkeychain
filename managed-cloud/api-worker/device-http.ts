@@ -1,3 +1,8 @@
+import type { CancelAuthorization } from '../shared/recovery.ts';
+import { recoveryRepository } from './recovery-repository.ts';
+import type { SessionRow as RecoverySession } from './browser-repository.ts';
+import { approvalRepository } from './approval-repository.ts';
+import { validateSigned } from '../shared/contracts.ts';
 import { ApiError, boundedBody, digest, errorResponse, verify } from '../shared/contracts.ts';
 import { base64, exactFields, identifier } from '../../src/cloud/protocol.ts';
 import { challengeProof, enrollmentProof } from '../shared/device-protocol.ts';
@@ -43,7 +48,7 @@ export async function deviceFetch(request: Request, env: BrowserBindings) {
     let auditFailure = false;
     try {
         const url = new URL(request.url), route = url.pathname.slice('/v1/devices/'.length);
-        if (!['authorize', 'status', 'challenge', 'token', 'enroll', 'key-packages'].includes(route))
+        if (!['authorize', 'status', 'challenge', 'token', 'enroll', 'key-packages', 'approvals', 'recovery-keys', 'recovery-package', 'recovery-cancel', 'recovery-notifications'].includes(route))
             throw new ApiError('not_found');
         if (url.search)
             throw new ApiError('invalid_request');
@@ -51,8 +56,9 @@ export async function deviceFetch(request: Request, env: BrowserBindings) {
             throw new ApiError('method_not_allowed');
         if (request.headers.has('cookie'))
             throw new ApiError('unauthorized');
-        const raw = await boundedBody(request, 8192);
-        if (new TextEncoder().encode(raw).length > 8192)
+        const bodyLimit = route === 'approvals' ? 384 * 1024 : 8192;
+        const raw = await boundedBody(request, bodyLimit);
+        if (new TextEncoder().encode(raw).length > bodyLimit)
             throw new ApiError('payload_too_large');
         if (request.method === 'POST' && !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(request.headers.get('content-type') ?? ''))
             throw new ApiError('unsupported_media_type');
@@ -118,6 +124,21 @@ export async function deviceFetch(request: Request, env: BrowserBindings) {
             const token = random();
             await repo.issue(c.id, await digest(token));
             result = { token, tokenType: 'DeviceProof', expiresIn: 900, deviceId: c.device_id, vaultId: c.vault_id };
+        }
+        else if (route.startsWith('recovery-')) {
+            const c=await authenticate(env.MAIN,request,null,raw),recovery=recoveryRepository(env.MAIN,env);
+            if(route==='recovery-package') {exactFields(b,['canonical','signature']);if(typeof b.canonical!=='string'||typeof b.signature!=='string')throw new ApiError('invalid_request');result=await recovery.enroll(c,b.canonical,b.signature);}
+            else if(route==='recovery-keys') {exactFields(b,[]);result=await recovery.keys();}
+            else {
+                const s={tenant_id:c.tenantId,account_id:c.accountId} as RecoverySession;
+                if(route==='recovery-cancel'){exactFields(b,['id','authorization']);identifier(b.id);result=await recovery.cancel(s,b.id as string,b.authorization as CancelAuthorization,c);}
+                else {exactFields(b,['after']);result=await recovery.notifications(s,b.after as number);}
+            }
+        }
+        else if (route === 'approvals') {
+            exactFields(b,'summary' in b?['operation','expiresIn','summary']:['operation','expiresIn']);
+            const c = await authenticate(env.MAIN, request, null, raw);
+            result = await approvalRepository(env.MAIN).create(c,validateSigned(b.operation),b.expiresIn as number,b.summary as {ciphertext:string;nonce:string;signature:string}|undefined);
         }
         else {
             if (route === 'enroll') {

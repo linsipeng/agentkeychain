@@ -107,14 +107,14 @@ export function browserRepository(db: D1Database) {
                 statements.push(db.prepare('INSERT INTO accounts(id) VALUES(?)').bind(account), db.prepare('INSERT INTO tenants(id) VALUES(?)').bind(tenant), db.prepare('INSERT INTO memberships VALUES(?,?,1)').bind(tenant, account), db.prepare('INSERT INTO vaults(tenant_id,id) VALUES(?,?)').bind(tenant, crypto.randomUUID()), db.prepare('INSERT INTO account_emails VALUES(?,?,?,1)').bind(account, v.encrypted_email, v.email_lookup), db.prepare('INSERT INTO passkeys(id,account_id,public_key,counter) VALUES(?,?,?,?)').bind(key.id, account, key.public_key, key.counter));
             }
             else {
-                statements.push(db.prepare(`INSERT INTO auth_audit(event) SELECT 'counter_risk' FROM passkeys WHERE id=? AND (counter>0 OR ?>0) AND ?>=0 AND ?<=counter`).bind(key.id, key.counter, key.counter, key.counter), db.prepare('UPDATE passkeys SET counter=max(counter,?) WHERE id=?').bind(key.counter, key.id));
+                statements.push(db.prepare(`INSERT INTO auth_audit(event,account_id,tenant_id) SELECT 'counter_risk',?,? FROM passkeys WHERE id=? AND (counter>0 OR ?>0) AND ?>=0 AND ?<=counter`).bind(account,tenant,key.id, key.counter, key.counter, key.counter), db.prepare('UPDATE passkeys SET counter=max(counter,?) WHERE id=?').bind(key.counter, key.id));
             }
-            statements.push(db.prepare('UPDATE browser_sessions SET revoked=1 WHERE digest=?').bind(c.session_digest), db.prepare('INSERT INTO browser_sessions(digest,csrf_digest,account_id,tenant_id,absolute_expires,step_up_digest,step_up_expires) VALUES(?,?,?,?,?,?,?)').bind(input.sessionDigest, input.csrfDigest, account, tenant, input.absoluteExpiry, input.actionDigest, input.actionDigest ? Math.floor(Date.now() / 1000) + 300 : null), db.prepare('INSERT INTO auth_audit(event) VALUES(?)').bind(c.purpose === 'registration' ? 'registered' : c.purpose === 'authentication' ? 'authenticated' : 'step_up'));
+            statements.push(db.prepare('UPDATE browser_sessions SET revoked=1 WHERE digest=?').bind(c.session_digest), db.prepare('INSERT INTO browser_sessions(digest,csrf_digest,account_id,tenant_id,absolute_expires,step_up_digest,step_up_expires) VALUES(?,?,?,?,?,?,?)').bind(input.sessionDigest, input.csrfDigest, account, tenant, input.absoluteExpiry, input.actionDigest, input.actionDigest ? Math.floor(Date.now() / 1000) + 300 : null), db.prepare('INSERT INTO auth_audit(event,account_id,tenant_id) VALUES(?,?,?)').bind(c.purpose === 'registration' ? 'registered' : c.purpose === 'authentication' ? 'authenticated' : 'step_up',account,tenant));
             await db.batch(statements);
         },
         async rejected() { await db.prepare("INSERT INTO auth_audit(event) VALUES('rejected')").run(); },
         async logout(hash: string) {
-            await db.batch([db.prepare('UPDATE browser_sessions SET revoked=1 WHERE digest=?').bind(hash), db.prepare("INSERT INTO auth_audit(event) VALUES('logout')")]);
+            await db.batch([db.prepare('UPDATE browser_sessions SET revoked=1 WHERE digest=?').bind(hash), db.prepare("INSERT INTO auth_audit(event,account_id,tenant_id) SELECT 'logout',account_id,tenant_id FROM browser_sessions WHERE digest=?").bind(hash)]);
         },
         async touch(hash: string) {
             const result = await db.prepare(`UPDATE browser_sessions SET last_seen=unixepoch() WHERE digest=? AND revoked=0 AND last_seen>unixepoch()-1800 AND absolute_expires>unixepoch() RETURNING digest`).bind(hash).first();

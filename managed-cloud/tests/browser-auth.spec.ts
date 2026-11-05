@@ -325,7 +325,7 @@ test('shared limits are atomic under contention, cleanup bounded, trusted bindin
 test('audit is redacted and append-only including REPLACE; passkey ownership immutable', async () => {
     await register();
     const events = (await env.MAIN.prepare('SELECT * FROM auth_audit').all()).results;
-    expect(Object.keys(events[0]!).sort()).toEqual(['created_at', 'event', 'id']);
+    expect(Object.keys(events[0]!).sort()).toEqual(['account_id', 'created_at', 'event', 'id', 'tenant_id']);
     expect(JSON.stringify(events)).not.toContain(email);
     for (const sql of ["UPDATE auth_audit SET event='logout'", "DELETE FROM auth_audit", "INSERT OR REPLACE INTO auth_audit(id,event) VALUES(1,'logout')", "UPDATE passkeys SET account_id='other'", "INSERT OR REPLACE INTO passkeys SELECT * FROM passkeys"])
         await expect(env.MAIN.prepare(sql).run()).rejects.toThrow();
@@ -753,4 +753,15 @@ test('device verification URI has an authenticated read-only JSON landing contra
     expect(r.status).toBe(200);
     expect(await r.json()).toEqual({ authentication: 'passkey', verificationCodeRequired: true, submitUri: origin + '/v1/auth/devices/pending' });
     expect(await count('device_requests')).toBe(before);
+});
+test.each(['approvals/approve','approvals/deny','approvals/cancel','recovery/start','recovery/release','activity/list'])('Phase 2D %s preserves session, CSRF and trusted origin boundary',async route=>{
+ expect((await call(route,{id:'unknown',confirmed:true})).status).toBe(401);
+ await register();
+ for(const headers of [{origin:'https://foreign.invalid'},{'x-csrf-token':''},{cookie:''},{'content-type':'text/plain'}] as Record<string,string>[]) expect((await call(route,{id:'unknown',confirmed:true},headers)).status).toBe(401);
+});
+test('approval JSON rejects batch/permanent authority and foreign identifiers',async()=>{
+ await register();
+ expect((await call('approvals/approve',{id:'unknown',confirmed:true,permanent:true})).status).not.toBe(200);
+ expect((await call('approvals/approve',{ids:['unknown'],confirmed:true})).status).not.toBe(200);
+ expect((await call('approvals/detail',{id:'foreign'})).status).toBe(404);
 });

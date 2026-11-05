@@ -34,3 +34,14 @@ entrypoint = "TrustedAuthSource"
 binding = "CHECKPOINT_SIGNER"
 service = "agentkeychain-checkpoint-signer"
 entrypoint = "CheckpointSigner"
+
+# Independently provisioned recovery operator bindings; no private key in D1.
+[[services]]
+binding = "RECOVERY_AUTH"
+service = "agentkeychain-api-recovery"
+entrypoint = "RecoveryAuthority"
+
+[[services]]
+binding = "RECOVERY_KEYS"
+service = "agentkeychain-api-recovery"
+entrypoint = "RecoveryKeys"

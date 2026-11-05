@@ -8,6 +8,10 @@ import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { unstable_getMiniflareWorkerOptions as manifest, unstable_splitSqlQuery as splitSql, unstable_readConfig as readConfig } from 'wrangler';
 
+await build({entryPoints:['tests/synthetic-recovery.ts'],outfile:'dist/test-recovery.mjs',bundle:true,format:'esm',platform:'neutral',external:['cloudflare:workers','node:buffer'],target:'es2022'});
+await build({entryPoints:['shared/recovery-crypto.ts','shared/recovery.ts'],outdir:'dist/test-shared',bundle:true,format:'esm',platform:'node',target:'es2022'});
+const {seal,open,encode64,splitRecoveryKey,joinRecoveryKey,wrapVaultKey,unwrapVaultKey}=await import('../dist/test-shared/recovery-crypto.js');
+const {packageContext,releaseContext,recoveryAction,vaultKeyContext}=await import('../dist/test-shared/recovery.js');
 await build({entryPoints:['tests/synthetic-checkpoint.ts'],outfile:'dist/test-checkpoint.mjs',bundle:true,format:'esm',platform:'neutral',external:['cloudflare:workers','node:buffer'],target:'es2022'});
 await build({ entryPoints: ['tests/virtual-authenticator.ts'], outfile: 'dist/test-authenticator.mjs', bundle: true, format: 'esm', platform: 'node', target: 'es2022' });
 const { virtualAuthenticator } = await import('../dist/test-authenticator.mjs');
@@ -31,7 +35,7 @@ for (const options of [api, recovery]) {
 assert.deepEqual(api.compatibilityFlags, ['nodejs_compat']);
 assert.equal(api.compatibilityDate, '2026-07-16');
 assert.deepEqual(Object.keys(api.d1Databases), ['MAIN']);
-assert.deepEqual(Object.keys(api.serviceBindings).sort(), ['CHECKPOINT_SIGNER', 'EMAIL_VERIFIER', 'RECOVERY', 'TRUSTED_AUTH_SOURCE']);
+assert.deepEqual(Object.keys(api.serviceBindings).sort(), ['CHECKPOINT_SIGNER', 'EMAIL_VERIFIER', 'RECOVERY', 'RECOVERY_AUTH', 'RECOVERY_KEYS', 'TRUSTED_AUTH_SOURCE']);
 const raw = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
 const proof = raw(), origin = 'https://local.invalid', email = 'bundle@example.invalid';
 const bindings = { AUTH_ORIGIN: origin, AUTH_RP_ID: 'local.invalid', AUTH_BOOTSTRAP_KEY: raw(), AUTH_EMAIL_KEY: raw(), AUTH_LOOKUP_KEY: raw() };
@@ -41,6 +45,7 @@ const mf = new Miniflare(convertV4MiniflareOptions({
     workers: [
         { ...api, modules: true, modulesRoot: resolve('dist'), scriptPath: resolve('dist/api-worker/index.js'), bindings, outboundService: noOutbound },
         {name:'agentkeychain-checkpoint-signer',modules:true,modulesRoot:resolve('dist'),scriptPath:resolve('dist/test-checkpoint.mjs'),compatibilityDate:api.compatibilityDate,compatibilityFlags:api.compatibilityFlags,outboundService:noOutbound},
+        ...['agentkeychain-api-recovery','agentkeychain-custody-recovery'].map(name=>({name,modules:true,modulesRoot:resolve('dist'),scriptPath:resolve('dist/test-recovery.mjs'),compatibilityDate:api.compatibilityDate,compatibilityFlags:api.compatibilityFlags,outboundService:noOutbound})),
         { ...recovery, modules: true, modulesRoot: resolve('dist'), scriptPath: resolve('dist/recovery-worker/index.js'), outboundService: noOutbound },
         { name: 'agentkeychain-auth-trust', modules: true, compatibilityDate: api.compatibilityDate, bindings: { PROOF: proof }, outboundService: noOutbound,
             script: `import { WorkerEntrypoint } from 'cloudflare:workers';
@@ -56,6 +61,8 @@ try {
         const statements = splitSql(await readFile('api-worker/migrations/' + name, 'utf8'));
         await db.batch(statements.map(sql => db.prepare(sql)));
     }
+    const custodyDb=await mf.getD1Database('CUSTODIAN',recovery.name);
+    for(const name of (await readdir('recovery-worker/migrations')).filter(n=>n.endsWith('.sql')).sort()){await custodyDb.batch(splitSql(await readFile('recovery-worker/migrations/'+name,'utf8')).map(sql=>custodyDb.prepare(sql)));}
     // Public fetch dispatch avoids the internal /cdn-cgi proxy Origin policy.
     const worker = { fetch: (input, init) => mf.dispatchFetch(input, init) };
     let cookies, csrf;
@@ -114,6 +121,60 @@ try {
     const keyPackage=JSON.stringify({version:1,vaultId:session.vaultId,targetDeviceId:session.deviceId,keyEpoch:1,wrappedVDK:Buffer.alloc(80,3).toString('base64'),issuerDeviceId:session.deviceId,grantId:pairing.requestId});
     assert.equal((await deviceCall('/v1/devices/enroll',JSON.stringify({canonical:keyPackage,signature:await sign(keyPackage)}))).status,200);
     const fetched=await deviceCall('/v1/devices/key-packages');assert.equal(fetched.status,200);assert.equal((await fetched.json()).canonical,keyPackage);
+    const stepFor=async actionDigest=>{const options=await(await post('step-up/options',{actionDigest})).json();const r=await post('step-up/verify',{challengeId:options.challengeId,actionDigest,response:await authenticator.assert(options.options.challenge)});assert.equal(r.status,200);remember(r);};
+    const updateCanonical=JSON.stringify({...JSON.parse(canonical),operationId:raw(),approvalRef:raw()});
+    const updateSigned={canonical:updateCanonical,signature:await sign(updateCanonical)};
+    assert.equal((await deviceCall('/v1/vaults/'+session.vaultId+'/sync/push',JSON.stringify(updateSigned))).status,403);
+    const requested=await deviceCall('/v1/devices/approvals',JSON.stringify({operation:updateSigned,expiresIn:300}));assert.equal(requested.status,200);
+    assert.equal((await deviceCall('/v1/devices/approvals',JSON.stringify({operation:updateSigned,expiresIn:300}))).status,200);
+    const approval=await(await post('approvals/detail',{id:JSON.parse(updateCanonical).approvalRef})).json();
+    await stepFor(approval.approveDigest);
+    assert.equal((await post('approvals/approve',{id:approval.id,confirmed:true})).status,200);
+    assert.equal((await deviceCall('/v1/vaults/'+session.vaultId+'/sync/push',JSON.stringify(updateSigned))).status,200);
+    const activity=await(await post('activity/list',{after:0,limit:100,minimum:0})).json();
+    assert.equal(activity.verification,'verified');
+    assert.ok(activity.events.every(e=>typeof e.id==='string' && /^[a-f0-9]{32}$/.test(e.id)));
+    assert.equal(typeof activity.nextCursor,'string');
+    assert.equal((await post('activity/detail',{id:activity.events[0].id,minimum:activity.through})).status,200);
+    assert.equal((await post('activity/detail',{id:1,minimum:0})).status,400);
+    await db.prepare("INSERT INTO activity(tenant_id,account_id,event) VALUES(?,?,'approval.pending')").bind(activity.events[0].tenant_id,'synthetic-other-account').run();
+    const isolated=await(await post('activity/list',{after:activity.nextCursor,limit:100,minimum:activity.through})).json();
+    assert.equal(isolated.events.length,0);assert.equal(isolated.through,activity.through);
+    // Begin an independent recovery scenario with a fresh synthetic rate window.
+    // Production per-account limits remain unchanged and have dedicated regression tests.
+    await db.prepare('DELETE FROM auth_rate_windows').run();
+    const browser=await(await worker.fetch(origin+'/v1/auth/session',{headers:{cookie:cookies}})).json();
+    const apiAuthority=await mf.getWorker('agentkeychain-api-recovery');
+    const custodyAuthority=await mf.getWorker('agentkeychain-custody-recovery');
+    for(const authority of [apiAuthority,custodyAuthority])await authority.trust(browser.accountId,browser.tenantId,session.vaultId,session.deviceId,signingKey);
+    const recoveryKeys=await(await deviceCall('/v1/devices/recovery-keys',JSON.stringify({}))).json();
+    const recoveryKey=crypto.getRandomValues(new Uint8Array(32)),[shareA,shareB]=splitRecoveryKey(recoveryKey);
+    const recoveryPackage={version:1,packageId:raw(),accountId:browser.accountId,tenantId:browser.tenantId,vaultId:session.vaultId,keyEpoch:1,policy:'two-party-24h',issuerDeviceId:session.deviceId,apiKeyId:recoveryKeys.api.keyId,custodianKeyId:recoveryKeys.custodian.keyId,wrappedVDK:encode64(crypto.getRandomValues(new Uint8Array(48)))};
+    const syntheticVDK=crypto.getRandomValues(new Uint8Array(32));recoveryPackage.wrappedVDK=await wrapVaultKey(recoveryKey,syntheticVDK,vaultKeyContext(recoveryPackage));
+    recoveryPackage.apiShare=await seal(recoveryKeys.api.publicKey,shareA,packageContext(recoveryPackage,'api'));
+    recoveryPackage.custodianShare=await seal(recoveryKeys.custodian.publicKey,shareB,packageContext(recoveryPackage,'custodian'));
+    const packageCanonical=JSON.stringify(recoveryPackage);
+    assert.equal((await deviceCall('/v1/devices/recovery-package',JSON.stringify({canonical:packageCanonical,signature:await sign(packageCanonical)}))).status,200);
+    const targetSigning=await crypto.subtle.generateKey('Ed25519',true,['sign','verify']),targetWrapping=await crypto.subtle.generateKey('X25519',true,['deriveBits']);
+    const recoveryRequest={id:raw(),packageId:recoveryPackage.packageId,targetDeviceId:raw(),signingKey:encode64(new Uint8Array(await crypto.subtle.exportKey('raw',targetSigning.publicKey))),wrappingKey:encode64(new Uint8Array(await crypto.subtle.exportKey('raw',targetWrapping.publicKey))),nonce:raw()};
+    await stepFor(await recoveryAction('start',JSON.stringify(recoveryRequest)));
+    const startedResponse=await post('recovery/start',recoveryRequest);assert.equal(startedResponse.status,200);const started=await startedResponse.json();
+    const releasedResponse=await post('recovery/release',{id:recoveryRequest.id,evidence:{mode:'device',confirmerId:session.deviceId,signature:await sign(JSON.stringify(['AgentKeychain-recovery-confirm-v1',started.canonical])),proof:null}});assert.equal(releasedResponse.status,200);const released=await releasedResponse.json();
+    assert.deepEqual(joinRecoveryKey(await open(targetWrapping.privateKey,released.api,releaseContext(started.canonical,'api')),await open(targetWrapping.privateKey,released.custodian,releaseContext(started.canonical,'custodian'))),recoveryKey);
+    assert.deepEqual(await unwrapVaultKey(recoveryKey,released.wrappedVDK,vaultKeyContext(recoveryPackage)),syntheticVDK);
+    assert.equal((await db.prepare('SELECT count(*) n FROM devices').first()).n,1);
+    const recoveryProof=encode64(await open(targetWrapping.privateKey,started.challenge,releaseContext(started.canonical,'api')+'proof'));
+    const recoverySignature=encode64(new Uint8Array(await crypto.subtle.sign('Ed25519',targetSigning.privateKey,new TextEncoder().encode(JSON.stringify(['AgentKeychain-recovery-proof-v1',started.canonical,recoveryProof])))));
+    assert.equal((await post('recovery/finish',{id:recoveryRequest.id,proof:recoveryProof,signature:recoverySignature})).status,200);
+    assert.equal((await db.prepare('SELECT count(*) n FROM devices').first()).n,2);
+    assert.equal((await worker.fetch(origin+'/v1/auth/session',{headers:{cookie:cookies}})).status,401);
+    await bootstrap();const relogin=await(await post('authentication/options',{email})).json();const logged=await post('authentication/verify',{challengeId:relogin.challengeId,response:await authenticator.assert(relogin.options.challenge,{userHandle:options.userId})});assert.equal(logged.status,200);remember(logged);
+    const review=await(await post('recovery/detail',{id:recoveryRequest.id})).json();assert.equal(review.reviewRequired,true);
+    await stepFor(review.reviewDigest);assert.equal((await post('recovery/review',{id:recoveryRequest.id,confirmed:true})).status,200);
+    assert.equal((await(await post('recovery/detail',{id:recoveryRequest.id})).json()).reviewRequired,false);
+    const recoveredChallengeResponse=await devicePost('challenge',{deviceId:recoveryRequest.targetDeviceId});assert.equal(recoveredChallengeResponse.status,200);const recoveredChallenge=await recoveredChallengeResponse.json();
+    const recoveredSignature=encode64(new Uint8Array(await crypto.subtle.sign('Ed25519',targetSigning.privateKey,new TextEncoder().encode(JSON.stringify(['AgentKeychain-device-challenge-v1',recoveredChallenge.challengeId,await sha(recoveredChallenge.challenge),recoveredChallenge.deviceId,recoveredChallenge.vaultId,recoveredChallenge.expiresAt])))));
+    assert.equal((await devicePost('token',{challengeId:recoveredChallenge.challengeId,signature:recoveredSignature})).status,200);
     const actionDigest = await sha('synthetic-bundle-action');
     const step = await (await post('step-up/options', { actionDigest })).json();
     const stepped = await post('step-up/verify', { challengeId: step.challengeId, actionDigest, response: await authenticator.assert(step.options.challenge) });
@@ -125,5 +186,5 @@ try {
     assert.equal((await worker.fetch(origin + '/v1/vaults/synthetic/sync/pull')).status, 401);
     assert.equal((await (await mf.getWorker(recovery.name)).fetch(origin)).status, 404);
     assert.equal((await db.prepare('SELECT count(*) n FROM accounts').first()).n, 1);
-    process.stdout.write('Generated API bundle: manifest flags/bindings, D1 migrations, real ES256 registration/login/step-up/logout device enrollment, sessions, key packages, signed sync and route isolation PASS\n');
+    process.stdout.write('Generated API bundle: manifest flags/bindings, D1 migrations, real ES256 registration/login/step-up/logout device enrollment, sessions, key packages, signed sync, exact approval, verified audit, two-Worker recovery proof/activation and route isolation PASS\n');
 } finally { await mf.dispose(); }

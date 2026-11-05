@@ -1,8 +1,9 @@
-# Managed Cloud Phases 2A–2C
+# Managed Cloud Phases 2A–2D
 
 Local-testable Workers/D1 backend, separate from the frozen legacy `worker/`.
 Phase 2C adds trusted device enrollment, 15-minute proof-bound device sessions,
-immutable encrypted key packages, and service-signed sync checkpoints. No ordinary-user
+immutable encrypted key packages, and service-signed sync checkpoints. Phase 2D adds
+exact approval APIs, signed activity and two-party recovery. No ordinary-user
 React UI, local Vault integration, deployment or production signer provisioning is included.
 The Slice 1 in-memory client is unchanged; its production persistence/transport belongs to Phase 4.
 
@@ -14,22 +15,24 @@ CI=1 WRANGLER_SEND_METRICS=false npm test
 npm run typecheck
 npm run build
 npm run test:bundle
-npm audit --offline --json
-npm audit --offline --omit=dev --json
+npm audit --json
+npm audit --omit=dev --json
 ```
 
 Tests require loopback listening, use disposable real workerd/D1, and generate synthetic
-keys only in memory. No remote bindings or outbound services are used. Offline npm audit
-output does **not** establish current advisory coverage. Dependency versions and lockfile
-are unchanged from the reviewed Phase 2B baseline. A fresh online audit remains a release
-gate when network access is authorized. See [Phase 2C evidence](../docs/MANAGED_CLOUD_PHASE2C_EVIDENCE.md).
+keys only in memory. No remote bindings or outbound services are used by runtime tests.
+The npm audit commands require explicitly authorized public-registry access; current
+full/runtime Phase 2D reports both contain zero vulnerabilities. Dependency versions
+and lockfile are unchanged from the reviewed Phase 2B baseline. See
+[Phase 2D evidence](../docs/MANAGED_CLOUD_PHASE2D_EVIDENCE.md).
 
 ## Device HTTP contracts
 
 All responses are JSON with `Cache-Control: no-store`; errors use
 `{"error":{"code":"..."}}` without exceptions, SQL or payloads. Device control routes
 reject cookies, query parameters, unknown fields and unsupported content types. Bodies
-are capped while streaming at 8 KiB, before JSON parsing, DB access or crypto. Trusted
+are capped while streaming at 8 KiB (384 KiB for signed approval submissions), before
+JSON parsing, DB access or crypto. Trusted
 source attribution is required and source limits are 120/minute. Status/challenge requests
 also use an independent 30/minute identity limit. No public route accepts account, tenant
 or vault identifiers as authorization.
@@ -77,7 +80,7 @@ step-up over its returned digest, and atomic one-use consumption at acceptance.
 Pending binds the request to the authenticated account/tenant and its sole vault. An
 ambiguous multi-vault account fails closed instead of accepting a caller-selected vault.
 First device bootstrap is allowed only when the tenant has **no historical device**.
-Revoking every device never reopens bootstrap; recovery is a later phase.
+Revoking every device never reopens bootstrap; Phase 2D recovery below is the separate path.
 
 The exact canonical enrollment grant has ordered fields:
 `version,requestId,accountId,tenantId,vaultId,deviceId,signingKey,wrappingKey,issuerDeviceId,
@@ -179,7 +182,7 @@ a trusted repository boundary, not an RLS claim against a compromised administra
 
 ## Remaining product and release boundaries
 
-- Phase 2D: broader operation risk approvals, checkpointed audit stream and two-party recovery.
+- Phase 2D JSON approval, activity and two-party recovery contracts are implemented below.
 - Phase 3: ordinary-user UI including `/device`; no UI or real browser test is claimed.
 - Phase 4: secure local key storage, persistent client queue, checkpoint anchors and daemon.
 - Real trusted ingress/email/checkpoint services, domains, keys, independent security review,
@@ -326,13 +329,14 @@ to the repository factory and composition boundaries, as in Phase 2A; this is no
 ### Remaining phase boundaries
 
 Step-up records a five-minute action-bound fact on the rotated session. It is **not**
-a reusable grant or a device signing capability. Phase 2C consumes it atomically for device actions; Phase 2D must
-consume/validate it with the actual one-use approval action in its own durable
+a reusable grant or a device signing capability. Phase 2C consumes it atomically for device actions; Phase 2D now
+consumes/validates it with the actual one-use approval action in its own durable
 transaction for sync-operation approvals. Recovery purposes are reserved
 in the challenge schema; recovery ceremonies belong to Phase 2D.
 
-No real email, domain/RP provisioning, browser hardware passkey, deployment, device
-enrollment, React UI, cross-device sync client or cryptographic recovery is included.
+No real email, domain/RP provisioning, browser hardware passkey, deployment, React UI
+or persistent cross-device sync client is included. Device enrollment and cryptographic
+recovery are implemented in the subsequent backend sections.
 Cleanup runs after the source rate gate on unsafe requests, never on GET/HEAD.
 Each atomic sweep removes at most 32 rows per table: challenges (and their
 acceptance ledger children), unreferenced account verifications, browser sessions
@@ -360,3 +364,157 @@ v4-option converter is used for the manifest-based bundle harness. No forced pee
 overrides are used. See the evidence for the npm 10 resolver failure and successful
 installation using ephemeral npm 12.2.2 on Node 22.22.3 (`--ignore-scripts`). Both full
 and runtime npm audit reports are clean as of the recorded local run.
+
+## Phase 2D JSON contracts
+
+Current implementation/evidence: [Phase 2D](../docs/MANAGED_CLOUD_PHASE2D_EVIDENCE.md).
+These local backend contracts supersede the earlier phase-specific deferral notes.
+No UI, deployment or production provider is enabled.
+
+All browser routes below are POST `/v1/auth/<suffix>` with the existing Session,
+Origin, JSON, double-submit CSRF, trusted-source and account-rate checks. Unknown
+fields (including batch/permanent authorization and account/tenant selectors) fail.
+Foreign resources return 404. All successful responses are JSON/no-store.
+
+| Suffix | Exact body | Result |
+| --- | --- | --- |
+| `approvals/list`, `approvals/pending`, `approvals/recent` | `{after,limit}` | `{requests,nextCursor}`; limit 1–100; pending excludes expiry, recent descends |
+| `approvals/detail` | `{id}` | Bound metadata, summary digest, approve/deny/cancel action digests |
+| `approvals/approve`, `approvals/deny`, `approvals/cancel` | `{id,confirmed:true}` | Decision metadata; exact action-bound Passkey step-up consumed once |
+| `activity/list` | `{after,limit,minimum}` | Events, cursor, signed checkpoint, through, `verification` |
+| `activity/detail` | `{id,minimum}` | One event and explicit checkpoint verification |
+| `recovery/start` | `{id,packageId,targetDeviceId,signingKey,wrappingKey,nonce}` | Case canonical, target-encrypted challenge, state |
+| `recovery/detail` | `{id}` | Canonical, state, challenge, review flag, cancel/review action digests |
+| `recovery/notifications` | `{after}` | Bounded durable account/device notification records |
+| `recovery/release` | `{id,evidence}` | API/Custodian target-encrypted shares and wrapped VDK |
+| `recovery/cancel` | `{id,confirmed:true,authorization}` | Exact step-up plus independent signed cancel authorization |
+| `recovery/review` | `{id,confirmed:true}` | Exact step-up-bound completed-device review acknowledgement |
+| `recovery/finish` | `{id,proof,signature}` | Completion and required device review; all browser sessions revoked |
+
+Device POST routes retain timestamped signing-key proof, no cookies, and stored
+account/tenant/vault authority:
+
+- `/v1/devices/approvals`: `{operation:{canonical,signature},expiresIn}` with optional
+  `summary:{nonce,ciphertext,signature}`. TTL is 30–900 seconds. The signed operation
+  must already contain its unique approvalRef. Maximum request size is 384 KiB.
+- `/v1/devices/recovery-keys`: `{}` returns separate operator public key IDs/keys.
+- `/v1/devices/recovery-package`: `{canonical,signature}` uploads the signed manifest.
+- `/v1/devices/recovery-cancel`: `{id,authorization}` requires an active same-account device and independent signed cancel authorization.
+- `/v1/devices/recovery-notifications`: `{after}` reads bounded notifications.
+
+An initial credential put remains automatic and cannot request approval. Every put
+against an existing head, delete and restore needs the exact unexpired grant. Thus
+updates, encrypted scope changes and key-epoch rotations cannot bypass approval by
+using `put`. Scope content stays encrypted; the backend does not interpret it.
+Device enrollment/revocation retain their Phase 2C exact, one-use browser actions
+and D1 transaction, rather than adding device commands to the sync wire protocol.
+Agents use the authenticated device principal; this phase introduces no separate
+cloud delegated-agent identity or broad reusable authorization.
+
+Grant consumption, live device/session membership, idempotency, sequence, version,
+head, legacy and normalized audit append, and signed sync checkpoint remain one
+D1 batch. An exact accepted retry returns the original receipt/checkpoint. Changed
+operation bytes need a new request. Approval metadata and optional summaries are
+immutable; denial/cancellation are terminal; expiry is derived from database time.
+Encrypted human-readable summaries are signed over
+`["AgentKeychain-approval-summary-v1",operationDigest,ttl,nonce,ciphertext]` and
+excluded from browser list/detail. Browser metadata contains only action and opaque
+credential/device references. Decision digests include the optional summary digest. Creation retries with a fresh
+transport nonce return the same request when signed operation, TTL and encrypted
+summary are identical; changed content under the same request ID conflicts. The
+original expiry is retained, never extended by retry.
+
+Activity events have fixed columns, a fixed event vocabulary and no arbitrary
+metadata object. Auth, account, device, sync, approval and recovery transitions
+append through D1 triggers in the mutation's transaction. Anonymous auth/device
+failures remain unscoped forensic records and are not exposed as another tenant's
+activity. Old auth retention does not delete the normalized immutable copy.
+Browser list/detail and checkpoints are scoped to both tenant and account until
+a team-role policy exists. Public event IDs, `after`, `nextCursor`, `minimum` and
+`through` use random opaque 128-bit IDs (zero means the initial boundary). IDs from
+another account are not found. Global database ordinals are never serialized,
+including inside signed checkpoint canonical bytes. Cumulative counts describe
+only this account. Signed per-account checkpoints use the mandatory private `CHECKPOINT_SIGNER`, pin
+its public key, and bind previous event boundary, through ID, cumulative count and
+chain root. Read requests checkpoint at most 100 new events, verify existing signed
+history, and return `verified`, `pending` or `failed`; they never label an unsigned
+backlog verified. Verification failures cannot be hidden by list/detail. Corrupt
+non-redacted rows are withheld with explicit failure. Existing-history verification
+currently scans that account's retained checkpoints/history; this is not an SLO or
+constant-cost archival design. `minimum` is the caller's retained high-water ID;
+unknown newer history cannot be inferred from an old valid signature alone.
+
+Recovery uses separate `MAIN` and `CUSTODIAN` D1 databases and private Service Binding
+RPC; public Custodian HTTP is always 404. Manifests bind package/account/tenant/vault,
+epoch, policy, issuing device, both operator key IDs, encrypted shares and wrapped
+VDK. Device helpers generate a random 256-bit recovery key, XOR split it into two
+uniform 2-of-2 shares, and wrap each share using ephemeral X25519, HKDF-SHA-256 and
+AES-256-GCM with context-bound AAD. A separate AES-GCM envelope wraps the VDK.
+Neither service gets the VDK or complete recovery key. Each encrypted package may
+contain both sealed boxes, but neither operator key can decrypt the other's box.
+`recovery-keyring.ts` accepts explicitly provisioned CryptoKeys, supports an active
+key ID plus retained old decrypt keys, and has no generated production fallback.
+
+Both operators independently invoke `recovery-authorization.ts` through separately
+provisioned `RECOVERY_AUTH` bindings. Each resolves its own current trusted-device
+or account-verification key; an API permit is not Custodian evidence. Device fast
+path signs `["AgentKeychain-recovery-confirm-v1",caseCanonical]`, including the exact
+target signing/wrapping keys. No-device evidence is an independently verified
+signature on `["AgentKeychain-recovery-account-verified-v1",caseCanonical]`, checked
+only after at least 24 hours. Local tests supply synthetic account/email verifier
+keys, never real email. A registry implementation must recheck device revocation
+on each authorization call; production identity/provider provisioning is a gate.
+
+The Main saga is `prepared → confirmed → released → activating → completed`.
+The legacy pre-activation `proven` state is accepted for local compatibility.
+Cancellation is permitted only before `activating`. A conditional Main transaction
+validates the persisted proof digest after target-signature verification, both
+releases, current epoch, expiry, membership, active confirmer and target uniqueness.
+That transaction records the activation intent and creates device/key/request rows;
+any activation-trigger error rolls the entire transaction back. New targets must
+be absent from devices, device_keys, vault_devices, device_requests, legacy recovery
+cases and all other recovery sagas, including historical/cancelled records. These
+checks run at start and again in the activation transaction.
+
+After Main commits `activating`, the private Custodian completion RPC independently
+validates the target-signed proof. It idempotently transitions released → completed.
+Main then idempotently transitions activating → completed, revokes browser sessions,
+and retains the required device-review flag. Main cancellation after activation
+returns `{cancelled:false,state:"activating"|"completed"}` without a cancellation RPC.
+The Main transaction serializes concurrent finish/cancel decisions. Custodian keeps
+its separate prepared/released/completed/cancelled ledger; no cross-D1 atomicity is
+claimed. Neither service exposes its private RPC as a public recovery endpoint.
+
+Completion response loss is resumable from `activating`, including after Custodian
+has completed and before Main's final transition. Expiry does not undo a committed
+activation intent. Before activation, expired/revoked/stale-epoch cases remain
+fail-closed; transient activation errors are retryable only while eligibility still
+holds. This is not an unconditional guarantee for every partial recovery failure.
+A caller must retry with the same target proof; after final session revocation it
+must reauthenticate to inspect/retry/review. No recovery session is issued.
+
+Cancel authorization is `{action:"cancel",nonce,expiresAt,deviceId,signature}`.
+A currently trusted device, or the independent account verifier when `deviceId` is
+null, signs `["AgentKeychain-recovery-cancel-v1",caseCanonical,"cancel",nonce,
+expiresAt,deviceId]`. Admission requires an unexpired authorization no more than
+600 seconds in the future. Both authorization services validate it independently.
+Main persists the signed authorization with its cancellation decision before RPC.
+Custodian atomically consumes the nonce and records the exact case/digest receipt
+with the cancellation/tombstone. Exact committed retries return the receipt, while
+nonce reuse for different content/cases fails. Missing/wrong/expired authorization
+cannot create a tombstone. If delivery never committed and the authorization
+expired, supply a new independently signed authorization to resume cancellation;
+Main's durable cancelled state never reopens. A tombstone blocks delayed prepare.
+
+Target proof decrypts a random challenge using the wrapping private key and signs
+`["AgentKeychain-recovery-proof-v1",caseCanonical,proof]` using the target signing
+key. Activation requires both releases and both target-key proofs. Cancellation
+cannot erase plaintext a target already reconstructed from released shares; it
+blocks activation only before the durable activation boundary and stops subsequent
+release. Deployment must not promise revocation of already learned key material.
+
+Private binding names in the manifests are deployment contracts only. Their local
+bundle implementations are synthetic and generated only from `tests/`. Production
+operator separation, trust-registry/email adapters, key custody/rotation ceremony,
+remote migrations and deployment require independent review and approval. The
+React control center and persistent local client/daemon remain later phases.

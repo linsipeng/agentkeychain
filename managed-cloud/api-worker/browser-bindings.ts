@@ -1,8 +1,11 @@
+import type { RecoveryBindings } from './recovery-repository.ts';
+import type { CheckpointSigner } from '../shared/checkpoints.ts';
 import { createBrowserAuth, unavailable } from './browser-auth.ts';
 import { decode, encode } from './webauthn.ts';
 /** Provisioning these bindings is a separate deployment gate. No defaults or
  * synthetic verifier can activate production registration. */
-export interface BrowserBindings {
+export interface BrowserBindings extends RecoveryBindings {
+    CHECKPOINT_SIGNER?: CheckpointSigner;
     MAIN: D1Database;
     AUTH_ORIGIN?: string;
     AUTH_RP_ID?: string;
@@ -30,7 +33,7 @@ export async function browserFetch(request: Request, env: BrowserBindings) {
             return unavailable();
         const key = (bytes: Uint8Array<ArrayBuffer>, kind: 'AES-GCM' | 'HMAC') => crypto.subtle.importKey('raw', bytes, kind === 'HMAC' ? { name: 'HMAC', hash: 'SHA-256' } : { name: 'AES-GCM' }, false, kind === 'HMAC' ? ['sign', 'verify'] : ['encrypt', 'decrypt']);
         const [bootstrapKey, emailKey, lookupKey] = await Promise.all([key(materials[0]!, 'HMAC'), key(materials[1]!, 'AES-GCM'), key(materials[2]!, 'HMAC')]);
-        return await createBrowserAuth(env.MAIN, { origin: env.AUTH_ORIGIN, rpId: env.AUTH_RP_ID, bootstrapKey, emailKey, lookupKey, verifyEmail: (email, proof) => env.EMAIL_VERIFIER!.verify(email, proof), trustedSource: r => env.TRUSTED_AUTH_SOURCE!.resolve(r) })(request);
+        return await createBrowserAuth(env.MAIN, { recovery: env, checkpointSigner: env.CHECKPOINT_SIGNER, origin: env.AUTH_ORIGIN, rpId: env.AUTH_RP_ID, bootstrapKey, emailKey, lookupKey, verifyEmail: (email, proof) => env.EMAIL_VERIFIER!.verify(email, proof), trustedSource: r => env.TRUSTED_AUTH_SOURCE!.resolve(r) })(request);
     }
     catch { return unavailable(); }
 }

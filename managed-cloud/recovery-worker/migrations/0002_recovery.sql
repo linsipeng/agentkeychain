@@ -1,0 +1,21 @@
+CREATE TABLE recovery_packages (id TEXT PRIMARY KEY,canonical TEXT NOT NULL,signature TEXT NOT NULL,account_id TEXT NOT NULL,tenant_id TEXT NOT NULL,vault_id TEXT NOT NULL,key_epoch INTEGER NOT NULL,UNIQUE(tenant_id,vault_id,key_epoch));
+CREATE TABLE recovery_sagas (id TEXT PRIMARY KEY,package_id TEXT NOT NULL REFERENCES recovery_packages(id),canonical TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN('prepared','released','cancelled','completed')),not_before INTEGER NOT NULL,expires_at INTEGER NOT NULL,release TEXT);
+CREATE TABLE recovery_transitions(id INTEGER PRIMARY KEY AUTOINCREMENT,case_id TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL DEFAULT(unixepoch()));
+CREATE TRIGGER custody_transition_insert AFTER INSERT ON recovery_sagas BEGIN INSERT INTO recovery_transitions(case_id,state) VALUES(NEW.id,NEW.state); END;
+CREATE TRIGGER custody_transition_update AFTER UPDATE OF state ON recovery_sagas BEGIN INSERT INTO recovery_transitions(case_id,state) VALUES(NEW.id,NEW.state); END;
+CREATE TRIGGER custody_terminal BEFORE UPDATE ON recovery_sagas WHEN OLD.state IN('cancelled','completed') BEGIN SELECT RAISE(ABORT,'terminal_case'); END;
+CREATE TRIGGER custody_case_pin BEFORE UPDATE OF id,package_id,canonical,not_before,expires_at ON recovery_sagas BEGIN SELECT RAISE(ABORT,'immutable_case'); END;
+CREATE TRIGGER custody_case_replace BEFORE INSERT ON recovery_sagas WHEN EXISTS(SELECT 1 FROM recovery_sagas WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'immutable_case'); END;
+CREATE TRIGGER custody_case_delete BEFORE DELETE ON recovery_sagas BEGIN SELECT RAISE(ABORT,'append_only'); END;
+CREATE TRIGGER custody_package_update BEFORE UPDATE ON recovery_packages BEGIN SELECT RAISE(ABORT,'append_only'); END;
+CREATE TRIGGER custody_package_delete BEFORE DELETE ON recovery_packages BEGIN SELECT RAISE(ABORT,'append_only'); END;
+CREATE TRIGGER custody_package_replace BEFORE INSERT ON recovery_packages WHEN EXISTS(SELECT 1 FROM recovery_packages WHERE id=NEW.id OR (tenant_id=NEW.tenant_id AND vault_id=NEW.vault_id AND key_epoch=NEW.key_epoch)) BEGIN SELECT RAISE(ABORT,'append_only'); END;
+CREATE TRIGGER custody_transition_pin BEFORE UPDATE ON recovery_transitions BEGIN SELECT RAISE(ABORT,'append_only'); END;
+CREATE TRIGGER custody_transition_delete BEFORE DELETE ON recovery_transitions BEGIN SELECT RAISE(ABORT,'append_only'); END;
+CREATE TRIGGER custody_transition_replace BEFORE INSERT ON recovery_transitions WHEN EXISTS(SELECT 1 FROM recovery_transitions WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'append_only'); END;
+
+CREATE TABLE recovery_cancellations(nonce TEXT PRIMARY KEY,case_id TEXT NOT NULL,canonical TEXT NOT NULL,digest TEXT NOT NULL);
+CREATE TRIGGER custody_cancel_guard BEFORE INSERT ON recovery_cancellations WHEN EXISTS(SELECT 1 FROM recovery_sagas WHERE id=NEW.case_id AND (canonical<>NEW.canonical OR state='completed')) BEGIN SELECT RAISE(ABORT,'invalid_transition'); END;
+CREATE TRIGGER custody_cancel_update BEFORE UPDATE ON recovery_cancellations BEGIN SELECT RAISE(ABORT,'append_only'); END;
+CREATE TRIGGER custody_cancel_delete BEFORE DELETE ON recovery_cancellations BEGIN SELECT RAISE(ABORT,'append_only'); END;
+CREATE TRIGGER custody_cancel_replace BEFORE INSERT ON recovery_cancellations WHEN EXISTS(SELECT 1 FROM recovery_cancellations WHERE nonce=NEW.nonce) BEGIN SELECT RAISE(ABORT,'unauthorized'); END;

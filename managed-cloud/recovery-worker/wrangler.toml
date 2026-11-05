@@ -1,6 +1,7 @@
 name = "agentkeychain-managed-custodian"
 main = "index.ts"
 compatibility_date = "2026-07-16"
+compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 preview_urls = false
 
@@ -10,3 +11,13 @@ database_name = "managed-custodian-local"
 database_id = "00000000-0000-0000-0000-000000000002"
 migrations_dir = "migrations"
 remote = false
+
+[[services]]
+binding = "RECOVERY_AUTH"
+service = "agentkeychain-custody-recovery"
+entrypoint = "RecoveryAuthority"
+
+[[services]]
+binding = "RECOVERY_KEYS"
+service = "agentkeychain-custody-recovery"
+entrypoint = "RecoveryKeys"

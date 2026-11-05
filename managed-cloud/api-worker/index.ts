@@ -8,7 +8,7 @@ import { createRepository } from './repository.ts';
 export interface Env extends BrowserBindings {
     MAIN: D1Database;
     CHECKPOINT_SIGNER?: CheckpointSigner;
-    RECOVERY: RecoveryContract;
+    RECOVERY: RecoveryContract & import('../shared/recovery.ts').RecoveryRPC;
 }
 export default {
     async fetch(request: Request, env: Env): Promise<Response> {

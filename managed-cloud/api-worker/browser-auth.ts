@@ -1,9 +1,17 @@
+import { recoveryRepository, type RecoveryBindings, type StartRequest } from './recovery-repository.ts';
+import type { CancelAuthorization, RecoveryEvidence } from '../shared/recovery.ts';
+import { auditRepository } from './audit-repository.ts';
+import type { CheckpointSigner } from '../shared/checkpoints.ts';
+import { approvalRepository, decisionDigest } from './approval-repository.ts';
+import { exactFields, identifier } from '../../src/cloud/protocol.ts';
 import { browserDevice } from './device-http.ts';
 import type { RegistrationResponseJSON, AuthenticationResponseJSON } from '@simplewebauthn/server';
 import { ApiError, boundedBody, digest, errorResponse } from '../shared/contracts.ts';
 import { browserRepository, type SessionRow, type ChallengeRow } from './browser-repository.ts';
 import { encode, decode, random, webauthn, type WebAuthnPolicy } from './webauthn.ts';
 export interface BrowserConfig extends WebAuthnPolicy {
+    checkpointSigner?: CheckpointSigner;
+    recovery?: RecoveryBindings;
     bootstrapKey: CryptoKey;
     emailKey: CryptoKey;
     lookupKey: CryptoKey;
@@ -78,7 +86,7 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
             const url = new URL(request.url), route = url.pathname.replace('/v1/auth/', '');
             if (url.search || url.origin !== config.origin)
                 throw unauthorized();
-            const routes = ['bootstrap', 'session', 'invitation/verify', 'registration/options', 'registration/verify', 'authentication/options', 'authentication/verify', 'step-up/options', 'step-up/verify', 'logout', 'session/refresh', 'devices/pending', 'devices/approve', 'devices/deny', 'devices/list', 'devices/revoke', 'devices/verification'];
+            const routes = ['bootstrap', 'session', 'invitation/verify', 'registration/options', 'registration/verify', 'authentication/options', 'authentication/verify', 'step-up/options', 'step-up/verify', 'logout', 'session/refresh', 'devices/pending', 'devices/approve', 'devices/deny', 'devices/list', 'devices/revoke', 'devices/verification', 'approvals/list', 'approvals/pending', 'approvals/recent', 'approvals/detail', 'approvals/approve', 'approvals/deny', 'approvals/cancel', 'activity/list', 'activity/detail', 'recovery/start', 'recovery/detail', 'recovery/release', 'recovery/cancel', 'recovery/finish', 'recovery/notifications', 'recovery/review'];
             if (!routes.includes(route))
                 throw new ApiError('not_found');
             if (route === 'bootstrap') {
@@ -153,6 +161,49 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
                 if (!await repo.rate('identity', identity, 30))
                     throw new AuthRateError();
             };
+            if (route.startsWith('recovery/')) {
+                if (!session) throw unauthorized();
+                await rateIdentity(accountIdentity!);
+                const recovery = recoveryRepository(db,config.recovery??{});
+                if (route==='recovery/start') return response(await recovery.start(session,body as unknown as StartRequest));
+                if (route==='recovery/notifications') {exactFields(body,['after']);return response(await recovery.notifications(session,body.after as number));}
+                const fields=route==='recovery/release'?['id','evidence']:route==='recovery/finish'?['id','proof','signature']:route==='recovery/cancel'?['id','confirmed','authorization']:route==='recovery/review'?['id','confirmed']:['id'];
+                exactFields(body,fields); identifier(body.id);
+                if(route==='recovery/detail') return response(await recovery.detail(session,body.id as string));
+                if(route==='recovery/release') return response(await recovery.release(session,body.id as string,body.evidence as RecoveryEvidence));
+                if(route==='recovery/finish') return response(await recovery.finish(session,body.id as string,body.proof as string,body.signature as string));
+                if(body.confirmed!==true)throw new ApiError('approval_required');
+                return response(route==='recovery/review'?await recovery.review(session,body.id as string):await recovery.cancel(session,body.id as string,body.authorization as CancelAuthorization));
+            }
+            if (route.startsWith('activity/')) {
+                if (!session) throw unauthorized();
+                await rateIdentity(accountIdentity!);
+                if (!config.checkpointSigner) return unavailable();
+                const audit = auditRepository(db,config.checkpointSigner);
+                if (route === 'activity/list') {
+                    exactFields(body,['after','limit','minimum']);
+                    return response(await audit.list(session,body.after as string | 0,body.limit as number,body.minimum as string | 0));
+                }
+                exactFields(body,['id','minimum']);
+                return response(await audit.detail(session,body.id as string,body.minimum as string | 0));
+            }
+            if (route.startsWith('approvals/')) {
+                if (!session) throw unauthorized();
+                await rateIdentity(accountIdentity!);
+                const approvals = approvalRepository(db);
+                if (['approvals/list','approvals/pending','approvals/recent'].includes(route)) {
+                    exactFields(body, ['after','limit']);
+                    return response(await approvals.list(session, body.after as number, body.limit as number,route==='approvals/pending'?'pending':route==='approvals/recent'?'recent':'all'));
+                }
+                exactFields(body, route === 'approvals/detail' ? ['id'] : ['id','confirmed']);
+                identifier(body.id);
+                if (route === 'approvals/detail') {
+                    const r = await approvals.detail(session, body.id as string);
+                    return response({...r, approveDigest: await decisionDigest('approve',r), denyDigest: await decisionDigest('deny',r), cancelDigest: await decisionDigest('cancel',r)});
+                }
+                if (body.confirmed !== true) throw new ApiError('approval_required');
+                return response(await approvals.decide(session,body.id as string,route.split('/')[1] as 'approve'|'deny'|'cancel'));
+            }
             if (route.startsWith('devices/')) {
                 if (!session)
                     throw unauthorized();

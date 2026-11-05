@@ -71,8 +71,8 @@ test('two vault sequences are independent and session cannot select other vault 
     await db().prepare("INSERT INTO device_sessions VALUES (?,'t','v2','d','a',unixepoch()+600,1)").bind(await digest(token)).run();
     expect((await push(op({ vaultId: 'v2' }))).serverSequence).toBe(1);
 });
-async function approve(operation: ManagedOperation, tenant = 't', vault = 'v') {
-    await db().prepare('INSERT INTO approvals VALUES (?,?,?,?,?,?,?,?,unixepoch()+600,NULL)').bind(tenant, vault, operation.approvalRef, 'a', 'd', operation.kind, operation.objectId, await approvalDigest(canonicalOperation(operation))).run();
+async function approve(operation: ManagedOperation, tenant = 't', vault = 'v', expires = Math.floor(Date.now()/1000)+600) {
+    await db().prepare('INSERT INTO approvals VALUES (?,?,?,?,?,?,?,?,?,NULL)').bind(tenant, vault, operation.approvalRef, 'a', 'd', operation.kind, operation.objectId, await approvalDigest(canonicalOperation(operation)), expires).run();
 }
 test('delete/restore are digest-bound, one-use; tombstone and key epoch barriers persist', async () => {
     await push();
@@ -110,7 +110,7 @@ test('trigger failure rolls back nonce, sequence, approval, version, head and au
 });
 test('pull pagination has no gaps; cursors bound to tenant, vault, device; audit redacted and immutable', async () => {
     for (let i = 0; i < 5; i++)
-        await push();
+        await push(op({objectId:'o'+i}));
     let cursor: string | null = null;
     const sequences: number[] = [];
     for (let i = 0; i < 3; i++) {
@@ -128,10 +128,10 @@ test('pull pagination has no gaps; cursors bound to tenant, vault, device; audit
     await expect(db().prepare("UPDATE audit SET action='changed'").run()).rejects.toThrow();
     await expect(db().prepare('DELETE FROM audit').run()).rejects.toThrow();
 });
-test('private custodian binding is separate, cannot release recovery material', async () => {
+test('private custodian binding is separate and public HTTP stays closed', async () => {
     expect('CUSTODIAN' in env).toBe(false);
     await expect(db().prepare('SELECT * FROM custodian_cases').all()).rejects.toThrow();
-    expect(await env.RECOVERY.describe()).toEqual({ component: 'custodian', protocol: 1, recoveryEnabled: false, bindings: ['CUSTODIAN'] });
+    expect(await env.RECOVERY.describe()).toEqual({ component: 'custodian', protocol: 1, recoveryEnabled: true, bindings: ['CUSTODIAN','RECOVERY_AUTH','RECOVERY_KEYS'] });
     expect((await env.RECOVERY.fetch('https://local.invalid/recovery')).status).toBe(404);
 });
 test.each([
@@ -171,14 +171,14 @@ test('foreign approval reference and same-tenant other-vault approval never auth
 test('expired or changed approval never consumes state', async () => {
     await push();
     const del = op({ kind: 'delete', envelope: null, approvalRef: 'grant' });
-    await approve(del);
-    await db().prepare('UPDATE approvals SET expires_at=0').run();
+    await approve(del,'t','v',0);
     await expect(push(del)).rejects.toThrow('approval_required');
     expect(await db().prepare('SELECT consumed_sequence FROM approvals').first('consumed_sequence')).toBeNull();
 });
 test('receive-order head ignores device operation naming; signature tampering fails', async () => {
-    const first = op({ operationId: 'zzz' }), last = op({ operationId: 'aaa' });
+    const first = op({ operationId: 'zzz' }), last = op({ operationId: 'aaa', approvalRef:'update' });
     await push(first);
+    await approve(last);
     await push(last);
     expect(await db().prepare('SELECT sequence FROM heads').first('sequence')).toBe(2);
     const s = await signed(op());
@@ -189,7 +189,7 @@ test('receive-order head ignores device operation naming; signature tampering fa
 test('pull rejects future cursors, detects missing history, and caps serialized pages', async () => {
     const large = op({ envelope: { nonce: btoa('n'.repeat(24)), ciphertext: btoa('c'.repeat(200000)) } });
     await push(large);
-    await push({ ...large, operationId: 'second' });
+    await push({ ...large, operationId: 'second',objectId:'other' });
     const page = await createRepository(db(), await context()).pull(null, 100);
     expect(page.versions).toHaveLength(1);
     expect(page.hasMore).toBe(true);
@@ -281,10 +281,12 @@ test('colliding tenant/vault/device/operation IDs cannot alias histories or rece
     expect(await count('audit')).toBe(3);
 });
 test('concurrent distinct writes allocate contiguous sequences and receive-order head', async () => {
-    const operations = Array.from({ length: 12 }, () => op());
+    await push();
+    const operations = Array.from({ length: 12 }, (_,i) => op({approvalRef:'update'+i}));
+    for(const operation of operations) await approve(operation);
     const receipts = await Promise.all(operations.map(operation => push(operation)));
-    expect(receipts.map(r => r.serverSequence).sort((a, b) => a - b)).toEqual(Array.from({ length: 12 }, (_, i) => i + 1));
-    const last = receipts.find(r => r.serverSequence === 12)!;
+    expect(receipts.map(r => r.serverSequence).sort((a, b) => a - b)).toEqual(Array.from({ length: 12 }, (_, i) => i + 2));
+    const last = receipts.find(r => r.serverSequence === 13)!;
     expect(await db().prepare('SELECT v.operation_id FROM heads h JOIN versions v ON v.tenant_id=h.tenant_id AND v.vault_id=h.vault_id AND v.sequence=h.sequence').first('operation_id')).toBe(last.operationId);
 });
 test('checkpoint acceptance is atomic and roots bind every exact signed version', async () => {
@@ -293,12 +295,12 @@ test('checkpoint acceptance is atomic and roots bind every exact signed version'
     await push(first);
     const before = await count('sync_checkpoints'), nonceBefore = await count('device_nonces');
     await db().exec("CREATE TRIGGER fail_checkpoint BEFORE INSERT ON sync_checkpoints WHEN NEW.sequence>0 BEGIN SELECT RAISE(ABORT,'injected'); END");
-    await expect(push()).rejects.toThrow();
+    await expect(push(op({objectId:'other'}))).rejects.toThrow();
     expect(await count('versions')).toBe(1);
     expect(await count('sync_checkpoints')).toBe(before);
     expect(await count('device_nonces')).toBe(nonceBefore);
     await db().exec('DROP TRIGGER fail_checkpoint');
-    await push();
+    await push(op({objectId:'other'}));
     const page = await createRepository(db(), await context()).pull(null, 100);
     const root = await genesisRoot('t', 'v');
     const verified = await verifyCheckpointPage(await checkpointSigner.key(), 't', 'v', 0, root, 2, page);
