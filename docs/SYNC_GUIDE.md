@@ -300,3 +300,5 @@ retained. Managed imports commit an entire batch or nothing. See
 提交或全部回滚。旧阶段计数是历史证据，最新验收以安全修复记录为准。
 
 精确恢复版本绑定、最后设备移除保护与无限历史的增量见证，以[最终复审契约及验收记录](LAST_FINAL_REVIEW.md)为准。
+
+Private support Workers, email-code requests and deterministic staging configuration are documented in [English](MANAGED_CLOUD_SUPPORT_WORKERS.md) / [中文](MANAGED_CLOUD_SUPPORT_WORKERS.zh-CN.md). No real resources or deployment are enabled / 未启用真实资源或部署。

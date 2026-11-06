@@ -36,3 +36,8 @@ coverage/
 
 # Codex / agent scratch
 .AGENTS.md.bak
+# Rendered deployment metadata and local Worker secrets
+managed-cloud/provisioning/generated/
+.dev.vars
+.dev.vars.*
+.wrangler/

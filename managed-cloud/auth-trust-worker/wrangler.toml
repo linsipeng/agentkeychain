@@ -1,0 +1,23 @@
+# Local-only manifest. Deployment uses provisioning/render.mjs with actual resource IDs and public pins.
+name = "agentkeychain-cloud-auth-trust"
+compatibility_date = "2026-07-16"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+preview_urls = false
+main = "index.ts"
+
+[observability]
+enabled = false
+
+[[d1_databases]]
+binding = "AUTH"
+database_name = "agentkeychain-cloud-auth"
+database_id = "00000000-0000-0000-0000-000000000003"
+migrations_dir = "migrations"
+remote = false
+
+[[send_email]]
+name = "EMAIL"
+
+[triggers]
+crons = ["17 * * * *"]

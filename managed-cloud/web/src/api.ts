@@ -1,7 +1,7 @@
 import { assertSafeView } from './safe-view';
 import { QueryClient } from '@tanstack/react-query';
 export const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 0, gcTime: 0, refetchOnWindowFocus: true }, mutations: { retry: false } } });
-const routes = new Set(['bootstrap', 'session', 'authentication/options', 'authentication/verify', 'invitation/detail', 'invitation/verify', 'registration/options', 'registration/verify', 'logout', 'web/query', 'web/pairing', 'web/options', 'web/verify', 'web/execute', 'recovery/verify', 'recovery/start', 'recovery/status', 'recovery/cancel']);
+const routes = new Set(['email/request', 'bootstrap', 'session', 'authentication/options', 'authentication/verify', 'invitation/detail', 'invitation/verify', 'registration/options', 'registration/verify', 'logout', 'web/query', 'web/pairing', 'web/options', 'web/verify', 'web/execute', 'recovery/verify', 'recovery/start', 'recovery/status', 'recovery/cancel']);
 export class ApiError extends Error {
     constructor(public status: number) { super('Request failed'); }
 }

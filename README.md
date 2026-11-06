@@ -334,3 +334,5 @@ Final local implementation and external gates: [continuation evidence](docs/PHAS
 Final local security repair and upgrade semantics: [repair record](docs/FINAL_SECURITY_REPAIR.md), [migration/rollback runbook](docs/SECURITY_REPAIR_MIGRATION_RUNBOOK.md). Local verification does not authorize release or deployment.
 
 Latest exact activation binding, last-device safety and incremental witness contracts and evidence: [last final review](docs/LAST_FINAL_REVIEW.md).
+
+Development now includes private production support Workers, context-bound email codes and a fail-closed staging manifest renderer. Nothing is deployed or provisioned. See [support Worker operations and gates](docs/MANAGED_CLOUD_SUPPORT_WORKERS.md).

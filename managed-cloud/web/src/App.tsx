@@ -1,3 +1,4 @@
+import {SendCode} from './SendCode';
 import { createContext, useContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -228,6 +229,7 @@ function JoinPage() { const t = useContext(Copy), { invite = '' } = useParams(),
     }>('invitation/detail', { invitation: invite }); }, retry: false }); return <Public title="join"><CopyLink />{q.isPending ? <Message>{t('loading')}</Message> : q.isError ? <Message error>{t('inviteError')}</Message> : <><label>{t('invited')}<input readOnly value={q.data.maskedEmail}/></label><button className="primary" onClick={() => { j.setInvite(invite); nav('/verify-email'); }}>{t('verify')}</button></>}</Public>; }
 function VerifyEmail() { const t = useContext(Copy), j = useContext(Join), nav = useNavigate(), [email, setEmail] = useState(''), [proof, setProof] = useState(''), [error, setError] = useState(false), [busy, setBusy] = useState(false); if (!j.invite)
     return <Public title="verify"><Message error>{t('inviteError')}</Message></Public>; async function submit(e: FormEvent) { e.preventDefault(); setBusy(true); try {
+    await api('bootstrap');
     const r = await api<{
         verificationId: string;
     }>('invitation/verify', { invitation: j.invite, email, proof });
@@ -240,7 +242,7 @@ catch {
 }
 finally {
     setBusy(false);
-} } return <Public title="verify"><form onSubmit={submit}><label>{t('email')}<input type="email" required maxLength={254} value={email} onChange={e => setEmail(e.target.value)}/></label><label>{t('proof')}<input required autoComplete="one-time-code" maxLength={2048} value={proof} onChange={e => setProof(e.target.value)}/></label><button className="primary" disabled={busy}>{t(busy ? 'loading' : 'verify')}</button></form>{error && <Message error>{t('error')}</Message>}</Public>; }
+} } return <Public title="verify"><form onSubmit={submit}><label>{t('email')}<input type="email" required maxLength={254} value={email} onChange={e => setEmail(e.target.value)}/></label><SendCode email={email} purpose="invitation" context={j.invite} copy={{send:t('sendCode'),sent:t('codeSent'),error:t('error'),waiting:t('loading')}}/><label>{t('proof')}<input required autoComplete="one-time-code" maxLength={2048} value={proof} onChange={e => setProof(e.target.value)}/></label><button className="primary" disabled={busy}>{t(busy ? 'loading' : 'verify')}</button></form>{error && <Message error>{t('error')}</Message>}</Public>; }
 function CreatePasskey() { const t = useContext(Copy), j = useContext(Join), nav = useNavigate(), cache = useQueryClient(), [busy, setBusy] = useState(false), [error, setError] = useState(false); async function create() { if (!supported()) {
     nav('/unsupported-browser');
     return;
@@ -280,7 +282,7 @@ catch {
 }
 finally {
     setBusy(false);
-} } return <Public title="recovery"><p>{t('recoveryHelp')}</p><form onSubmit={submit}><label>{t('email')}<input type="email" required maxLength={254} value={email} onChange={e => setEmail(e.target.value)}/></label><label>{t('proof')}<input required autoComplete="one-time-code" maxLength={2048} value={proof} onChange={e => setProof(e.target.value)}/></label><label>{t('recoveryCode')}<input required maxLength={43} value={requestRef} onChange={e => setRef(e.target.value)}/></label><button className="primary" disabled={busy}>{t(busy ? 'loading' : 'verifyAccount')}</button></form>{message && <Message error={message === 'error'}>{t(message)}</Message>}<Link to="/sign-in">{t('signIn')}</Link></Public>; }
+} } return <Public title="recovery"><p>{t('recoveryHelp')}</p><form onSubmit={submit}><label>{t('email')}<input type="email" required maxLength={254} value={email} onChange={e => setEmail(e.target.value)}/></label><SendCode email={email} purpose="recovery" context={requestRef} copy={{send:t('sendCode'),sent:t('codeSent'),error:t('error'),waiting:t('loading')}}/><label>{t('proof')}<input required autoComplete="one-time-code" maxLength={2048} value={proof} onChange={e => setProof(e.target.value)}/></label><label>{t('recoveryCode')}<input required maxLength={43} value={requestRef} onChange={e => setRef(e.target.value)}/></label><button className="primary" disabled={busy}>{t(busy ? 'loading' : 'verifyAccount')}</button></form>{message && <Message error={message === 'error'}>{t(message)}</Message>}<Link to="/sign-in">{t('signIn')}</Link></Public>; }
 function RecoveryCase() {
     const t = useContext(Copy), { caseId } = useParams(), cache = useQueryClient();
     const [confirmationRef, setConfirmation] = useState(''), [confirming, setConfirming] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(false);

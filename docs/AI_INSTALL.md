@@ -97,3 +97,5 @@ local cloud state only after server and secure-store readback. Compiled syntheti
 recovery acceptance covers fast/delayed paths and crash/substitution cases. See [local recovery evidence](LOCAL_RECOVERY_ACTIVATION.md).
 
 Final development security contracts and migration semantics are recorded in [FINAL_SECURITY_REPAIR.md](FINAL_SECURITY_REPAIR.md). The public pinned installation release is unchanged; deployment and platform acceptance remain separate gates.
+
+Private support Workers and staging configuration are development artifacts only; the pinned installation flow is unchanged. See [operations and external gates](MANAGED_CLOUD_SUPPORT_WORKERS.md).

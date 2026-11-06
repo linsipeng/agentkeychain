@@ -5,6 +5,7 @@ export interface CheckpointKey {
     publicKey: string;
 }
 export interface CheckpointSigner {
+    publicKeys?(): Promise<CheckpointKey[]>;
     key(): Promise<CheckpointKey>;
     sign(canonical: string): Promise<string>;
 }

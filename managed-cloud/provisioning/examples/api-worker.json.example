@@ -1,0 +1,83 @@
+{
+  "name": "agentkeychain-cloud-api",
+  "main": "../../api-worker/index.ts",
+  "compatibility_date": "2026-07-16",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {
+    "enabled": false
+  },
+  "routes": [
+    {
+      "pattern": "agentkeychain.soupsam.com",
+      "custom_domain": true
+    },
+    {
+      "pattern": "api.agentkeychain.soupsam.com",
+      "custom_domain": true
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "MAIN",
+      "database_name": "agentkeychain-cloud-main",
+      "database_id": "REPLACE_ME_MAIN_D1_ID",
+      "migrations_dir": "../../api-worker/migrations"
+    }
+  ],
+  "services": [
+    {
+      "binding": "RECOVERY",
+      "service": "agentkeychain-cloud-custodian",
+      "entrypoint": "Custodian"
+    },
+    {
+      "binding": "EMAIL_VERIFIER",
+      "service": "agentkeychain-cloud-auth-trust",
+      "entrypoint": "EmailVerifier"
+    },
+    {
+      "binding": "TRUSTED_AUTH_SOURCE",
+      "service": "agentkeychain-cloud-auth-trust",
+      "entrypoint": "TrustedAuthSource"
+    },
+    {
+      "binding": "CHECKPOINT_SIGNER",
+      "service": "agentkeychain-cloud-api-trust",
+      "entrypoint": "CheckpointSigner"
+    },
+    {
+      "binding": "RECOVERY_AUTH",
+      "service": "agentkeychain-cloud-api-trust",
+      "entrypoint": "RecoveryAuthority"
+    },
+    {
+      "binding": "RECOVERY_KEYS",
+      "service": "agentkeychain-cloud-api-trust",
+      "entrypoint": "RecoveryKeys"
+    },
+    {
+      "binding": "RECOVERY_RELEASE_SIGNER",
+      "service": "agentkeychain-cloud-api-trust",
+      "entrypoint": "RecoveryReleaseSigner"
+    },
+    {
+      "binding": "RECOVERY_ACCOUNT_ATTESTER",
+      "service": "agentkeychain-cloud-api-trust",
+      "entrypoint": "AccountAttester"
+    }
+  ],
+  "vars": {
+    "AUTH_ORIGIN": "https://agentkeychain.soupsam.com",
+    "AUTH_RP_ID": "agentkeychain.soupsam.com"
+  },
+  "assets": {
+    "directory": "../../web/dist",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    "not_found_handling": "single-page-application"
+  }
+}

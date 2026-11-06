@@ -1,3 +1,5 @@
+import {rpcData} from '../shared/rpc-data.ts';
+import {emailProof,type EmailPurpose} from '../shared/email-proof.ts';
 import type { RecoveryBindings } from './recovery-repository.ts';
 import type { CheckpointSigner } from '../shared/checkpoints.ts';
 import { createBrowserAuth, unavailable } from './browser-auth.ts';
@@ -14,6 +16,7 @@ export interface BrowserBindings extends RecoveryBindings {
     AUTH_LOOKUP_KEY?: string;
     EMAIL_VERIFIER?: {
         verify(email: string, proof: string): Promise<boolean>;
+        request(email:string,purpose:EmailPurpose,contextDigest:string):Promise<{accepted:boolean;retryAfter:number}>;
     };
     TRUSTED_AUTH_SOURCE?: {
         resolve(request: Request): Promise<string>;
@@ -21,7 +24,7 @@ export interface BrowserBindings extends RecoveryBindings {
 }
 export async function browserFetch(request: Request, env: BrowserBindings) {
     try {
-        if (!env.AUTH_ORIGIN || !env.AUTH_RP_ID || !env.AUTH_BOOTSTRAP_KEY || !env.AUTH_EMAIL_KEY || !env.AUTH_LOOKUP_KEY || typeof env.EMAIL_VERIFIER?.verify !== 'function' || typeof env.TRUSTED_AUTH_SOURCE?.resolve !== 'function')
+        if (!env.AUTH_ORIGIN || !env.AUTH_RP_ID || !env.AUTH_BOOTSTRAP_KEY || !env.AUTH_EMAIL_KEY || !env.AUTH_LOOKUP_KEY || typeof env.EMAIL_VERIFIER?.verify !== 'function' || typeof env.EMAIL_VERIFIER?.request !== 'function' || typeof env.TRUSTED_AUTH_SOURCE?.resolve !== 'function')
             return unavailable();
         const materials = [env.AUTH_BOOTSTRAP_KEY, env.AUTH_EMAIL_KEY, env.AUTH_LOOKUP_KEY].map(value => {
             const bytes = decode(value);
@@ -33,7 +36,7 @@ export async function browserFetch(request: Request, env: BrowserBindings) {
             return unavailable();
         const key = (bytes: Uint8Array<ArrayBuffer>, kind: 'AES-GCM' | 'HMAC') => crypto.subtle.importKey('raw', bytes, kind === 'HMAC' ? { name: 'HMAC', hash: 'SHA-256' } : { name: 'AES-GCM' }, false, kind === 'HMAC' ? ['sign', 'verify'] : ['encrypt', 'decrypt']);
         const [bootstrapKey, emailKey, lookupKey] = await Promise.all([key(materials[0]!, 'HMAC'), key(materials[1]!, 'AES-GCM'), key(materials[2]!, 'HMAC')]);
-        return await createBrowserAuth(env.MAIN, { recovery: env, checkpointSigner: env.CHECKPOINT_SIGNER, origin: env.AUTH_ORIGIN, rpId: env.AUTH_RP_ID, bootstrapKey, emailKey, lookupKey, verifyEmail: (email, proof) => env.EMAIL_VERIFIER!.verify(email, proof), trustedSource: r => env.TRUSTED_AUTH_SOURCE!.resolve(r) })(request);
+        return await createBrowserAuth(env.MAIN, { recovery: env, checkpointSigner: env.CHECKPOINT_SIGNER, origin: env.AUTH_ORIGIN, rpId: env.AUTH_RP_ID, bootstrapKey, emailKey, lookupKey, requestEmail:(email,purpose,context)=>rpcData(env.EMAIL_VERIFIER!.request(email,purpose,context)), verifyEmail: (email, proof, purpose, context) => {if(!purpose||!context)throw new Error('unavailable');return env.EMAIL_VERIFIER!.verify(email, emailProof(purpose,context,proof));}, trustedSource: r => env.TRUSTED_AUTH_SOURCE!.resolve(r) })(request);
     }
     catch { return unavailable(); }
 }

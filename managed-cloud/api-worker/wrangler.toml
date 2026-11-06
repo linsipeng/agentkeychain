@@ -1,50 +1,60 @@
-name = "agentkeychain-managed-api"
-main = "index.ts"
+# Local-only manifest. Deployment uses provisioning/render.mjs with actual resource IDs and public pins.
+name = "agentkeychain-cloud-api"
 compatibility_date = "2026-07-16"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 preview_urls = false
+main = "index.ts"
+
+[observability]
+enabled = false
 
 [[d1_databases]]
 binding = "MAIN"
-database_name = "managed-main-local"
+database_name = "agentkeychain-cloud-main"
 database_id = "00000000-0000-0000-0000-000000000001"
 migrations_dir = "migrations"
 remote = false
 
 [[services]]
 binding = "RECOVERY"
-service = "agentkeychain-managed-custodian"
+service = "agentkeychain-cloud-custodian"
 entrypoint = "Custodian"
 
-# Trusted ingress/email adapters are separate provisioning/review gates.
-# Local bundle tests supply synthetic implementations under these exact names.
 [[services]]
 binding = "EMAIL_VERIFIER"
-service = "agentkeychain-auth-trust"
+service = "agentkeychain-cloud-auth-trust"
 entrypoint = "EmailVerifier"
 
 [[services]]
 binding = "TRUSTED_AUTH_SOURCE"
-service = "agentkeychain-auth-trust"
+service = "agentkeychain-cloud-auth-trust"
 entrypoint = "TrustedAuthSource"
 
-# Service owns its signing key; the API receives signatures and public metadata only.
 [[services]]
 binding = "CHECKPOINT_SIGNER"
-service = "agentkeychain-checkpoint-signer"
+service = "agentkeychain-cloud-api-trust"
 entrypoint = "CheckpointSigner"
 
-# Independently provisioned recovery operator bindings; no private key in D1.
 [[services]]
 binding = "RECOVERY_AUTH"
-service = "agentkeychain-api-recovery"
+service = "agentkeychain-cloud-api-trust"
 entrypoint = "RecoveryAuthority"
 
 [[services]]
 binding = "RECOVERY_KEYS"
-service = "agentkeychain-api-recovery"
+service = "agentkeychain-cloud-api-trust"
 entrypoint = "RecoveryKeys"
+
+[[services]]
+binding = "RECOVERY_RELEASE_SIGNER"
+service = "agentkeychain-cloud-api-trust"
+entrypoint = "RecoveryReleaseSigner"
+
+[[services]]
+binding = "RECOVERY_ACCOUNT_ATTESTER"
+service = "agentkeychain-cloud-api-trust"
+entrypoint = "AccountAttester"
 
 [assets]
 directory = "../web/dist"

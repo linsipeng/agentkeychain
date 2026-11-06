@@ -1,3 +1,4 @@
+import {rpcData} from '../shared/rpc-data.ts';
 import { ApiError, digest, verify } from '../shared/contracts.ts';
 import type { CheckpointSigner } from '../shared/checkpoints.ts';
 import type { SessionRow } from './browser-repository.ts';
@@ -56,7 +57,10 @@ export function auditRepository(db: D1Database, signer: CheckpointSigner) {
         return row.id;
     }
     async function snapshot(s: SessionRow, minimum: number, append = true) {
-        const key = await signer.key();
+        const key = await rpcData(signer.key());
+        const pins=signer.publicKeys?await rpcData(signer.publicKeys()):[key];
+        if(!pins.length||pins.length>16||new Set(pins.map(p=>p.keyId)).size!==pins.length||new Set(pins.map(p=>p.publicKey)).size!==pins.length||!pins.some(p=>p.keyId===key.keyId&&p.publicKey===key.publicKey))throw new Error('invalid_signer');
+        for(const p of pins)if(p.keyId!==await digest(p.publicKey))throw new Error('invalid_signer');
         if (key.keyId !== await digest(key.publicKey))
             throw new Error('invalid_signer');
         await db.prepare('INSERT INTO activity_key SELECT 1,?,? WHERE NOT EXISTS(SELECT 1 FROM activity_key)').bind(key.keyId, key.publicKey).run();
@@ -64,7 +68,7 @@ export function auditRepository(db: D1Database, signer: CheckpointSigner) {
             key_id: string;
             public_key: string;
         }>();
-        if (pin?.key_id !== key.keyId || pin.public_key !== key.publicKey)
+        if (!pin||!pins.some(p=>p.keyId===pin.key_id&&p.publicKey===pin.public_key))
             throw new Error('signer_substitution');
         const checkpoints = (await db.prepare('SELECT * FROM activity_checkpoints WHERE tenant_id=? AND account_id=? ORDER BY through_id').bind(s.tenant_id, s.account_id).all<CP>()).results;
         let root = await digest(JSON.stringify(['AgentKeychain-activity-v2', s.tenant_id, s.account_id])), through = 0, count = 0;
@@ -80,8 +84,9 @@ export function auditRepository(db: D1Database, signer: CheckpointSigner) {
                 root = await digest(JSON.stringify([root, bytes(r)]));
                 count++;
             }
-            const canonical = JSON.stringify(['AgentKeychain-activity-checkpoint-v2', await digest(JSON.stringify([s.tenant_id, s.account_id])), key.keyId, publicThrough, rows.at(-1)?.public_id, count, root]);
-            if (!rows.length || cp.previous_id !== through || cp.count !== count || cp.root !== root || cp.canonical !== canonical || cp.key_id !== key.keyId || !await verify(key.publicKey, cp.signature, canonical))
+            const historical=pins.find(p=>p.keyId===cp.key_id);
+            const canonical = JSON.stringify(['AgentKeychain-activity-checkpoint-v2', await digest(JSON.stringify([s.tenant_id, s.account_id])), cp.key_id, publicThrough, rows.at(-1)?.public_id, count, root]);
+            if (!rows.length || cp.previous_id !== through || cp.count !== count || cp.root !== root || cp.canonical !== canonical || !historical || !await verify(historical.publicKey, cp.signature, canonical))
                 throw new Error('invalid_audit_chain');
             through = cp.through_id;
             publicThrough = rows.at(-1)!.public_id;

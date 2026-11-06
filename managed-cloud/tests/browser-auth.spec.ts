@@ -415,7 +415,7 @@ test('production entrypoint uses real adapter and explicit ephemeral bindings; n
     const { default: worker } = await import('../api-worker/index.ts');
     const { encode } = await import('../api-worker/webauthn.ts');
     const raw = () => encode(crypto.getRandomValues(new Uint8Array(32)));
-    const bindings = { MAIN: env.MAIN, RECOVERY: env.RECOVERY, AUTH_ORIGIN: origin, AUTH_RP_ID: 'local.invalid', AUTH_BOOTSTRAP_KEY: raw(), AUTH_EMAIL_KEY: raw(), AUTH_LOOKUP_KEY: raw(), TRUSTED_AUTH_SOURCE: { resolve: async () => 'synthetic-source' }, EMAIL_VERIFIER: { verify: async (e: string, p: string) => config.verifyEmail(e, p) } };
+    const bindings = { MAIN: env.MAIN, RECOVERY: env.RECOVERY, AUTH_ORIGIN: origin, AUTH_RP_ID: 'local.invalid', AUTH_BOOTSTRAP_KEY: raw(), AUTH_EMAIL_KEY: raw(), AUTH_LOOKUP_KEY: raw(), TRUSTED_AUTH_SOURCE: { resolve: async () => 'synthetic-source' }, EMAIL_VERIFIER: { request:async()=>({accepted:true,retryAfter:60}), verify: async (e: string, p: string) => config.verifyEmail(e, JSON.parse(p)[2]) } };
     config.lookupKey = await crypto.subtle.importKey('raw', Uint8Array.from(atob(bindings.AUTH_LOOKUP_KEY.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
     handle = request => worker.fetch(request, bindings);
     await bootstrap();
@@ -588,7 +588,8 @@ test.each(['missing-source', 'non-string', 'empty', 'space', 'uppercase', 'overs
     const bindings = {
         MAIN: env.MAIN, AUTH_ORIGIN: origin, AUTH_RP_ID: 'local.invalid',
         AUTH_BOOTSTRAP_KEY: random(), AUTH_EMAIL_KEY: random(), AUTH_LOOKUP_KEY: random(),
-        EMAIL_VERIFIER: { verify: async () => true } as {
+        EMAIL_VERIFIER: { request:async()=>({accepted:true,retryAfter:60}), verify: async () => true } as {
+            request:()=>Promise<{accepted:boolean;retryAfter:number}>;
             verify: (e: string, p: string) => Promise<boolean>;
         } | undefined,
         TRUSTED_AUTH_SOURCE: { resolve: async () => 'synthetic-source' } as {
@@ -915,4 +916,29 @@ test.each(['start','detail','release','finish','status','notifications','review'
     const response = await call('recovery/'+route, {id:'synthetic',signingKey:'forbidden',wrappingKey:'forbidden'});
     expect(response.status).toBe(route === 'start' || route === 'status' || route === 'cancel' ? 401 : 404);
     assertSafeView(await response.json());
+});
+test('email requests require bootstrap, origin and CSRF and bind exact context without existence lookup',async()=>{
+ const sent:{email:string;purpose:string;context:string}[]=[];
+ config.requestEmail=async(email,purpose,context)=>{sent.push({email,purpose,context});return {accepted:true,retryAfter:60};};
+ handle=createBrowserAuth(env.MAIN,config);
+ const body={email:'nobody@example.invalid',purpose:'invitation',context:'absent-invitation'};
+ for(const headers of [{origin:'https://other.invalid'},{'x-csrf-token':''},{cookie:''}] as Record<string,string>[])expect((await call('email/request',body,headers)).status).toBe(401);
+ expect(sent).toHaveLength(0);
+ const response=await call('email/request',body);expect(response.status).toBe(200);expect(await response.json()).toEqual({accepted:true,retryAfter:60});
+ expect(sent).toEqual([{email:body.email,purpose:'invitation',context:await digest(body.context)}]);
+ const recovery={...body,purpose:'recovery',context:random()};expect(await(await call('email/request',recovery)).json()).toEqual({accepted:true,retryAfter:60});
+ expect(sent[1]?.context).toBe(await digest(recovery.context));
+ expect((await call('email/request',{...body,purpose:'login'})).status).toBe(401);
+ expect((await call('email/request',{...recovery,context:'invalid'})).status).toBe(401);
+ expect((await call('email/request',{...body,extra:true})).status).toBe(401);
+});
+test('email request identity rate limits are independent of account existence',async()=>{
+ let sent=0;config.requestEmail=async()=>{sent++;return {accepted:true,retryAfter:60};};handle=createBrowserAuth(env.MAIN,config);
+ for(let i=0;i<30;i++)expect((await call('email/request',{email:'absent@example.invalid',purpose:'invitation',context:'absent'})).status).toBe(200);
+ expect((await call('email/request',{email:'absent@example.invalid',purpose:'invitation',context:'absent'})).status).toBe(429);expect(sent).toBe(30);
+});
+test('equal short code values in different recovery contexts do not collide in the replay ledger',async()=>{
+ config.verifyEmail=async()=>true;handle=createBrowserAuth(env.MAIN,config);
+ for(let i=0;i<2;i++){await bootstrap();const {requestRef}=await signedRecoveryTarget();expect((await call('recovery/verify',{email:'absent@example.invalid',proof:'123456',requestRef})).status).toBe(200);}
+ expect(await count('recovery_sessions')).toBe(2);
 });

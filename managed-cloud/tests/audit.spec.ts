@@ -109,3 +109,12 @@ test('populated activity and event Web projections recursively exclude sensitive
     assertSafeView(page);expect(page.events).toHaveLength(1);
     assertSafeView(await web.query({view:'event',id:page.events[0]!.id}));
 });
+test('explicit signer rotation retains the original pin and verifies old activity checkpoints',async()=>{
+ const old=await syntheticSigner(),next=await syntheticSigner();await env.MAIN.prepare("INSERT INTO activity(tenant_id,account_id,event) VALUES('t','a','approval.pending')").run();
+ expect((await auditRepository(env.MAIN,old).list(s,0,10,0)).verification).toBe('verified');
+ await env.MAIN.prepare("INSERT INTO activity(tenant_id,account_id,event) VALUES('t','a','approval.pending')").run();
+ const pins=[await old.key(),await next.key()];
+ const rotated={...next,publicKeys:async()=>pins};
+ expect((await auditRepository(env.MAIN,rotated).list(s,0,10,0)).verification).toBe('verified');
+ expect((await auditRepository(env.MAIN,{...next,publicKeys:async()=>[pins[1]!]}).list(s,0,10,0)).verification).toBe('failed');
+});

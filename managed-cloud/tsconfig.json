@@ -19,6 +19,9 @@
     "api-worker/**/*.ts",
     "recovery-worker/**/*.ts",
     "tests/**/*.ts",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "auth-trust-worker/**/*.ts",
+    "api-trust-worker/**/*.ts",
+    "custody-trust-worker/**/*.ts"
   ]
 }

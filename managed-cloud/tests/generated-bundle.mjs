@@ -36,7 +36,19 @@ for (const options of [api, recovery]) {
 assert.deepEqual(api.compatibilityFlags, ['nodejs_compat']);
 assert.equal(api.compatibilityDate, '2026-07-16');
 assert.deepEqual(Object.keys(api.d1Databases), ['MAIN']);
-assert.deepEqual(Object.keys(api.serviceBindings).sort(), ['CHECKPOINT_SIGNER', 'EMAIL_VERIFIER', 'RECOVERY', 'RECOVERY_AUTH', 'RECOVERY_KEYS', 'TRUSTED_AUTH_SOURCE']);
+assert.deepEqual(Object.keys(api.serviceBindings).sort(), ['CHECKPOINT_SIGNER', 'EMAIL_VERIFIER', 'RECOVERY', 'RECOVERY_ACCOUNT_ATTESTER', 'RECOVERY_AUTH', 'RECOVERY_KEYS', 'RECOVERY_RELEASE_SIGNER', 'TRUSTED_AUTH_SOURCE']);
+// Existing process fault fixtures remain synthetic; production support composition
+// is independently exercised by support-bundle.mjs under the staging manifests.
+Object.assign(api.serviceBindings,{
+ CHECKPOINT_SIGNER:{name:'agentkeychain-checkpoint-signer',entrypoint:'CheckpointSigner'},
+ EMAIL_VERIFIER:{name:'agentkeychain-auth-trust',entrypoint:'EmailVerifier'},TRUSTED_AUTH_SOURCE:{name:'agentkeychain-auth-trust',entrypoint:'TrustedAuthSource'},
+ RECOVERY_AUTH:{name:'agentkeychain-api-recovery',entrypoint:'RecoveryAuthority'},RECOVERY_KEYS:{name:'agentkeychain-api-recovery',entrypoint:'RecoveryKeys'},
+ RECOVERY_RELEASE_SIGNER:{name:'agentkeychain-api-recovery',entrypoint:'RecoveryReleaseSigner'},RECOVERY_ACCOUNT_ATTESTER:{name:'agentkeychain-api-recovery',entrypoint:'RecoveryTestService'}
+});
+Object.assign(recovery.serviceBindings,{
+ RECOVERY_AUTH:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryAuthority'},RECOVERY_KEYS:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryKeys'},RECOVERY_RELEASE_SIGNER:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryReleaseSigner'},
+ ROSTER_WITNESS_SIGNER:{name:'agentkeychain-custody-recovery',entrypoint:'RosterWitnessSigner'},RECOVERY_TRUST_SIGNER:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryTrustSigner'},RECOVERY_TRUST_POLICY:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryTrustSigner'}
+});
 const raw = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
 const proof = raw(), origin = 'https://local.invalid', email = 'bundle@example.invalid';
 const bindings = { AUTH_ORIGIN: origin, AUTH_RP_ID: 'local.invalid', AUTH_BOOTSTRAP_KEY: raw(), AUTH_EMAIL_KEY: raw(), AUTH_LOOKUP_KEY: raw() };
@@ -54,7 +66,7 @@ const mf = new Miniflare(convertV4MiniflareOptions({
         { ...recovery, modules: true, modulesRoot: resolve('dist'), scriptPath: resolve('dist/recovery-worker/index.js'), outboundService: noOutbound },
         { name: 'agentkeychain-auth-trust', modules: true, compatibilityDate: api.compatibilityDate, bindings: { PROOF: proof }, outboundService: noOutbound,
             script: `import { WorkerEntrypoint } from 'cloudflare:workers';
-                export class EmailVerifier extends WorkerEntrypoint { verify(email, proof) { return email === 'bundle@example.invalid' && proof === this.env.PROOF; } }
+                export class EmailVerifier extends WorkerEntrypoint { request(){return {accepted:true,retryAfter:60};} verify(email, proof) { return email === 'bundle@example.invalid' && JSON.parse(proof)[2] === this.env.PROOF; } }
                 export class TrustedAuthSource extends WorkerEntrypoint { resolve() { return 'synthetic-bundle-source'; } }
                 export default { fetch() { return new Response(null, {status:404}); } };` },
     ],
@@ -164,6 +176,7 @@ try {
     const apiAuthority=await mf.getWorker('agentkeychain-api-recovery');
     const custodyAuthority=await mf.getWorker('agentkeychain-custody-recovery');
     for(const authority of [apiAuthority,custodyAuthority])await authority.trust(browser.accountId,browser.tenantId,session.vaultId,session.deviceId,signingKey);
+    const accountPin=await apiAuthority.accountKey();for(const actor of [apiAuthority,custodyAuthority])await actor.verifier(browser.accountId,accountPin.publicKey);
     const recoveryKeys=await(await deviceCall('/v1/devices/recovery-keys',JSON.stringify({}))).json();
     const recoveryKey=crypto.getRandomValues(new Uint8Array(32)),[shareA,shareB]=splitRecoveryKey(recoveryKey);
     const recoveryPackage={version:1,packageId:raw(),accountId:browser.accountId,tenantId:browser.tenantId,vaultId:session.vaultId,keyEpoch:1,policy:'two-party-24h',issuerDeviceId:session.deviceId,apiKeyId:recoveryKeys.api.keyId,custodianKeyId:recoveryKeys.custodian.keyId,wrappedVDK:encode64(crypto.getRandomValues(new Uint8Array(48)))};

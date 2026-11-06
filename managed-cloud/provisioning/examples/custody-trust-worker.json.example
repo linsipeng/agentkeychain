@@ -1,0 +1,21 @@
+{
+  "name": "agentkeychain-cloud-custody-trust",
+  "main": "../../custody-trust-worker/index.ts",
+  "compatibility_date": "2026-07-16",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {
+    "enabled": false
+  },
+  "d1_databases": [
+    {
+      "binding": "TRUST_DB",
+      "database_name": "agentkeychain-cloud-custodian",
+      "database_id": "REPLACE_ME_CUSTODIAN_D1_ID",
+      "migrations_dir": "../../recovery-worker/migrations"
+    }
+  ]
+}

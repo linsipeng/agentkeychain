@@ -1,0 +1,34 @@
+{
+  "name": "agentkeychain-cloud-auth-trust",
+  "main": "../../auth-trust-worker/index.ts",
+  "compatibility_date": "2026-07-16",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {
+    "enabled": false
+  },
+  "d1_databases": [
+    {
+      "binding": "AUTH",
+      "database_name": "agentkeychain-cloud-auth",
+      "database_id": "REPLACE_ME_AUTH_D1_ID",
+      "migrations_dir": "../../auth-trust-worker/migrations"
+    }
+  ],
+  "send_email": [
+    {
+      "name": "EMAIL"
+    }
+  ],
+  "vars": {
+    "EMAIL_FROM": "verify@agentkeychain.soupsam.com"
+  },
+  "triggers": {
+    "crons": [
+      "17 * * * *"
+    ]
+  }
+}

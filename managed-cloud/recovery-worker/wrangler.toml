@@ -1,23 +1,47 @@
-name = "agentkeychain-managed-custodian"
-main = "index.ts"
+# Local-only manifest. Deployment uses provisioning/render.mjs with actual resource IDs and public pins.
+name = "agentkeychain-cloud-custodian"
 compatibility_date = "2026-07-16"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 preview_urls = false
+main = "index.ts"
+
+[observability]
+enabled = false
 
 [[d1_databases]]
 binding = "CUSTODIAN"
-database_name = "managed-custodian-local"
+database_name = "agentkeychain-cloud-custodian"
 database_id = "00000000-0000-0000-0000-000000000002"
 migrations_dir = "migrations"
 remote = false
 
 [[services]]
 binding = "RECOVERY_AUTH"
-service = "agentkeychain-custody-recovery"
+service = "agentkeychain-cloud-custody-trust"
 entrypoint = "RecoveryAuthority"
 
 [[services]]
 binding = "RECOVERY_KEYS"
-service = "agentkeychain-custody-recovery"
+service = "agentkeychain-cloud-custody-trust"
 entrypoint = "RecoveryKeys"
+
+[[services]]
+binding = "RECOVERY_RELEASE_SIGNER"
+service = "agentkeychain-cloud-custody-trust"
+entrypoint = "RecoveryReleaseSigner"
+
+[[services]]
+binding = "ROSTER_WITNESS_SIGNER"
+service = "agentkeychain-cloud-custody-trust"
+entrypoint = "RosterWitnessSigner"
+
+[[services]]
+binding = "RECOVERY_TRUST_SIGNER"
+service = "agentkeychain-cloud-custody-trust"
+entrypoint = "RecoveryTrustSigner"
+
+[[services]]
+binding = "RECOVERY_TRUST_POLICY"
+service = "agentkeychain-cloud-custody-trust"
+entrypoint = "RecoveryTrustPolicy"

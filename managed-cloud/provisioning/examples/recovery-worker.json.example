@@ -1,0 +1,53 @@
+{
+  "name": "agentkeychain-cloud-custodian",
+  "main": "../../recovery-worker/index.ts",
+  "compatibility_date": "2026-07-16",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {
+    "enabled": false
+  },
+  "d1_databases": [
+    {
+      "binding": "CUSTODIAN",
+      "database_name": "agentkeychain-cloud-custodian",
+      "database_id": "REPLACE_ME_CUSTODIAN_D1_ID",
+      "migrations_dir": "../../recovery-worker/migrations"
+    }
+  ],
+  "services": [
+    {
+      "binding": "RECOVERY_AUTH",
+      "service": "agentkeychain-cloud-custody-trust",
+      "entrypoint": "RecoveryAuthority"
+    },
+    {
+      "binding": "RECOVERY_KEYS",
+      "service": "agentkeychain-cloud-custody-trust",
+      "entrypoint": "RecoveryKeys"
+    },
+    {
+      "binding": "RECOVERY_RELEASE_SIGNER",
+      "service": "agentkeychain-cloud-custody-trust",
+      "entrypoint": "RecoveryReleaseSigner"
+    },
+    {
+      "binding": "ROSTER_WITNESS_SIGNER",
+      "service": "agentkeychain-cloud-custody-trust",
+      "entrypoint": "RosterWitnessSigner"
+    },
+    {
+      "binding": "RECOVERY_TRUST_SIGNER",
+      "service": "agentkeychain-cloud-custody-trust",
+      "entrypoint": "RecoveryTrustSigner"
+    },
+    {
+      "binding": "RECOVERY_TRUST_POLICY",
+      "service": "agentkeychain-cloud-custody-trust",
+      "entrypoint": "RecoveryTrustPolicy"
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import {normalizedEmail,type EmailPurpose} from '../shared/email-proof.ts';
 import { webRepository } from './web-repository.ts';
 import { publicRecovery, type RestrictedSession } from './public-recovery.ts';
 import { invitationDetail } from './invitations.ts';
@@ -18,7 +19,8 @@ export interface BrowserConfig extends WebAuthnPolicy {
     emailKey: CryptoKey;
     lookupKey: CryptoKey;
     /** Trusted local/service-bound verifier; never an HTTP endpoint from user input. */
-    verifyEmail(email: string, proof: string): Promise<boolean>;
+    verifyEmail(email: string, proof: string, purpose?:EmailPurpose, contextDigest?:string): Promise<boolean>;
+    requestEmail?(email:string,purpose:EmailPurpose,contextDigest:string):Promise<{accepted:boolean;retryAfter:number}>;
     /** Service binding must authenticate its source metadata. No header fallback. */
     trustedSource: (request: Request) => Promise<string>;
 }
@@ -42,11 +44,8 @@ const text = new TextEncoder();
 const unauthorized = () => new ApiError('unauthorized');
 async function mac(key: CryptoKey, value: string) { return encode(new Uint8Array(await crypto.subtle.sign('HMAC', key, text.encode(value)))); }
 export async function emailLookup(config: BrowserConfig, email: string) { return mac(config.lookupKey, 'email\0' + normalizeEmail(email)); }
-function normalizeEmail(value: unknown): string {
-    if (typeof value !== 'string' || value.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value))
-        throw unauthorized();
-    return value.toLowerCase();
-}
+function normalizeEmail(value:unknown){try{return normalizedEmail(value);}catch{throw unauthorized();}}
+
 function field(body: Record<string, unknown>, name: string, max = 2048): string {
     const value = body[name];
     if (typeof value !== 'string' || !value.length || value.length > max)
@@ -88,7 +87,7 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
             const url = new URL(request.url), route = url.pathname.replace('/v1/auth/', '');
             if (url.search || url.origin !== config.origin)
                 throw unauthorized();
-            const routes = ['web/query', 'web/pairing', 'web/execute', 'web/options', 'web/verify', 'bootstrap', 'session', 'invitation/detail', 'invitation/verify', 'registration/options', 'registration/verify', 'authentication/options', 'authentication/verify', 'step-up/options', 'step-up/verify', 'logout', 'session/refresh', 'devices/pending', 'devices/approve', 'devices/deny', 'devices/list', 'devices/revoke', 'devices/verification', 'approvals/list', 'approvals/pending', 'approvals/recent', 'approvals/detail', 'approvals/approve', 'approvals/deny', 'approvals/cancel', 'activity/list', 'activity/detail', 'recovery/verify', 'recovery/status', 'recovery/start', 'recovery/cancel'];
+            const routes = ['email/request', 'web/query', 'web/pairing', 'web/execute', 'web/options', 'web/verify', 'bootstrap', 'session', 'invitation/detail', 'invitation/verify', 'registration/options', 'registration/verify', 'authentication/options', 'authentication/verify', 'step-up/options', 'step-up/verify', 'logout', 'session/refresh', 'devices/pending', 'devices/approve', 'devices/deny', 'devices/list', 'devices/revoke', 'devices/verification', 'approvals/list', 'approvals/pending', 'approvals/recent', 'approvals/detail', 'approvals/approve', 'approvals/deny', 'approvals/cancel', 'activity/list', 'activity/detail', 'recovery/verify', 'recovery/status', 'recovery/start', 'recovery/cancel'];
             if (!routes.includes(route))
                 throw new ApiError('not_found');
             if (route === 'bootstrap') {
@@ -170,6 +169,18 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
                 if (!await repo.rate('identity', identity, 30))
                     throw new AuthRateError();
             };
+            if(route==='email/request'){
+                exact(body,['email','purpose','context']);
+                if(restricted||!config.requestEmail)return unavailable();
+                const email=normalizeEmail(body.email);
+                if(body.purpose!=='invitation'&&body.purpose!=='recovery')throw unauthorized();
+                const context=field(body,'context');
+                if(body.purpose==='recovery'&&!/^[A-Za-z0-9_-]{43}$/.test(context))throw unauthorized();
+                await rateIdentity(await emailLookup(config,email));
+                // No account/invitation lookup: identical work for existing and absent identities.
+                await config.requestEmail(email,body.purpose,await digest(context));
+                return response({accepted:true,retryAfter:60});
+            }
             if (route.startsWith('web/')) {
                 if (!session) throw unauthorized();
                 await rateIdentity(accountIdentity!);
@@ -261,7 +272,7 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
                 // Both paths always run and settle, even on binding exceptions.
                 const [eligible, verified] = await Promise.allSettled([
                     repo.invitation(invite, identity),
-                    Promise.resolve().then(() => config.verifyEmail(email, proof)),
+                    Promise.resolve().then(() => config.verifyEmail(email, proof, 'invitation', invite)),
                 ]);
                 if (eligible.status !== 'fulfilled' || verified.status !== 'fulfilled' || eligible.value !== true || verified.value !== true)
                     throw unauthorized();

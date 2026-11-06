@@ -1,0 +1,207 @@
+{
+  "date": "2026-11-06",
+  "baseCommit": "afc0186fd768b483f8bf11d977f828ef724fc3cb",
+  "branch": "feat/managed-cloud-v0.7",
+  "cleanStart": true,
+  "committed": false,
+  "deployed": false,
+  "realCredentialsUsed": false,
+  "realEmailSent": false,
+  "cloudflareAccountAccessed": false,
+  "browserAcceptance": "Not run: built-in Codex Chrome interface unavailable; no external Chrome or Hermes adapter used.",
+  "tests": {
+    "root": {
+      "passed": 190,
+      "assertions": 1804,
+      "files": 46,
+      "compiledProcess": "passed inside root suite"
+    },
+    "backend": {
+      "passed": 316,
+      "files": 11,
+      "baselinePreserved": 291
+    },
+    "web": {
+      "passed": 95,
+      "files": 4,
+      "baselinePreserved": 93
+    },
+    "finalFocusedAuth": {
+      "passed": 147,
+      "files": 2
+    },
+    "compiledRecovery": {
+      "passedScenarios": 52,
+      "mainMatrix": 49,
+      "additional": [
+        "expire-before-activation",
+        "expire-after-activation",
+        "reject:live-epoch"
+      ]
+    },
+    "recoveryResources": {
+      "passed": 8,
+      "undisposedWarnings": 0
+    },
+    "provisioning": {
+      "workerConfigurations": 5,
+      "databases": 3,
+      "negativeCases": 8
+    },
+    "generatedBundle": "passed",
+    "productionSupportBundle": "passed",
+    "finalFocusedSourceRedaction": {
+      "passed": 8,
+      "files": 1
+    }
+  },
+  "audits": {
+    "rootBunAdvisories": 0,
+    "managedBunAdvisories": 0,
+    "managedNpmFullVulnerabilities": 0,
+    "managedNpmRuntimeVulnerabilities": 0
+  },
+  "checks": {
+    "lint": "passed",
+    "rootTypecheck": "passed",
+    "backendTypecheck": "passed",
+    "webTypecheck": "passed",
+    "clientNativeBuild": "passed",
+    "fiveWorkerBuild": "passed",
+    "webBuild": "passed",
+    "diffCheck": "passed",
+    "crossOperatorAuthorityOwnership": "passed in exported releaseManifest API and Custody runtime; negative API/Custody role-swap tests passed",
+    "auditSelfHash": "intentionally excluded; Git commit and external review bind this audit file"
+  },
+  "commands": [
+    "bun run lint",
+    "bun run typecheck",
+    "bun test",
+    "bun run build",
+    "npm test --prefix managed-cloud",
+    "npm run typecheck --prefix managed-cloud",
+    "npm test --prefix managed-cloud/web",
+    "npm run typecheck --prefix managed-cloud/web",
+    "npm run test:bundle --prefix managed-cloud",
+    "npm run test:support-bundle --prefix managed-cloud",
+    "npm run test:recovery-process --prefix managed-cloud",
+    "npm run test:recovery-resources --prefix managed-cloud",
+    "npm test --prefix managed-cloud -- --run tests/auth-trust.spec.ts tests/browser-auth.spec.ts",
+    "bun audit --json",
+    "cd managed-cloud && bun audit --json",
+    "cd managed-cloud && npm audit --json --registry=https://registry.npmjs.org",
+    "cd managed-cloud && npm audit --omit=dev --json --registry=https://registry.npmjs.org",
+    "git diff --check",
+    "npm test --prefix managed-cloud -- --run tests/auth-trust.spec.ts"
+  ],
+  "productionSupportCoverage": [
+    "Actual five production bundles with manifest-derived names, flags, services and three D1 databases",
+    "In-memory synthetic EMAIL provider; recipient inspection returns masked metadata only",
+    "Invitation request, verification and replay denial",
+    "Decoy and eligible recovery request/verification; eligible start through production AccountAttester",
+    "Private HTTP endpoints and no helper RPC exposure",
+    "Independent evidence authorization and exact package/target-bound rewrap on both operators",
+    "Revoked confirmer and cancelled saga prevent rewrap",
+    "Signer metadata, canonical domain rejection, retained verification/decryption keys",
+    "Context-bound short-code replay ledger",
+    "Generic source/identity rates and cooldown behavior",
+    "Authority ownership: checkpoint/API release pins require API inventory; witness/recovery authority/Custody release pins require Custody inventory, including retained keys."
+  ],
+  "externalGates": [
+    "Actual Cloudflare resources and IDs",
+    "Separate operator ownership, permissions and reviewed trust metadata",
+    "AgentKeychain-managed key generation and secret installation",
+    "Actual public pin collection, release root signing and approved release build",
+    "EMAIL provider sender verification and real recipient delivery",
+    "Remote D1 migrations and DNS/custom domains",
+    "Real Passkey and delayed recovery staging rehearsal",
+    "Codex Chrome visual, keyboard and accessibility acceptance",
+    "Explicit deployment/release approval"
+  ],
+  "changedSourceSha256": {
+    ".gitignore": "66de9aeb8b9aa8db91af8284009897eb2e09d452ab61ecdaca4da0038c941286",
+    "README.md": "f69b1e51e8b24be19110be336eb12470cf29c3a2040fdf5f4c421c32016fa85b",
+    "README.zh-CN.md": "c797bfdf59132744af52a1a91a9dfba7808dad9245a0ac92a54ae846e2532260",
+    "docs/AI_INSTALL.md": "6cf5051db0428ce23da54f8b04e56a52307669da2937a4f3cab7ab184b2e954d",
+    "docs/AI_INSTALL.zh-CN.md": "cb73b4829a58fce53e52370c4581729b75c86fe7ba40b00de474e2eb99ac3010",
+    "docs/MANAGED_CLOUD_SUPPORT_WORKERS.md": "2fd2a13947776349be241ec5938de4cf7aed16fdfe2696649062106deef50b48",
+    "docs/MANAGED_CLOUD_SUPPORT_WORKERS.zh-CN.md": "6f03e54cb0ff304c9daee26b8e79a7249c30ba7fd1551e9b5863b29d6d4eed67",
+    "docs/SYNC_GUIDE.md": "0e96ada72a4ac1c83ab4aa3bc5c99b8c7f7d171e5ddc3b39a12d699d566a108d",
+    "managed-cloud/README.md": "6aa22392c3895b7cd207b7a203c3651b19f4a768778fcf234e25883ae88d83ee",
+    "managed-cloud/api-trust-worker/index.ts": "cf668f304606aa2c118dc507327581b6e7c6275b477e2ffa66419f3cff15a306",
+    "managed-cloud/api-trust-worker/wrangler.toml": "a3d6bdee9a31cc92230881b67044ed6a814fce0dd08161a3ff823cb4796b58a1",
+    "managed-cloud/api-worker/audit-repository.ts": "b32a9f91d50fa629146abc371fa1b68d445706fe07542eb38a6cf7b3a55ac35b",
+    "managed-cloud/api-worker/browser-auth.ts": "7a5c758da8fcbc54edd3c0841bec40babd696b3246cca2bcd6e147f84a5c9052",
+    "managed-cloud/api-worker/browser-bindings.ts": "1d89ccc2f8046b464c2cbdd344c3b7c4a4b62a4b5e1a09a84766f399e9480ccb",
+    "managed-cloud/api-worker/migrations/0023_operator_trust.sql": "db22b3233e11c033a9b25935d1e88f14f34774eaf04a0678a770dc6816b9594b",
+    "managed-cloud/api-worker/public-recovery.ts": "6e6202810ec78429d0e3813f90da1c7177500daffcde585bf63fbdbd2cc916d5",
+    "managed-cloud/api-worker/wrangler.toml": "b215ba5f24281a4f50613267ca07790ba2fd08c77cdf556773bc626e28132038",
+    "managed-cloud/auth-trust-worker/index.ts": "3f6e9e8f21c887945cb9aeead7c916ba499bcc628cd6650141e7e68729b0c0af",
+    "managed-cloud/auth-trust-worker/migrations/0001_email.sql": "c01d5c983b1276f0b53a33750a7414298d5c6b27b32fa02911df350d2956f404",
+    "managed-cloud/auth-trust-worker/service.ts": "d1c20d62a171e89c55517f00c48864c4a6b52aeeca0342ef3cff75d80d2b9ec9",
+    "managed-cloud/auth-trust-worker/wrangler.toml": "ee79498991901f3726d76e3fb4cb0d8230b5a8fc604cccf526c2851417bc45ea",
+    "managed-cloud/build.mjs": "fa03d6b50d6779a7bec2e940fe9da971491d4a0246233122d8c237b3d75febd6",
+    "managed-cloud/custody-trust-worker/index.ts": "8e0396b2a6f924d7e739b28a7228580d92b378f899eecc80774b7553be274193",
+    "managed-cloud/custody-trust-worker/wrangler.toml": "c2e508b380b67eb0776571c9b0f916c39999e4030824281b4ac03f5e203479f9",
+    "managed-cloud/package.json": "005a0377d8b24d1d0ac96d375f3134bab0e8601828799f9da0b4578aac216b61",
+    "managed-cloud/provisioning/examples/api-trust-worker.json.example": "c65eaabf95f7a529c2869637e0636cfc439f6812007460b3eb01ee09abd83cff",
+    "managed-cloud/provisioning/examples/api-worker.json.example": "351b561cd88f5e8a98209af88f7854ad01ec9d92f9a85cbdff37f43258fea16e",
+    "managed-cloud/provisioning/examples/auth-trust-worker.json.example": "8e59c3952d9cb6e34d605cf89a36e2a161537ab604186a7e16354c32b3636302",
+    "managed-cloud/provisioning/examples/custody-trust-worker.json.example": "6c1d156b1af8e6e3b030384f1143eb8755c32b3ec5a9c177c91f0a6ffd4d9b44",
+    "managed-cloud/provisioning/examples/recovery-worker.json.example": "1d5ee13cceacef674c2eee7f78bddc32a492a3815e5da744827cce68350cb78c",
+    "managed-cloud/provisioning/plan.json": "976b84205807f0b92454ba2ac73d8119ff0a00498dbad2ca5afa47b993dff338",
+    "managed-cloud/provisioning/render.mjs": "7e13d4bc9e5338f540c398b75ba383fae4b77c3aa489dfbacfbae398ae64c457",
+    "managed-cloud/recovery-worker/migrations/0008_operator_trust.sql": "db22b3233e11c033a9b25935d1e88f14f34774eaf04a0678a770dc6816b9594b",
+    "managed-cloud/recovery-worker/wrangler.toml": "30bb083a29a4678305461ebebf2a30fc70c5ba82b775ebfffadc9acf6b8aff96",
+    "managed-cloud/shared/checkpoints.ts": "742303f40a4cdbbd871ee12a043d05e38d031c003e59d748e544e3cc225d33b3",
+    "managed-cloud/shared/email-proof.ts": "826e5e17055b080da9c2f61fb2d4309bf561116eaf44d42cf330d01dd7504ba5",
+    "managed-cloud/shared/trust-runtime.ts": "2c441690946792de2da7a1b37d54dfa075778f827bb980bbb63bfd826a797b1f",
+    "managed-cloud/shared/trust-support.ts": "d4090d9e4deb4e49be35fba569139003332ad4e0b5d31b3047dc6eca44381a25",
+    "managed-cloud/tests/audit.spec.ts": "9665cada27dc6bd17bacf1162cbc13e8d25d47a824ca1cd5baebd7e25579467d",
+    "managed-cloud/tests/auth-trust.spec.ts": "3ebf257a9d0d6b01e234cb2d6cbed4fde429e0d50c443660371d5f41b8850cc0",
+    "managed-cloud/tests/browser-auth.spec.ts": "0a65715a7ca41bd589ffda6546e3fce05039a27748ec463ff6a218542de3074c",
+    "managed-cloud/tests/generated-bundle.mjs": "191735d2dcdf02564a0f9e1cec46e05d7bffd590247678f8770ee06aa6c67a90",
+    "managed-cloud/tests/provisioning.mjs": "0e63036e1a84fb9b35672f2bdc88fa415a5dd848e982da272c74d707b62c8f3d",
+    "managed-cloud/tests/recovery-process.mjs": "e8f66d93097b74c94cc23260c700faddeb5b612426872153ca98d0abdd29e059",
+    "managed-cloud/tests/support-bundle.mjs": "ec0dda676b6e87a92f9a451be85e2688a07ec4f702777255329dd4409acc53f5",
+    "managed-cloud/tests/synthetic-checkpoint.ts": "a30859192bcfe140d7080dc82fd7ff67421d29c44b1145cdbf2dd4da6512decb",
+    "managed-cloud/tests/trust-support.spec.ts": "47e24f0466023dc459a83ac94f7e2de920bb2e42de3655c523054b4c3f2962e1",
+    "managed-cloud/tsconfig.json": "864db8be8ca0554e24b68825ff00019f323bfe6b492ad863551b0ff251776070",
+    "managed-cloud/vitest.config.ts": "f9f35d2c547f7dead63eba84da397546f4e4366cec30e34bd7a8c786315470ac",
+    "managed-cloud/web/src/App.tsx": "8143d38dcbaad73a5a118f29f788d1f9ff2512fde0c2bb1fef774808c91a0efe",
+    "managed-cloud/web/src/SendCode.tsx": "818d0ea0fb79102cebaaf06da143ae9f842d185f8f21d52900d98619cf7484f8",
+    "managed-cloud/web/src/api.ts": "44c86b303052465401ec54024d8cbdb0f4ef2b674c156e86214c3bad3de747de",
+    "managed-cloud/web/src/i18n.ts": "829ec3d1b5059d8abed538f7bfff40a5d710f29497f9c8e8887d7110a4be78dd",
+    "managed-cloud/web/tests/send-code.test.tsx": "56b7e45c0120b6537949490d9738a4ac895a6133a36f36be87d6059c1cfbb6d2"
+  },
+  "buildArtifacts": {
+    "managed-cloud/dist/api-trust-worker/index.js": {
+      "bytes": 39006,
+      "sha256": "5a43c9278be921e9f52c0516403fbf769c89189f86e0eb9662646acfea1373ff"
+    },
+    "managed-cloud/dist/api-worker/index.js": {
+      "bytes": 868979,
+      "sha256": "530dd8ac00eadba7b40c9cf72c6dbc46f2f92df71a521f9945db251f12051a6e"
+    },
+    "managed-cloud/dist/auth-trust-worker/index.js": {
+      "bytes": 7325,
+      "sha256": "40caac84f535d02ff1ee05b16e1428c16a31633cf8cd601eb7d6b8fb60c7fdce"
+    },
+    "managed-cloud/dist/custody-trust-worker/index.js": {
+      "bytes": 40506,
+      "sha256": "10372bf209d89994a6a58f3173010feeb2da25707a6df87e0ec001b0de706fd6"
+    },
+    "managed-cloud/dist/recovery-worker/index.js": {
+      "bytes": 49833,
+      "sha256": "6e55fdd12e965f4997030a486af28f2567d9ed3f2de30e82b18b1b2ee4c6828b"
+    },
+    "managed-cloud/web/dist/assets/index-DZcUsnct.js": {
+      "bytes": 341041,
+      "sha256": "ea58d36117646b93490837bd1f6386845135398c8f02b042763a490ba9afd53e"
+    },
+    "managed-cloud/web/dist/assets/index-Dg37gyng.css": {
+      "bytes": 6011,
+      "sha256": "101b9e6dd94291fb7fb089d26cce15a4e366f1cb46dbccee62c426db22650d9a"
+    }
+  }
+}

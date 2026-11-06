@@ -748,3 +748,7 @@ independent provisioning; upgrade anchors retain the migration runbook boundary.
 Final gates and exact source/artifact evidence: [last final review](../docs/LAST_FINAL_REVIEW.md).
 
 Recovery delivery uses the latest independently witnessed roster anchor and, when needed, its recovery-authority successor. It does not seal full roster history; existing local anchor checks still fail closed if their bridge is unavailable.
+
+## Production support and staging artifacts
+
+Auth Trust, API Trust and Custody Trust now implement private production bindings. Context-bound email codes, the bilingual send-code UI, rotation keyrings and ignored deployment-manifest generation are covered by `npm run test:support-bundle`. Read [operator contracts and external gates](../docs/MANAGED_CLOUD_SUPPORT_WORKERS.md) before provisioning; no deployment has occurred. Historical phase notes above describe their original acceptance scope.

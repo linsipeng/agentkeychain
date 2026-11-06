@@ -46,7 +46,7 @@ export function publicRecovery(db: D1Database, config: BrowserConfig) {
                     tenant_id: string;
                     vault_id: string;
                 }>(),
-                Promise.resolve().then(() => config.verifyEmail((body.email as string).toLowerCase(), body.proof as string)),
+                Promise.resolve().then(async () => config.verifyEmail((body.email as string).toLowerCase(), body.proof as string, 'recovery', await digest(body.requestRef as string))),
             ]);
             const a = account.status === 'fulfilled' && account.value.results.length === 1 && proof.status === 'fulfilled' && proof.value === true ? account.value.results[0] : undefined;
             const token = 'r.' + random(), csrf = random(), expires = Math.floor(Date.now() / 1000) + 600;
@@ -54,7 +54,7 @@ export function publicRecovery(db: D1Database, config: BrowserConfig) {
             // No account existence signal changes the response or database statement count.
             await db.batch([
                 db.prepare('INSERT INTO consumed_bootstraps VALUES(?,?)').bind(bootstrap, bootstrapExpires),
-                db.prepare('INSERT INTO recovery_sessions(digest,csrf_digest,bootstrap_digest,proof_digest,account_id,tenant_id,vault_id,case_id,request_digest,target,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(await digest(token), await digest(csrf), bootstrap, await digest('recovery-email-proof\0' + lookup + '\0' + body.proof), a?.account_id ?? null, a?.tenant_id ?? null, a?.vault_id ?? null, t.id, await recoveryAction('start', JSON.stringify(t)), JSON.stringify(t), expires),
+                db.prepare('INSERT INTO recovery_sessions(digest,csrf_digest,bootstrap_digest,proof_digest,account_id,tenant_id,vault_id,case_id,request_digest,target,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').bind(await digest(token), await digest(csrf), bootstrap, await digest('recovery-email-proof-v2\0' + lookup + '\0' + body.requestRef + '\0' + body.proof), a?.account_id ?? null, a?.tenant_id ?? null, a?.vault_id ?? null, t.id, await recoveryAction('start', JSON.stringify(t)), JSON.stringify(t), expires),
             ]);
             return { token, csrf };
         },

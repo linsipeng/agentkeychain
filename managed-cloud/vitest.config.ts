@@ -11,6 +11,7 @@ await build({entryPoints:['tests/synthetic-recovery.ts'],outfile:'dist/test-reco
 export default defineConfig({
     test: {
         projects: [
+            {test:{name:'auth-trust',include:['tests/auth-trust.spec.ts','tests/trust-support.spec.ts']},plugins:[cloudflareTest({remoteBindings:false,miniflare:{compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat'],d1Databases:{AUTH:'auth-db'},bindings:{AUTH_MIGRATIONS:await readD1Migrations('auth-trust-worker/migrations')}}})]},
             {
                 test: { name: 'api', include: ['tests/foundation.spec.ts', 'tests/transaction.spec.ts', 'tests/browser-auth.spec.ts', 'tests/device-control.spec.ts', 'tests/checkpoints.spec.ts', 'tests/approvals.spec.ts', 'tests/audit.spec.ts', 'tests/recovery.spec.ts'] },
                 plugins: [cloudflareTest({

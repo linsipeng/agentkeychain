@@ -3,6 +3,7 @@ import { WorkerEntrypoint } from 'cloudflare:workers';
 import { syntheticSigner } from './synthetic-signer.ts';
 const signer = syntheticSigner();
 export class CheckpointSigner extends WorkerEntrypoint {
+    async publicKeys(){return [await this.key()];}
     async key() { return (await signer).key(); }
     async sign(canonical: string) { return (await signer).sign(canonical); }
 }

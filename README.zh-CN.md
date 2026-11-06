@@ -316,3 +316,5 @@ Phase 2A 新增独立的 `managed-cloud/` Workers/D1 本地可测后端，包含
 最终本地安全修复及升级语义：[修复记录](docs/FINAL_SECURITY_REPAIR.md)、[迁移与回滚手册](docs/SECURITY_REPAIR_MIGRATION_RUNBOOK.md)。本地验收不代表获准发布或部署。
 
 精确激活版本绑定、最后设备保护及增量独立见证的最新契约与证据：[最终复审记录](docs/LAST_FINAL_REVIEW.md)。
+
+开发分支现已提供私有生产支持 Worker、绑定上下文的邮件验证码及缺失配置即拒绝的 staging 清单生成器；尚未部署或配置真实资源。详见[支持 Worker 与上线门禁](docs/MANAGED_CLOUD_SUPPORT_WORKERS.zh-CN.md)。

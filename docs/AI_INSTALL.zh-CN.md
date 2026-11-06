@@ -81,3 +81,5 @@ Phase 2A 已新增独立的 Workers/D1 本地可测后端；它不改变安装�
 验收快速、延迟和崩溃/替换路径。详见[恢复证据](LOCAL_RECOVERY_ACTIVATION.md)。
 
 最终开发分支安全契约及迁移语义见 [FINAL_SECURITY_REPAIR.md](FINAL_SECURITY_REPAIR.md)。公开固定安装版本未变；部署与原生平台验收仍是独立门槛。
+
+私有支持 Worker 和 staging 配置仅为开发成果，不改变固定版本安装流程。详见[运行说明与外部门禁](MANAGED_CLOUD_SUPPORT_WORKERS.zh-CN.md)。
