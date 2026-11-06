@@ -11,10 +11,17 @@
     "dev": "bun run src/cli/index.ts",
     "test": "bun test",
     "lint": "eslint src tests managed-cloud",
-    "build": "bun build src/cli/index.ts --compile --outfile bin/agentkeychain-bin",
+    "build": "bun build src/cli/index.ts --compile --outfile bin/agentkeychain-bin && bun scripts/build-native.ts bin/agentkeychain-secure-store",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["agent", "credentials", "vault", "mcp", "zero-knowledge", "e2ee"],
+  "keywords": [
+    "agent",
+    "credentials",
+    "vault",
+    "mcp",
+    "zero-knowledge",
+    "e2ee"
+  ],
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",

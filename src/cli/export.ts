@@ -1,3 +1,4 @@
+import {assertManagedPlatform} from '../platform/managed-support.ts';
 /**
  * `agentkeychain export` — export the vault to an encrypted bundle file.
  *
@@ -24,7 +25,8 @@ function parseArgs(argv: string[]): { out: string | null } {
   return { out };
 }
 
-export async function runExport(argv: string[]): Promise<number> {
+export async function runExport(argv: string[],platform:string=process.platform): Promise<number> {
+  assertManagedPlatform(platform);
   const { out } = parseArgs(argv);
 
   if (!vaultExists()) {

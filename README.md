@@ -101,9 +101,9 @@ contracts. Restricted public recovery starts only a target-device-signed request
 all recovery material, decryption and activation stay on target-device endpoints.
 Device update status uses authenticated pull time and device-reported processed
 history; it is not proof of local persistence.
-There is no deployed cloud or persistent local sync queue. Existing v0.6.2 local Vault behavior remains unchanged;
+There is no deployed cloud. This branch now includes an encrypted persistent client queue and tested compiled-client sync. Existing v0.6.2 local Vault behavior remains unchanged;
 existing CLI/MCP secret reads still return plaintext to their trusted local caller.
-The new approval contract does not retrofit existing CLI/MCP actions.
+Managed enrollment enables local mutation guards; raw CLI/MCP reads still return plaintext to trusted callers.
 
 `agentkeychain sync status` reports safe compatibility status locally. Legacy
 `init/connect/push/pull/disconnect` sync commands are disabled; existing configuration
@@ -114,8 +114,7 @@ The separate `managed-cloud/` workspace now also includes locally tested Phase 2
 Workers and the Phase 3 bilingual Web control center: invitation-only Passkeys,
 scoped device/request/activity views and restricted account recovery. This is
 uncommitted local implementation evidence, not a deployed service or a change to
-the installed v0.6.2 CLI. Native browser acceptance and Phase 4 local-client
-integration remain separate gates. See [Phase 3 evidence](./docs/MANAGED_CLOUD_PHASE3_EVIDENCE.md).
+the installed v0.6.2 CLI. Native browser acceptance and production provisioning remain separate gates. See [Phase 3 evidence](./docs/MANAGED_CLOUD_PHASE3_EVIDENCE.md).
 
 ### Moving to a new Mac (or a second machine)
 
@@ -306,10 +305,32 @@ OS keychain and default production vault, custom vaults use path-scoped keychain
 entries, and `setup` verifies a password before any overwrite. Breaking changes
 remain possible before v1.0.
 
-Managed Cloud Slice 1 validates pulls and restart history against device keys pinned
-through a separate trusted enrollment input, with replay and deletion barriers.
-Snapshots retain full signed history; storage and rollback protection are not yet
-implemented. Production approval consumption and version acceptance must share a
-single durable transaction; the memory-only service is not a production adapter.
+Phase 4/5 now includes verified release manifests, target-sealed enrollment trust,
+native/private-pipe secure storage, encrypted SQLite state, atomic queue/apply,
+proof-bound HTTP sync, daemon/IPC, CLI/MCP controls and compiled-client process tests.
+An unprovisioned build reports `cloud_unavailable_not_provisioned`; ordinary flags
+and environment cannot choose an origin or pins. No production domain/key is invented.
+Managed export now requires a signed, exact one-use cloud approval before decrypting
+or writing the encrypted bundle. Use `cloud request-export <path>`, approve in the
+account, then `export --out <path>`; `--yes` cannot bypass this boundary.
+`cloud reconcile` lists older-client edits; `cloud reconcile <name>` stages their
+exact approval. Issuer delivery retains sealed bytes and local phrase confirmation
+across restart. The final local interruption/concurrency, protected enrollment-anchor
+recovery and directory-relative export matrices pass; remaining gates are external
+provisioning, native-platform/browser acceptance and release/deployment. See
+[local implementation evidence](./docs/MANAGED_CLOUD_PHASE4_BLOCKERS.md).
 
 Phase 2A adds an independent, locally tested Workers/D1 backend under `managed-cloud/`, with atomic device-authenticated sync and a private recovery skeleton. Phase 2B adds locally tested invitation-only Passkey accounts, browser sessions, CSRF and action-bound step-up. Review repairs require discoverable credentials and trusted source bindings, add bounded retention, and verify the generated Worker bundle locally; Phase 2C now adds local-testable trusted enrollment, 15-minute proof-bound device sessions, immutable encrypted key packages and atomic signed sync checkpoints. Phase 2D adds exact one-use approval APIs, account-scoped signed/redacted activity with opaque event IDs and a locally tested two-Worker/two-D1 recovery saga with target-key proof, durable activation intent and independently signed cancellation. Recovery rejects historical target identities; completion retries after activation converge without a cross-D1 atomicity claim. Phase 3 implements the local Web control center; production provisioning remains deferred. See [Phase 3 evidence and acceptance limits](./docs/MANAGED_CLOUD_PHASE3_EVIDENCE.md). See [Phase 2D implementation and limits](./docs/MANAGED_CLOUD_PHASE2D_EVIDENCE.md). See [Phase 2C contracts and evidence](./docs/MANAGED_CLOUD_PHASE2C_EVIDENCE.md). See [Phase 2B evidence and limits](./docs/MANAGED_CLOUD_PHASE2B_EVIDENCE.md). See [Phase 2A evidence](./docs/MANAGED_CLOUD_PHASE2A_EVIDENCE.md).
+
+Signed device rosters now propagate enrollment and revocation through an immutable signed chain, a separate secure-store anchor and historical checkpoint proofs. See [signed roster evidence and limits](docs/SIGNED_ROSTER.md).
+
+The development `cloud recover [packageId]` command now resumes secure-store-backed
+recovery, validates independent releases and authority-encrypted trust, and publishes
+local cloud state only after server and secure-store readback. Compiled synthetic
+recovery acceptance covers fast/delayed paths and crash/substitution cases. See [local recovery evidence](docs/LOCAL_RECOVERY_ACTIVATION.md).
+
+Final local implementation and external gates: [continuation evidence](docs/PHASE45_FINAL_CONTINUATION.md).
+
+Final local security repair and upgrade semantics: [repair record](docs/FINAL_SECURITY_REPAIR.md), [migration/rollback runbook](docs/SECURITY_REPAIR_MIGRATION_RUNBOOK.md). Local verification does not authorize release or deployment.
+
+Latest exact activation binding, last-device safety and incremental witness contracts and evidence: [last final review](docs/LAST_FINAL_REVIEW.md).

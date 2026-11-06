@@ -89,7 +89,35 @@ say "installing $BIN_NAME $VERSION ($ASSET) → $INSTALL_DIR"
 
 BASE_URL="https://github.com/$REPO/releases/download/$VERSION"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+CANDIDATE=""
+HELPER_STAGE=""
+PAIR=""
+PUBLISHING=0
+RESTART_CLOUD=0
+SUCCESS=0
+cleanup() {
+  status=$?
+  trap - EXIT
+  if [ "$SUCCESS" != 1 ] && [ "$PUBLISHING" = 1 ]; then
+    failed=0
+    for name in agentkeychain agentkeychain-secure-store; do
+      if [ -f "$PAIR/previous-$name" ]; then
+        cp "$PAIR/previous-$name" "$PAIR/restore-$name" && mv -f "$PAIR/restore-$name" "$INSTALL_DIR/$name" || failed=1
+      elif [ -f "$PAIR/absent-$name" ]; then
+        rm -f "$INSTALL_DIR/$name" || failed=1
+      fi
+    done
+    if [ "$failed" = 0 ] && [ "$RESTART_CLOUD" = 1 ]; then
+      "$INSTALL_DIR/$BIN_NAME" cloud service start || failed=1
+    fi
+    if [ "$failed" = 1 ]; then printf 'error: rollback failed; service requires repair; retained pair backup: %s\n' "$PAIR" >&2; fi
+  fi
+  rm -rf "$TMP"
+  [ -z "$CANDIDATE" ] || rm -f "$CANDIDATE"
+  [ -z "$HELPER_STAGE" ] || rm -f "$HELPER_STAGE"
+  exit "$status"
+}
+trap cleanup EXIT
 
 # ---- download + verify --------------------------------------------------------
 $FETCH_O "$TMP/$ASSET" "$BASE_URL/$ASSET" || err "download failed: $BASE_URL/$ASSET"
@@ -114,8 +142,78 @@ say "✓ checksum verified"
 
 # ---- install ------------------------------------------------------------------
 mkdir -p "$INSTALL_DIR"
-mv "$TMP/$ASSET" "$INSTALL_DIR/$BIN_NAME"
-chmod +x "$INSTALL_DIR/$BIN_NAME"
+INSTALL_DIR="$(cd "$INSTALL_DIR" && pwd -P)"
+# Stage on the destination filesystem. chmod and metadata checks happen before
+# rename, so concurrent readers observe either the old or the executable new file.
+CANDIDATE="$(mktemp "$INSTALL_DIR/.agentkeychain-install.XXXXXX")"
+cp "$TMP/$ASSET" "$CANDIDATE"
+chmod 755 "$CANDIDATE"
+COMPATIBILITY="$("$CANDIDATE" cloud compatibility --json 2>/dev/null || true)"
+if printf '%s' "$COMPATIBILITY" | grep -q '"nativeHelper":"required"'; then
+  HELPER_ASSET="agentkeychain-secure-store-${OS_TAG}-${ARCH_TAG}"
+  HELPER_EXPECTED="$(grep " $HELPER_ASSET\$" "$TMP/SHA256SUMS" | cut -d' ' -f1)"
+  [ -n "$HELPER_EXPECTED" ] || err "missing native secure-store checksum"
+  $FETCH_O "$TMP/$HELPER_ASSET" "$BASE_URL/$HELPER_ASSET" || err "native secure-store download failed"
+  if command -v shasum > /dev/null 2>&1; then
+    HELPER_ACTUAL="$(shasum -a 256 "$TMP/$HELPER_ASSET" | cut -d' ' -f1)"
+  else
+    HELPER_ACTUAL="$(sha256sum "$TMP/$HELPER_ASSET" | cut -d' ' -f1)"
+  fi
+  [ "$HELPER_ACTUAL" = "$HELPER_EXPECTED" ] || err "native secure-store checksum mismatch"
+  HELPER_STAGE="$(mktemp "$INSTALL_DIR/.agentkeychain-helper.XXXXXX")"
+  cp "$TMP/$HELPER_ASSET" "$HELPER_STAGE"
+  chmod 755 "$HELPER_STAGE"
+  HELPER_COMPATIBILITY="$("$HELPER_STAGE" --compatibility 2>/dev/null)" || err "native helper metadata probe failed"
+  for field in '"helperABI":1' '"helperVersion":"1"'; do
+    printf '%s' "$COMPATIBILITY" | grep -q "$field" || err "unsupported binary helper compatibility"
+    printf '%s' "$HELPER_COMPATIBILITY" | grep -q "$field" || err "incompatible native helper"
+  done
+fi
+# Keep the exact staged version and both previous members for recovery.
+PAIR="$(mktemp -d "$INSTALL_DIR/.agentkeychain-pair.XXXXXX")"
+printf '%s\n' "$VERSION" > "$PAIR/version"
+printf '%s\n' "$COMPATIBILITY" > "$PAIR/compatibility.json"
+cp "$CANDIDATE" "$PAIR/agentkeychain"
+[ -z "$HELPER_STAGE" ] || cp "$HELPER_STAGE" "$PAIR/agentkeychain-secure-store"
+for name in agentkeychain agentkeychain-secure-store; do
+  if [ -f "$INSTALL_DIR/$name" ]; then cp -p "$INSTALL_DIR/$name" "$PAIR/previous-$name"; else touch "$PAIR/absent-$name"; fi
+done
+if printf '%s' "$COMPATIBILITY" | grep -q '"cloudSchema":1' && [ -x "$INSTALL_DIR/$BIN_NAME" ]; then
+  CLOUD_SERVICE_STATUS="$("$INSTALL_DIR/$BIN_NAME" cloud service status --json 2>/dev/null || true)"
+  if printf '%s' "$CLOUD_SERVICE_STATUS" | grep -q '"installed":true' && printf '%s' "$CLOUD_SERVICE_STATUS" | grep -q '"running":true'; then
+    RESTART_CLOUD=1
+    PUBLISHING=1
+    "$INSTALL_DIR/$BIN_NAME" cloud service stop || err "could not stop managed background service"
+  fi
+fi
+PUBLISHING=1
+# Both facades resolve through one directory pointer. Stage the previous pair
+# first for an upgrade from flat files; the final pointer rename publishes both.
+mkdir "$PAIR/previous"
+for name in agentkeychain agentkeychain-secure-store; do
+  [ ! -f "$PAIR/previous-$name" ] || cp -p "$PAIR/previous-$name" "$PAIR/previous/$name"
+done
+ln -s "$PAIR/previous" "$PAIR/current-previous"
+if [ "$OS_TAG" = darwin ]; then mv -fh "$PAIR/current-previous" "$INSTALL_DIR/.agentkeychain-current" || err "previous pair staging failed"; else mv -fT "$PAIR/current-previous" "$INSTALL_DIR/.agentkeychain-current" || err "previous pair staging failed"; fi
+if [ -n "$HELPER_STAGE" ]; then
+  rm -f "$HELPER_STAGE"
+  ln -s .agentkeychain-current/agentkeychain-secure-store "$HELPER_STAGE"
+  mv -f "$HELPER_STAGE" "$INSTALL_DIR/agentkeychain-secure-store" || err "helper publish failed"
+  HELPER_STAGE=""
+fi
+rm -f "$CANDIDATE"
+ln -s .agentkeychain-current/agentkeychain "$CANDIDATE"
+mv -f "$CANDIDATE" "$INSTALL_DIR/$BIN_NAME" || err "binary publish failed"
+CANDIDATE=""
+ln -s "$PAIR" "$PAIR/current-next"
+# -h is needed on BSD mv to replace a directory symlink instead of following it.
+if [ "$OS_TAG" = darwin ]; then mv -fh "$PAIR/current-next" "$INSTALL_DIR/.agentkeychain-current" || err "pair publish failed";
+else mv -fT "$PAIR/current-next" "$INSTALL_DIR/.agentkeychain-current" || err "pair publish failed"; fi
+if [ "$RESTART_CLOUD" = 1 ]; then
+  "$INSTALL_DIR/$BIN_NAME" cloud service start || err "new pair restart failed; restoring previous pair"
+fi
+
+SUCCESS=1
 
 # ---- PATH check ----------------------------------------------------------------
 case ":$PATH:" in

@@ -26,7 +26,7 @@ test("setup rejects a stale keychain password and replaces it after verification
   const securityStub = `#!/bin/sh
 case "$1" in
   find-generic-password) printf '%s\\n' 'stale-keychain-password'; exit 0 ;;
-  add-generic-password) exit 0 ;;
+  store-master|add-generic-password) exit 0 ;;
 esac
 exit 1
 `;
@@ -99,7 +99,7 @@ test("setup never updates keychain when the entered password cannot unlock the v
   const securityStub = `#!/bin/sh
 case "$1" in
   find-generic-password) printf '%s\\n' 'stale-keychain-password'; exit 0 ;;
-  add-generic-password) touch '${writeMarker}'; exit 0 ;;
+  store-master|add-generic-password) touch '${writeMarker}'; exit 0 ;;
 esac
 exit 1
 `;
@@ -179,7 +179,7 @@ case "$cmd" in
   find-generic-password)
     [ "$service" = "agentkeychain.vault" ] && printf '%s\\n' 'verified-legacy-password' && exit 0
     exit 44 ;;
-  add-generic-password) printf '%s' "$service" > '${writeMarker}'; exit 0 ;;
+  store-master|add-generic-password) printf '%s' "$service" > '${writeMarker}'; exit 0 ;;
 esac
 exit 1
 `,

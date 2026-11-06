@@ -1,3 +1,5 @@
+import { coordinatorFor, guardManagedMutation } from './cloud/coordinator.ts';
+import { withCloudMutation } from './cloud/runtime.ts';
 /**
  * Secrets CRUD: store / get / list / delete.
  */
@@ -45,7 +47,7 @@ async function unlockDefaultAgent(
   return { identity, privateKey };
 }
 
-export async function storeSecret(
+async function storeSecretInner(
   db: Database,
   args: {
     name: string;
@@ -63,7 +65,11 @@ export async function storeSecret(
     .prepare(`SELECT version FROM secrets WHERE name = ?`)
     .get(args.name) as { version: number } | undefined;
 
-  if (existing) {
+  guardManagedMutation(db);
+  const managed = coordinatorFor(db);
+  if (managed) {
+    managed.mutate({name:args.name,value:args.value,scopes:args.scopes,metadata:args.metadata??null,localVersion:existing?existing.version+1:1},'put');
+  } else if (existing) {
     // NOTE: `name` is the PRIMARY KEY, so a deleted secret leaves its row in
     // place with a deleted_at tombstone. Re-storing the same name must RESURRECT
     // that row (clear the tombstone) — otherwise get/list (which filter on
@@ -212,6 +218,8 @@ export function deleteSecret(
     kek?: Uint8Array;
   }
 ): boolean {
+  guardManagedMutation(db);
+  if (coordinatorFor(db)) throw new Error('approval_required');
   const now = Date.now();
   const result = db
     .prepare(`UPDATE secrets SET deleted_at = ? WHERE name = ? AND deleted_at IS NULL`)
@@ -231,4 +239,8 @@ export function deleteSecret(
   }
 
   return result.changes > 0;
+}
+
+export async function storeSecret(db: Database,args: Parameters<typeof storeSecretInner>[1]): Promise<SecretMeta> {
+  return withCloudMutation(db,args.kek,()=>storeSecretInner(db,args));
 }

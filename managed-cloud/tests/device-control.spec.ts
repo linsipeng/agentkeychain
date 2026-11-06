@@ -105,7 +105,8 @@ test('tokens and codes are digest-only; challenges one-use; bearer alone fails; 
     expect(stored).not.toContain(d.verificationCode);
     expect(stored).not.toContain(issued.token);
     await expect(authenticate(db(), new Request(origin + '/v1/devices/key-packages', { headers: { authorization: 'Bearer ' + issued.token } }), null, '')).rejects.toThrow('unauthorized');
-    const device = (await deviceRepository(db()).list(s)).devices[0]!;
+    await enroll(s,d);
+    const device = (await deviceRepository(db()).list(s)).devices.find(row=>row.id===d.deviceId)!;
     await db().prepare('UPDATE browser_sessions SET step_up_digest=?,step_up_expires=unixepoch()+300 WHERE digest=?').bind(device.revokeActionDigest, s.digest).run();
     await deviceRepository(db()).revoke(s, d.deviceId);
     expect(await db().prepare('SELECT active FROM device_sessions').first('active')).toBe(0);
@@ -319,4 +320,110 @@ test('short pairing code and three words, existing-device confirmation stays off
     await db().prepare('UPDATE browser_sessions SET step_up_digest=?,step_up_expires=unixepoch()+300 WHERE digest=?').bind(a.action_digest,s.digest).run();
     expect(await web.execute(safe.confirmRef)).toEqual({approved:true});
     await expect(web.execute(safe.confirmRef)).rejects.toThrow();
+});
+
+test('trust delivery is target-only, issuer scoped, immutable and bound to approved grant',async()=>{
+ const s=await account(),a=await enroll(s),b=await enroll(s,a),issued=await session(a),target=await session(b);
+ const {trustRepository}=await import('../api-worker/trust-repository.ts');
+ const context=async(d:typeof a,t:typeof issued)=>{
+  const raw='{}',stamp=Math.floor(Date.now()/1000),nonce=crypto.randomUUID(),url=new URL(origin+'/v1/devices/trust-bundle');
+  const headers={authorization:'Bearer '+t.token,'x-device-nonce':nonce,'x-device-timestamp':String(stamp),'x-device-proof':await d.sign(requestProof('POST',url,await digest(raw),stamp,nonce,await digest(t.token)))};
+  return authenticate(db(),new Request(url,{method:'POST',headers,body:raw}),null,raw);
+ };
+ const repo=trustRepository(db()),sealed=btoa('opaque'.repeat(20));
+ await repo.put(await context(a,issued),b.requestId,sealed);
+ expect((await repo.own(await context(b,target))).sealed).toBe(sealed);
+ await expect(repo.own(await context(a,issued))).rejects.toThrow();
+ await expect(repo.put(await context(b,target),b.requestId,sealed)).rejects.toThrow();
+ await expect(repo.put(await context(a,issued),b.requestId,btoa('changed'.repeat(20)))).rejects.toThrow();
+});
+
+test('signed enrollment resume recovers delivered identity without reusing bearer poll or accepting another key',async()=>{
+ const s=await account(),d=await enroll(s),other=await identity();
+ await deviceRepository(db()).poll(await digest(d.deviceCode));
+ const timestamp=Math.floor(Date.now()/1000),request={requestId:d.requestId,deviceId:d.deviceId,timestamp};
+ const message=JSON.stringify(['AgentKeychain-enrollment-resume-v1',request.requestId,request.deviceId,timestamp]);
+ expect((await api('resume',{...request,signature:await other.sign(message)})).status).not.toBe(200);
+ const result=await api('resume',{...request,signature:await d.sign(message)});
+ expect(result.status).toBe(200);expect(await result.json()).toMatchObject({state:'approved',vaultId:'v',deviceId:d.deviceId,requestId:d.requestId});
+ expect((await api('resume',{...request,timestamp:timestamp-301,signature:await d.sign(message)})).status).not.toBe(200);
+ await expect(deviceRepository(db()).poll(await digest(d.deviceCode))).rejects.toThrow();
+});
+
+import {rosterRepository} from '../api-worker/roster-repository.ts';
+import {canonicalRoster,rosterDigest,ROSTER_DOMAIN,type TrustedDeviceRoster} from '../shared/roster.ts';
+async function rosterContext(d:Awaited<ReturnType<typeof authorize>>){const token=await session(d),raw='{}',nonce=crypto.randomUUID(),timestamp=Math.floor(Date.now()/1000),url=new URL(origin+'/v1/devices/roster-put');const request=new Request(url,{method:'POST',headers:{authorization:'Bearer '+token.token,'x-device-nonce':nonce,'x-device-timestamp':String(timestamp),'x-device-proof':await d.sign(requestProof('POST',url,await digest(raw),timestamp,nonce,await digest(token.token)))},body:raw});return authenticate(db(),request,null,raw);}
+async function rosterFixture(){const s=await account(),a=await enroll(s),now=Math.floor(Date.now()/1000);const r:TrustedDeviceRoster={version:1,accountId:'a',tenantId:'t',vaultId:'v',revision:1,previousDigest:null,keyEpoch:1,active:[{deviceId:a.deviceId,signingKey:a.signingKey,wrappingKey:a.wrappingKey}],revoked:[],issuer:{kind:'device',id:a.deviceId},issuedAt:now,expiresAt:now+86400,checkpointKeys:[{keyId:'cp',publicKey:a.signingKey}],recoveryAuthorities:[],recovery:null};const sign=async(v:TrustedDeviceRoster)=>{const canonical=canonicalRoster(v);return {canonical,signature:await a.sign(ROSTER_DOMAIN+canonical)};};return {s,a,r,sign,repo:rosterRepository(db())};}
+test('signed roster immutable storage, exact retry, conflicting revision and browser metadata only',async()=>{
+ const {s,a,r,sign,repo}=await rosterFixture(),one=await sign(r);await repo.put(await rosterContext(a),one);await repo.put(await rosterContext(a),one);
+ expect((await db().prepare('SELECT count(*) n FROM signed_rosters').first<number>('n'))).toBe(1);
+ await expect(repo.put(await rosterContext(a),await sign({...r,expiresAt:r.expiresAt+1}))).rejects.toThrow('idempotency_conflict');
+ await expect(db().prepare("UPDATE signed_rosters SET signature='tampered'").run()).rejects.toThrow('immutable_roster');
+ await expect(db().prepare('DELETE FROM signed_rosters').run()).rejects.toThrow('immutable_roster');
+ const view=JSON.stringify(await deviceRepository(db()).list(s));expect(view).not.toContain(a.signingKey);expect(view).not.toContain(a.wrappingKey);expect(view).not.toContain(one.signature);
+});
+test('concurrent roster issuers cannot fork or hide approved/revoked identities',async()=>{
+ const {s,a,r,sign,repo}=await rosterFixture(),one=await sign(r);await repo.put(await rosterContext(a),one);const b=await enroll(s,a);
+ const two={...r,revision:2,previousDigest:await rosterDigest(one),active:[...r.active,{deviceId:b.deviceId,signingKey:b.signingKey,wrappingKey:b.wrappingKey}]};
+ await expect(repo.put(await rosterContext(a),await sign({...two,active:r.active}))).rejects.toThrow('idempotency_conflict');
+ const ca=await rosterContext(a),cb=await rosterContext(b),sa=await sign(two),canonical=canonicalRoster({...two,issuer:{kind:'device',id:b.deviceId}}),sb={canonical,signature:await b.sign(ROSTER_DOMAIN+canonical)};
+ // B was not trusted in the previous revision and cannot issue its own admission.
+ await expect(repo.put(cb,sb)).rejects.toThrow();await repo.put(ca,sa);
+ const ra={...two,revision:3,previousDigest:await rosterDigest(sa)},rb={...ra,issuer:{kind:'device' as const,id:b.deviceId}},bc=canonicalRoster(rb);
+ const results=await Promise.allSettled([repo.put(await rosterContext(a),await sign(ra)),repo.put(await rosterContext(b),{canonical:bc,signature:await b.sign(ROSTER_DOMAIN+bc)})]);expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(1);
+});
+test('issuer revocation after authentication fails transaction; revoked possession can fetch but cannot publish',async()=>{
+ const {s,a,r,sign,repo}=await rosterFixture(),one=await sign(r);await repo.put(await rosterContext(a),one);const c=await rosterContext(a),next=await sign({...r,revision:2,previousDigest:await rosterDigest(one)});
+ await readyLastDevice();
+ const device=(await deviceRepository(db()).list(s)).devices[0]!;await db().prepare('UPDATE browser_sessions SET step_up_digest=?,step_up_expires=unixepoch()+300 WHERE digest=?').bind(device.revokeActionDigest,s.digest).run();await deviceRepository(db()).revoke(s,a.deviceId);
+ await expect(repo.put(c,next)).rejects.toThrow();
+ const body={accountId:'a',tenantId:'t',vaultId:'v',deviceId:a.deviceId,after:0,timestamp:Math.floor(Date.now()/1000)},signature=await a.sign(JSON.stringify(['AgentKeychain-roster-fetch-v1',body]));expect((await repo.fetch({...body,signature})).revisions).toEqual([one]);await expect(repo.fetch({...body,accountId:'other',signature})).rejects.toThrow();
+});
+
+test('last trusted device without current recovery readiness cannot be revoked atomically',async()=>{
+ const s=await account(),d=await enroll(s),repo=deviceRepository(db());
+ await session(d);const sessionsBefore=(await db().prepare('SELECT * FROM device_sessions').all()).results,vaultBefore=(await db().prepare('SELECT * FROM vault_devices').all()).results;
+ const listed=(await repo.list(s)).devices[0]!;
+ const {webRepository}=await import('../api-worker/web-repository.ts');
+ const view=await webRepository(db(),{} as never,s).query({view:'device',id:d.deviceId});assertSafeView(view);expect(view).toMatchObject({removeRef:null,lastDevice:true,recoveryReady:false});
+ await db().prepare('UPDATE browser_sessions SET step_up_digest=?,step_up_expires=unixepoch()+300 WHERE digest=?').bind(listed.revokeActionDigest,s.digest).run();
+ const before=await db().prepare('SELECT * FROM devices').all();
+ await expect(repo.revoke(s,d.deviceId)).rejects.toThrow();
+ expect(await db().prepare('SELECT * FROM devices').all()).toEqual(before);
+ expect(await db().prepare("SELECT count(*) n FROM device_actions WHERE action='revoke'").first('n')).toBe(0);
+ expect(await db().prepare('SELECT count(*) n FROM device_revocation_boundaries').first('n')).toBe(0);
+ expect((await db().prepare('SELECT * FROM device_sessions').all()).results).toEqual(sessionsBefore);expect((await db().prepare('SELECT * FROM vault_devices').all()).results).toEqual(vaultBefore);
+});
+
+async function readyLastDevice(){
+ await db().prepare("INSERT INTO recovery_packages_v1 VALUES('last-package','t','v','a',1,'{}','synthetic',1)").run();
+ await db().prepare("INSERT INTO recovery_readiness VALUES('last-package',unixepoch()+600,0)").run();
+}
+test.each(['valid','expired','revoked'])('last-device readiness is rechecked atomically after action display: %s',async state=>{
+ const s=await account(),d=await enroll(s),repo=deviceRepository(db());await readyLastDevice();
+ const device=(await repo.list(s)).devices[0]!;expect(device.lastDevice).toBe(true);expect(device.canRemove).toBe(true);
+ await db().prepare('UPDATE browser_sessions SET step_up_digest=?,step_up_expires=unixepoch()+300 WHERE digest=?').bind(device.revokeActionDigest,s.digest).run();
+ if(state==='expired')await db().prepare('UPDATE recovery_readiness SET valid_until=unixepoch()-1').run();
+ if(state==='revoked')await db().prepare('UPDATE recovery_readiness SET revoked=1').run();
+ if(state==='valid'){
+  expect(await repo.revoke(s,d.deviceId)).toEqual({revoked:false,enforced:true,witnessPending:true});
+  expect((await repo.list(s)).devices[0]!.canRemove).toBe(false);
+  expect(await db().prepare('SELECT warning FROM last_device_revocations').first('warning')).toBe('Access will require recovery');
+ }else{
+  await expect(repo.revoke(s,d.deviceId)).rejects.toThrow('recovery_required');
+  expect(await db().prepare('SELECT active FROM devices').first('active')).toBe(1);
+  expect(await db().prepare('SELECT count(*) n FROM last_device_revocations').first('n')).toBe(0);
+ }
+});
+
+test.each(['expiry','revoke'])('concurrent readiness %s and last-device removal have one atomic ordering',async change=>{
+ const s=await account(),d=await enroll(s),repo=deviceRepository(db());await readyLastDevice();
+ const listed=(await repo.list(s)).devices[0]!;
+ await step(s,'revoke',JSON.stringify(['t','a',d.deviceId,d.signingKey,d.wrappingKey]));
+ await expect(repo.revoke(s,d.deviceId)).rejects.toThrow('approval_required');
+ await db().prepare('UPDATE browser_sessions SET step_up_digest=?,step_up_expires=unixepoch()+300 WHERE digest=?').bind(listed.revokeActionDigest,s.digest).run();
+ const [changed,removed]=await Promise.allSettled([db().prepare(change==='expiry'?'UPDATE recovery_readiness SET valid_until=unixepoch()-1':'UPDATE recovery_readiness SET revoked=1').run(),repo.revoke(s,d.deviceId)]);
+ expect(changed.status).toBe('fulfilled');
+ expect(await db().prepare('SELECT active FROM devices WHERE id=?').bind(d.deviceId).first('active')).toBe(removed.status==='fulfilled'?0:1);
+ expect(await db().prepare('SELECT count(*) n FROM last_device_revocations').first('n')).toBe(removed.status==='fulfilled'?1:0);
 });

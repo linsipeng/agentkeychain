@@ -90,9 +90,9 @@ AgentKeychain 正在转向唯一的官方托管云模式。目标体验是登录
 自动同步加密凭证。Slice 1 通过内存服务与客户端实现并测试协议、独立设备签名、
 服务器接收顺序与历史、幂等重试、分页、删除屏障以及明确批准后的恢复。
 
-Phase 3 已在 `managed-cloud/web` 实现本地可测的账号登录、恢复与审批界面；尚无已部署云服务或持久化本地同步队列。
+Phase 3 已在 `managed-cloud/web` 实现本地可测的账号登录、恢复与审批界面；尚无已部署云服务；本分支已增加加密持久化队列和编译客户端同步测试。
 v0.6.2 本地 Vault 行为保持不变；现有 CLI/MCP 读取仍会向受信任的本地调用方返回明文。
-新的审批契约尚未接入现有 CLI/MCP 操作。
+托管注册后启用本地变更审批保护；原始 CLI/MCP 读取仍向受信调用方交付明文。
 
 `agentkeychain sync status` 只在本地报告安全兼容状态。旧同步
 `init/connect/push/pull/disconnect` 命令已禁用；已有配置原样保留，不连接旧端点，
@@ -104,7 +104,7 @@ v0.6.2 本地 Vault 行为保持不变；现有 CLI/MCP 读取仍会向受信任
 启动目标设备签名绑定的 requestRef。恢复材料、解密及激活全部留在目标设备接口。
 设备更新状态依据认证拉取时间及设备报告的已处理历史，不代表本地磁盘持久化证明。
 这是未提交的本地实现证据，不表示服务已部署，也不改变已安装的 v0.6.2 CLI。
-原生浏览器验收和 Phase 4 本地客户端集成仍是独立关卡。详见
+原生浏览器验收和 Phase 4/5 剩余集成工作仍是独立关卡。详见
 [Phase 3 证据](./docs/MANAGED_CLOUD_PHASE3_EVIDENCE.md)。
 
 ### 换新 Mac（或第二台电脑）怎么迁移
@@ -294,8 +294,25 @@ v0.6.2 —— 紧急安全版本：测试默认禁止访问宿主机钥匙串与
 Vault 使用按路径隔离的钥匙串条目；`setup` 在任何覆盖前必须先验证密码。
 v1.0 前仍可能有破坏性变更。
 
-Managed Cloud Slice 1 使用独立受信注册入口固定的设备公钥校验拉取及重启历史，
-并实施重放检查和删除屏障。快照保留完整签名历史；持久化存储及回滚保护尚未实现。
-生产审批消费与版本接受必须共用一个持久化事务；内存服务并非生产适配器。
+Phase 4/5 已增加发行清单验签、目标设备加密信任包、原生/私密管道安全存储、加密 SQLite
+状态、原子队列与应用、签名证明 HTTP 同步、守护进程/IPC、CLI/MCP 控制及编译进程测试。
+未配置发行清单时返回 `cloud_unavailable_not_provisioned`；普通参数或环境变量无法改写
+端点和 pin，也未虚构生产域名。托管导出现在必须先获得绑定内容及输出位置的一次性云审批：
+执行 `cloud request-export <path>`，在账号页面批准，再执行 `export --out <path>`。
+`--yes` 无法绕过。`cloud reconcile` 列出旧客户端编辑，`cloud reconcile <name>` 暂存
+确切审批请求。签发端重启后保留原密封字节及本地短语确认。最终中断/并发矩阵、受保护注册锚恢复及目录描述符相对导出均已通过本地验收；现仅保留外部生产配置、原生平台/浏览器验收及发布部署门槛。详见
+[本地实现证据](./docs/MANAGED_CLOUD_PHASE4_BLOCKERS.md)。
 
 Phase 2A 新增独立的 `managed-cloud/` Workers/D1 本地可测后端，包含设备认证原子同步和私有恢复骨架。Phase 2B 已增加本地可测的邀请制 Passkey 账号、浏览器会话、CSRF 和动作绑定 step-up。复审修复要求可发现凭证及可信来源绑定，加入有界清理，并本地执行生成的 Worker bundle；Phase 2C 已增加本地可测的受信设备注册、15 分钟签名证明会话、不可变加密密钥包与原子签名同步检查点。Phase 2D 已增加精确一次性审批 API、按账号隔离且使用不透明事件 ID 的签名脱敏活动，以及经过本地测试的双 Worker/双 D1 分钥恢复状态机、目标设备持钥证明、持久化激活意图与独立签名取消授权。恢复拒绝复用历史设备身份；激活后的完成重试可收敛，但不承诺跨 D1 原子性。Phase 3 已实现本地 Web 控制中心；生产配置仍留待后续阶段。详见 [Phase 3 证据及验收限制](./docs/MANAGED_CLOUD_PHASE3_EVIDENCE.md)。详见 [Phase 2D 实现及限制](./docs/MANAGED_CLOUD_PHASE2D_EVIDENCE.md)。详见 [Phase 2C 契约及证据](./docs/MANAGED_CLOUD_PHASE2C_EVIDENCE.md)。详见 [Phase 2B 验收及限制](./docs/MANAGED_CLOUD_PHASE2B_EVIDENCE.md)。详见 [Phase 2A 验收记录](./docs/MANAGED_CLOUD_PHASE2A_EVIDENCE.md)。
+
+设备签名名单现已通过不可变签名链、独立安全存储锚和历史 checkpoint 证明传播注册与撤销。详见[签名名单证据及边界](docs/SIGNED_ROSTER.md)。
+
+开发中的 `cloud recover [packageId]` 已接入安全存储恢复日志、独立签名份额、
+权威签名的目标加密信任包，以及服务端和本地状态读回后激活。编译产物使用合成数据
+验收快速、延迟和崩溃/替换路径。详见[恢复证据](docs/LOCAL_RECOVERY_ACTIVATION.md)。
+
+最终本地实现及外部门槛见[续作验收记录](docs/PHASE45_FINAL_CONTINUATION.md)。
+
+最终本地安全修复及升级语义：[修复记录](docs/FINAL_SECURITY_REPAIR.md)、[迁移与回滚手册](docs/SECURITY_REPAIR_MIGRATION_RUNBOOK.md)。本地验收不代表获准发布或部署。
+
+精确激活版本绑定、最后设备保护及增量独立见证的最新契约与证据：[最终复审记录](docs/LAST_FINAL_REVIEW.md)。

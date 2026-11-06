@@ -1,3 +1,10 @@
+import {acknowledgeLastDeviceRevocation} from './revocation-witness.ts';
+import {trustActivationBinding,activationMessage,type TrustActivationMaterial,type TrustActivationBinding} from '../shared/trust-activation.ts';
+import {acknowledgeRoster} from './roster-witness.ts';
+import {checkpoint,genesisRoot,type CheckpointSigner,type Checkpoint} from '../shared/checkpoints.ts';
+import {parseRoster,verifyRoster,rosterDigest} from '../shared/roster.ts';
+import type {SignedManagedOperation} from '../../src/cloud/protocol.ts';
+import {signRecoveryRelease,type RecoveryReleaseSigner} from '../shared/recovery-release.ts';
 import { rpcData } from '../shared/rpc-data.ts';
 import { ApiError, digest, verify } from '../shared/contracts.ts';
 import { manifest, packageContext, recoveryAction, recoveryCase, releaseContext, type CancelAuthorization, type RecoveryAuthority, type RecoveryCase, type RecoveryEvidence, type RecoveryKeys, type RecoveryRPC } from '../shared/recovery.ts';
@@ -6,9 +13,12 @@ import type { DeviceContext } from './auth.ts';
 import type { SessionRow } from './browser-repository.ts';
 import { base64, exactFields, identifier } from '../../src/cloud/protocol.ts';
 export interface RecoveryBindings {
+    CHECKPOINT_SIGNER?:CheckpointSigner;
+    RECOVERY_ACCOUNT_ATTESTER?:{attest(canonical:string):Promise<string>};
     RECOVERY?: RecoveryRPC;
     RECOVERY_AUTH?: RecoveryAuthority;
     RECOVERY_KEYS?: RecoveryKeys;
+    RECOVERY_RELEASE_SIGNER?: RecoveryReleaseSigner;
 }
 interface Row {
     id: string;
@@ -71,7 +81,7 @@ export function recoveryRepository(db: D1Database, bindings: RecoveryBindings) {
                 throw new ApiError('idempotency_conflict');
             await db.batch([nonce(c), db.prepare('INSERT INTO recovery_packages_v1 SELECT ?,?,?,?,?,?,?,0 WHERE NOT EXISTS(SELECT 1 FROM recovery_packages_v1 WHERE id=?)').bind(m.packageId, c.tenantId, c.vaultId, c.accountId, m.keyEpoch, canonical, signature, m.packageId)]);
             await rpcData(b.rpc.enroll(canonical, signature));
-            await db.prepare('UPDATE recovery_packages_v1 SET ready=1 WHERE id=?').bind(m.packageId).run();
+            await db.batch([db.prepare('UPDATE recovery_packages_v1 SET ready=1 WHERE id=?').bind(m.packageId),db.prepare('INSERT INTO recovery_readiness VALUES(?,unixepoch()+2592000,0) ON CONFLICT(package_id) DO UPDATE SET valid_until=excluded.valid_until WHERE revoked=0').bind(m.packageId)]);
             return { packageId: m.packageId };
         },
         async start(s: SessionRow, input: StartRequest) {
@@ -103,7 +113,15 @@ export function recoveryRepository(db: D1Database, bindings: RecoveryBindings) {
             await rpcData(b.rpc.prepare(canonical));
             return { canonical, challenge, state: 'prepared' };
         },
-        async detail(s: SessionRow, id: string) { const r = await get(s, id); return { id: r.id, canonical: r.canonical, state: r.expires_at <= Math.floor(Date.now() / 1000) && !['activating', 'completed', 'cancelled'].includes(r.state) ? 'expired' : r.state, challenge: JSON.parse(r.challenge) as SealedShare, reviewRequired: !!r.review_required, cancelDigest: await recoveryAction('cancel', r.canonical), reviewDigest: await recoveryAction('review', r.canonical) }; },
+        async detail(s: SessionRow, id: string,native=false) {
+            const r=await get(s,id),c=recoveryCase(r.canonical);
+            let state=r.expires_at<=Math.floor(Date.now()/1000)&&!['activating','completed','cancelled'].includes(r.state)?'expired':r.state;
+            if(native&&!['activating','completed','cancelled','expired'].includes(state)){
+                const eligible=await db.prepare('SELECT 1 FROM recovery_packages_v1 p JOIN memberships m ON m.tenant_id=p.tenant_id AND m.account_id=p.account_id WHERE p.id=? AND m.active=1 AND p.key_epoch=(SELECT max(key_epoch) FROM recovery_packages_v1 WHERE tenant_id=? AND vault_id=?)').bind(c.packageId,c.tenantId,c.vaultId).first();
+                if(!eligible)state='conflict';
+            }
+            return {id:r.id,canonical:r.canonical,state,challenge:JSON.parse(r.challenge) as SealedShare,reviewRequired:!!r.review_required,cancelDigest:await recoveryAction('cancel',r.canonical),reviewDigest:await recoveryAction('review',r.canonical)};
+        },
         async review(s: SessionRow, id: string) {
             const r = await get(s, id);
             if (r.state !== 'completed')
@@ -148,6 +166,112 @@ export function recoveryRepository(db: D1Database, bindings: RecoveryBindings) {
             if (!result)
                 throw new ApiError('not_found');
             return { api: JSON.parse(result.api_release) as SealedShare, custodian: JSON.parse(result.custodian_release) as SealedShare, wrappedVDK: m.wrappedVDK };
+        },
+        async authenticatedRelease(s:SessionRow,id:string,evidence:RecoveryEvidence){
+            const b=remote();
+            if(!bindings.RECOVERY_RELEASE_SIGNER||!b.rpc.authenticatedRelease)throw new ApiError('internal_error');
+            const released=await this.release(s,id,evidence),r=await get(s,id),c=await live(r);
+            const manifestCanonical=await db.prepare('SELECT canonical FROM recovery_packages_v1 WHERE id=?').bind(c.packageId).first<string>('canonical');
+            if(!manifestCanonical)throw new ApiError('not_found');
+            const custodian=await rpcData(b.rpc.authenticatedRelease(r.canonical,evidence));
+            // Recheck cancellation/epoch/expiry after the independent service round trip.
+            await live(await get(s,id));
+            const api=await signRecoveryRelease('api',r.canonical,manifestCanonical,evidence,released.api,bindings.RECOVERY_RELEASE_SIGNER);
+            return {caseCanonical:r.canonical,manifestCanonical,api,custodian};
+        },
+        async accountVerified(s:SessionRow,id:string){
+            if(!bindings.RECOVERY_ACCOUNT_ATTESTER)return;
+            const r=await get(s,id);await live(r);
+            const proof=await bindings.RECOVERY_ACCOUNT_ATTESTER.attest(r.canonical);
+            base64(proof,64,64);
+            const evidence:RecoveryEvidence={mode:'cooldown',confirmerId:null,signature:null,proof};
+            await db.prepare('INSERT OR IGNORE INTO recovery_authorizations VALUES(?,?)').bind(id,JSON.stringify(evidence)).run();
+        },
+        async confirm(c:DeviceContext,id:string,signature:string){
+            const s={account_id:c.accountId,tenant_id:c.tenantId} as SessionRow,r=await get(s,id),rc=await live(r);
+            if(rc.vaultId!==c.vaultId||!await verify(c.publicKey,signature,JSON.stringify(['AgentKeychain-recovery-confirm-v1',r.canonical])))throw new ApiError('invalid_signature');
+            const evidence:RecoveryEvidence={mode:'device',confirmerId:c.deviceId,signature,proof:null};
+            if(!await remote().auth.authorize(r.canonical,evidence))throw new ApiError('approval_required');
+            await db.batch([nonce(c),db.prepare('INSERT INTO recovery_authorizations VALUES(?,?) ON CONFLICT(case_id) DO UPDATE SET evidence=excluded.evidence').bind(id,JSON.stringify(evidence))]);return {confirmed:true};
+        },
+        async evidence(s:SessionRow,id:string){
+            const r=await get(s,id);await live(r);
+            const raw=await db.prepare('SELECT evidence FROM recovery_authorizations WHERE case_id=?').bind(id).first<string>('evidence');
+            if(!raw)throw new ApiError('approval_required');
+            const evidence=JSON.parse(raw) as RecoveryEvidence;
+            if(!await remote().auth.authorize(r.canonical,evidence))throw new ApiError('approval_required');return {evidence};
+        },
+        async trustBundle(s:SessionRow,id:string){
+            const r=await get(s,id),c=recoveryCase(r.canonical),b=remote();
+            if(r.state!=='completed'||!b.rpc.trustBundle||!bindings.CHECKPOINT_SIGNER)throw new ApiError('approval_required');
+            const current=await db.prepare('SELECT canonical,signature FROM signed_rosters WHERE tenant_id=? AND vault_id=? ORDER BY revision DESC LIMIT 1').bind(c.tenantId,c.vaultId).all<SignedManagedOperation>();
+            const rows=current.results;
+            if(!rows.length)throw new ApiError('not_found');
+            const head=await db.prepare('SELECT canonical,signature FROM sync_checkpoints WHERE tenant_id=? AND vault_id=? ORDER BY sequence DESC LIMIT 1').bind(c.tenantId,c.vaultId).first<Checkpoint>();
+            const cp=head??await checkpoint(bindings.CHECKPOINT_SIGNER,c.tenantId,c.vaultId,0,await genesisRoot(c.tenantId,c.vaultId),null,null);
+            const boundaries=await db.prepare('SELECT device_id,sequence FROM device_revocation_boundaries WHERE tenant_id=? AND vault_id=? ORDER BY device_id').bind(c.tenantId,c.vaultId).all<{device_id:string;sequence:number}>();
+            const revocations=[];
+            for(const row of boundaries.results){const acceptedThrough=row.sequence===0?await checkpoint(bindings.CHECKPOINT_SIGNER,c.tenantId,c.vaultId,0,await genesisRoot(c.tenantId,c.vaultId),null,null):await db.prepare('SELECT canonical,signature FROM sync_checkpoints WHERE tenant_id=? AND vault_id=? AND sequence=?').bind(c.tenantId,c.vaultId,row.sequence).first<Checkpoint>();if(!acceptedThrough)throw new ApiError('not_found');revocations.push({deviceId:row.device_id,acceptedThrough});}
+            for(const revoked of revocations)await acknowledgeLastDeviceRevocation(db,c.tenantId,revoked.deviceId,b.rpc,bindings.CHECKPOINT_SIGNER);
+            type Request={rows:SignedManagedOperation[];cp:Checkpoint;revocations:{deviceId:string;acceptedThrough:Checkpoint}[]};
+            type Result=TrustActivationMaterial & {binding:TrustActivationBinding;witness?:SignedManagedOperation;sealed:import('../shared/recovery-crypto.ts').SealedShare;refreshDigest:string;roster:SignedManagedOperation};
+            let saga=await db.prepare('SELECT version,request,result FROM recovery_trust_requests q WHERE case_id=? AND NOT EXISTS(SELECT 1 FROM recovery_trust_superseded x WHERE x.case_id=q.case_id AND x.version=q.version) ORDER BY version DESC LIMIT 1').bind(id).first<{version:number;request:string;result:string|null}>();
+            const committed=b.rpc.committedVersion?await b.rpc.committedVersion(r.canonical):null;
+            if(committed)saga=await db.prepare('SELECT version,request,result FROM recovery_trust_requests WHERE case_id=? AND version=?').bind(id,committed).first<{version:number;request:string;result:string|null}>();
+            if(saga?.result&&!committed){const request=JSON.parse(saga.request) as Request,result=JSON.parse(saga.result) as Result;
+                if(await rosterDigest(rows.at(-1)!)!==await rosterDigest(result?.roster??request.rows.at(-1)!)||JSON.stringify(cp)!==JSON.stringify(request.cp)||JSON.stringify(revocations)!==JSON.stringify(request.revocations))saga=null;
+            }
+            if(!saga){
+                if(!b.rpc.witness)throw new ApiError('internal_error');
+                await acknowledgeRoster(db,c.tenantId,c.vaultId,{head:(t,v)=>b.rpc.witnessHead!(t,v),witness:i=>b.rpc.witness!(i)},bindings.CHECKPOINT_SIGNER);
+                const version=(await db.prepare('SELECT max(version) v FROM recovery_trust_requests WHERE case_id=?').bind(id).first<number>('v')??0)+1;
+                const request=JSON.stringify({rows,cp,revocations} satisfies Request);
+                const statements=[db.prepare('INSERT OR IGNORE INTO recovery_trust_requests VALUES(?,?,?,NULL)').bind(id,version,request)];
+                if(revocations.some(v=>!parseRoster(rows.at(-1)!).revoked.some(d=>d.deviceId===v.deviceId))||!parseRoster(rows.at(-1)!).active.some(d=>d.deviceId===c.targetDeviceId&&d.signingKey===c.signingKey&&d.wrappingKey===c.wrappingKey))statements.unshift(db.prepare('INSERT OR IGNORE INTO recovery_roster_reservations VALUES(?,?,?,?)').bind(c.tenantId,c.vaultId,parseRoster(rows.at(-1)!).revision+1,id));
+                await db.batch(statements);
+                saga=await db.prepare('SELECT version,request,result FROM recovery_trust_requests WHERE case_id=? AND version=?').bind(id,version).first<{version:number;request:string;result:string|null}>();
+                if(saga?.request!==request)throw new ApiError('idempotency_conflict');
+            }
+            const request=JSON.parse(saga!.request) as Request;
+            let result:Result;
+            try{result=await rpcData(b.rpc.trustBundle(r.canonical,request.rows,request.cp,request.revocations,saga!.version));}
+            catch(error){
+                if(!saga!.result&&error instanceof Error&&/witness_not_latest|witness_stale_checkpoint/.test(error.message))await db.prepare('INSERT OR IGNORE INTO recovery_trust_superseded VALUES(?,?)').bind(id,saga!.version).run();
+                throw error;
+            }
+            if(JSON.stringify(result.binding)!==JSON.stringify(await trustActivationBinding(r.canonical,saga!.version,result)))throw new ApiError('idempotency_conflict');
+            const roster=parseRoster(result.roster);
+            const same=request.rows.find(s=>s.canonical===result.roster.canonical&&s.signature===result.roster.signature);
+            const prior=request.rows.find(s=>parseRoster(s).revision===roster.revision-1);
+            if(!same){if(!prior)throw new ApiError('idempotency_conflict');await verifyRoster(result.roster,prior);}
+            if(roster.accountId!==c.accountId||roster.tenantId!==c.tenantId||roster.vaultId!==c.vaultId||roster.keyEpoch!==c.keyEpoch||!roster.active.some(d=>d.deviceId===c.targetDeviceId&&d.signingKey===c.signingKey&&d.wrappingKey===c.wrappingKey))throw new ApiError('idempotency_conflict');
+            if(!/^[a-f0-9]{64}$/.test(result.refreshDigest))throw new ApiError('invalid_request');
+            const statements=[];
+            if(!same)statements.push(db.prepare('INSERT INTO signed_rosters VALUES(?,?,?,?,?,?,?,?,?)').bind(c.tenantId,c.vaultId,c.accountId,roster.revision,await rosterDigest(result.roster),roster.previousDigest,null,result.roster.canonical,result.roster.signature));
+            statements.push(db.prepare('INSERT OR IGNORE INTO recovery_refresh_versions VALUES(?,?,?,?)').bind(c.id,saga!.version,c.targetDeviceId,result.refreshDigest),db.prepare('UPDATE recovery_trust_requests SET result=? WHERE case_id=? AND version=? AND (result IS NULL OR result=?)').bind(JSON.stringify(result),id,saga!.version,JSON.stringify(result)));
+            if(!result.witness)throw new ApiError('internal_error');
+            const witnessed=JSON.parse(result.witness.canonical) as {revision:number;digest:string};
+            if(witnessed.revision!==roster.revision||witnessed.digest!==await rosterDigest(result.roster))throw new ApiError('idempotency_conflict');
+            statements.push(db.prepare("UPDATE roster_witness_sagas SET state='acknowledged',receipt=? WHERE tenant_id=? AND vault_id=? AND revision=? AND digest=?").bind(JSON.stringify(result.witness),c.tenantId,c.vaultId,roster.revision,witnessed.digest));
+            await db.batch(statements);
+            return {sealed:result.sealed,receiptVersion:saga!.version,binding:result.binding};
+        },
+        async commitTrust(s:SessionRow,id:string,version:number,hash:string,signature:string){
+            const r=await get(s,id),b=remote();if(!b.rpc.commitTrust||r.state!=='completed')throw new ApiError('not_found');
+            const raw=await db.prepare('SELECT result FROM recovery_trust_requests WHERE case_id=? AND version=?').bind(id,version).first<string>('result');
+            if(!raw)throw new ApiError('not_found');
+            const selected=JSON.parse(raw) as TrustActivationMaterial & {binding:TrustActivationBinding};
+            const binding=await trustActivationBinding(r.canonical,version,selected);
+            if(JSON.stringify(binding)!==JSON.stringify(selected.binding)||binding.rosterDigest!==hash||!await verify(recoveryCase(r.canonical).signingKey,signature,activationMessage(binding)))throw new ApiError('idempotency_conflict');
+            const result=await rpcData(b.rpc.commitTrust(r.canonical,version,hash,signature));
+            await db.prepare('INSERT OR IGNORE INTO recovery_activation VALUES(?,?,?)').bind(id,version,hash).run();return result;
+        },
+        async readback(s:SessionRow,id:string){
+            const r=await get(s,id),c=recoveryCase(r.canonical);
+            const ready=await db.prepare("SELECT f.digest FROM recovery_refresh f JOIN devices d ON d.id=f.device_id JOIN device_keys k ON k.tenant_id=d.tenant_id AND k.device_id=d.id JOIN memberships m ON m.tenant_id=d.tenant_id AND m.account_id=d.account_id JOIN vault_devices v ON v.tenant_id=d.tenant_id AND v.device_id=d.id WHERE f.case_id=? AND d.tenant_id=? AND d.account_id=? AND v.vault_id=? AND d.public_key=? AND k.wrapping_key=? AND d.active=1 AND m.active=1 AND v.active=1").bind(id,c.tenantId,c.accountId,c.vaultId,c.signingKey,c.wrappingKey).first<string>('digest');
+            const activation=await db.prepare('SELECT digest FROM recovery_activation WHERE case_id=?').bind(id).first<string>('digest');
+            const head=activation??await db.prepare('SELECT digest FROM signed_rosters WHERE tenant_id=? AND vault_id=? ORDER BY revision DESC LIMIT 1').bind(c.tenantId,c.vaultId).first<string>('digest');
+            if(r.state!=='completed'||!ready||!head)throw new ApiError('not_found');return {completed:true,caseCanonical:r.canonical,refreshDigest:ready,rosterDigest:head};
         },
         async cancel(s: SessionRow, id: string, authorization?: CancelAuthorization, device?: DeviceContext) {
             const r = await get(s, id), b = remote();

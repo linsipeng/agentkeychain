@@ -1,0 +1,52 @@
+{
+  "full": {
+    "auditReportVersion": 2,
+    "vulnerabilities": {},
+    "metadata": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0,
+        "total": 0
+      },
+      "dependencies": {
+        "prod": 46,
+        "dev": 219,
+        "optional": 90,
+        "peer": 13,
+        "peerOptional": 0,
+        "total": 264
+      }
+    }
+  },
+  "runtime": {
+    "auditReportVersion": 2,
+    "vulnerabilities": {},
+    "metadata": {
+      "vulnerabilities": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0,
+        "total": 0
+      },
+      "dependencies": {
+        "prod": 46,
+        "dev": 219,
+        "optional": 90,
+        "peer": 13,
+        "peerOptional": 0,
+        "total": 264
+      }
+    }
+  },
+  "root": {},
+  "currentContinuation": {
+    "record": "FINAL_SECURITY_REPAIR_AUDIT.json",
+    "localImplementationComplete": true,
+    "historicalCountsPreserved": true
+  }
+}

@@ -6,7 +6,7 @@
  * `secret-tool` executable.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -35,7 +35,7 @@ case "$1" in
     if [ -n "$AKC_STUB_FAIL" ]; then echo "could not be found" >&2; exit 44; fi
     if [ -n "$AKC_STUB_OUT" ]; then echo "$AKC_STUB_OUT"; exit 0; fi
     echo "could not be found" >&2; exit 44 ;;
-  add-generic-password|delete-generic-password) exit 0 ;;
+  store-master|add-generic-password|delete-generic-password) exit 0 ;;
 esac
 exit 1
 `;
@@ -110,6 +110,15 @@ exit 1
     process.env["AKC_PASSWORD"] = "";
     const { keychainSet } = await import("../src/util/keychain.ts");
     expect(await keychainSet("test-password")).toBe(true);
+  });
+
+  test("master-password storage never passes a password through argv", async () => {
+    if(process.platform!=="darwin")return;
+    const record=join(fakeBinDir,"argv"), password=globalThis.crypto.randomUUID();
+    writeFileSync(join(fakeBinDir,"security"),`#!/bin/sh\nprintf '%s\n' "$@" > '${record}'\ncat >/dev/null\n`,{mode:0o755});
+    const {keychainSet}=await import("../src/util/keychain.ts");
+    expect(await keychainSet(password)).toBe(true);
+    expect(readFileSync(record,"utf8").includes(password)).toBe(false);
   });
 
   test("keychainDelete uses an explicitly injected stub", async () => {

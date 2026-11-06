@@ -1,3 +1,4 @@
+import { cloudStatus, requestCloudApproval } from "../cli/cloud.ts";
 /**
  * MCP server for agentkeychain.
  *
@@ -85,6 +86,8 @@ export function createServer(options: McpServerOptions = {}): Server {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
+      {name:"akc_cloud_status",description:"Managed Cloud availability and metadata only.",inputSchema:{type:"object",properties:{},additionalProperties:false}},
+      {name:"akc_request_approval",description:"Request one managed delete, restore or scope-change approval; never supply secret values.",inputSchema:{type:"object",properties:{action:{type:"string",enum:["delete","restore","scope"]},name:{type:"string"},scopes:{type:"array",items:{type:"string"}}},required:["action","name"],additionalProperties:false}},
       {
         name: "akc_request_store",
         description: "Open a one-time local secure-entry form. Use this by default so credential values never enter chat or MCP arguments. Scope is inferred automatically.",
@@ -170,6 +173,14 @@ export function createServer(options: McpServerOptions = {}): Server {
     const { name, arguments: args } = request.params;
     const a = (args ?? {}) as Record<string, unknown>;
 
+    if (name === "akc_cloud_status") {
+      if (Object.keys(a).length) return toolErr("this tool accepts no arguments");
+      try { return toolOk(JSON.stringify(cloudStatus())); } catch { return toolErr("cloud_status_unavailable"); }
+    }
+    if (name === "akc_request_approval") {
+      if (Object.keys(a).some(k=>!["action","name","scopes"].includes(k)) || typeof a.action!=="string" || typeof a.name!=="string") return toolErr("invalid approval request");
+      try { return toolOk(JSON.stringify(await requestCloudApproval(a.action,a.name,Array.isArray(a.scopes)?a.scopes as string[]:undefined))); } catch { return toolErr("cloud_approval_unavailable"); }
+    }
     if (name === "akc_request_password_check") {
       if (Object.keys(a).length > 0) return toolErr("this tool accepts no arguments");
       try {

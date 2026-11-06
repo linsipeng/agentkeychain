@@ -29,8 +29,9 @@ export function webRepository(db: D1Database, config: BrowserConfig, s: SessionR
         return a;
     }
     async function request(r: ApprovalRow) {
-        const complete = ['delete', 'restore'].includes(r.action) && !!r.object_id;
-        return { id: r.id, action: r.action, state: r.consumed_sequence !== null ? 'completed' : r.state, deviceId: r.device_id, itemRef: r.object_id, createdAt: r.created_at, expiresAt: r.expires_at, canAllow: complete && r.state === 'pending', allowRef: complete && r.state === 'pending' ? await action('approve', r.id, await decisionDigest('approve', r)) : null, denyRef: r.state === 'pending' ? await action('deny', r.id, await decisionDigest('deny', r)) : null };
+        const intent=await db.prepare('SELECT action FROM approval_intents WHERE tenant_id=? AND vault_id=? AND request_id=?').bind(r.tenant_id,r.vault_id,r.id).first<string>('action');
+        const complete = (['delete', 'restore','export'].includes(r.action)||(r.action==='put'&&!!intent)) && !!r.object_id;
+        return { id: r.id, action: intent??r.action, state: r.consumed_sequence !== null ? 'completed' : r.state, deviceId: r.device_id, itemRef: r.object_id, createdAt: r.created_at, expiresAt: r.expires_at, canAllow: complete && r.state === 'pending', allowRef: complete && r.state === 'pending' ? await action('approve', r.id, await decisionDigest('approve', r)) : null, denyRef: r.state === 'pending' ? await action('deny', r.id, await decisionDigest('deny', r)) : null };
     }
     function aggregate(states: string[]) {
         if (!states.length) return 'waiting';
@@ -41,7 +42,7 @@ export function webRepository(db: D1Database, config: BrowserConfig, s: SessionR
         return Promise.all((await devices.list(s)).devices.map(async d => {
             const rows = observations.filter(r => r.device_id === d.id);
             const states = rows.map(r => !r.active ? 'paused' : r.last_seen === null ? 'waiting' : r.last_seen > Date.now()/1000 + 60 || r.acknowledged === null || r.acknowledged > r.sequence ? 'unavailable' : r.last_seen <= Date.now()/1000 - 300 ? 'stale' : r.acknowledged < r.sequence ? 'updating' : 'current');
-            return {id:d.id,active:!!d.active,status:!d.active ? 'removed' : rows.length ? aggregate(states) : 'unavailable',removeRef:d.active ? await action('remove',d.id,d.revokeActionDigest) : null};
+            return {id:d.id,active:!!d.active,status:!d.active ? (d.revocationComplete?'removed':'removalPending') : rows.length ? aggregate(states) : 'unavailable',lastDevice:d.lastDevice,recoveryReady:d.recoveryReady,revocationComplete:d.revocationComplete,removeRef:d.active && d.canRemove ? await action('remove',d.id,d.revokeActionDigest) : null};
         }));
     }
     async function activity(after: string | 0 = 0, minimum: string | 0 = 0) {
@@ -138,10 +139,10 @@ export function webRepository(db: D1Database, config: BrowserConfig, s: SessionR
             }
             if (a.kind === 'remove') {
                 const d = (await devices.list(s)).devices.find(d => d.id === a.target);
-                if (!d || d.revokeActionDigest !== a.action_digest)
+                if (!d || !d.canRemove || d.revokeActionDigest !== a.action_digest)
                     throw new ApiError('approval_required');
                 await devices.revoke(s, a.target);
-                return { removed: (await devices.list(s)).devices.find(d => d.id === a.target)?.active === 0 };
+                const current=(await devices.list(s)).devices.find(d=>d.id===a.target);return {removed:current?.revocationComplete===true,enforced:current?.active===0,witnessPending:current?.revocationComplete!==true,recoveryRequired:d.lastDevice};
             }
             if (a.kind === 'recovery-cancel') {
                 if (typeof confirmationRef !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(confirmationRef)) throw new ApiError('approval_required');

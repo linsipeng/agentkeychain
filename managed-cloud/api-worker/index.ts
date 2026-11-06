@@ -1,3 +1,4 @@
+import {acknowledgeRoster} from './roster-witness.ts';
 import type { CheckpointSigner } from '../shared/checkpoints.ts';
 import { unavailable } from './browser-auth.ts';
 import { ApiError, boundedBody, errorResponse, validateSigned, type RecoveryContract } from '../shared/contracts.ts';
@@ -53,7 +54,13 @@ export default {
                 const ctx = await authenticate(env.MAIN, request, match[1]!, body);
                 if (!env.CHECKPOINT_SIGNER)
                     return unavailable();
-                return Response.json(await createRepository(env.MAIN, ctx, env.CHECKPOINT_SIGNER).push(signed), { headers: { 'cache-control': 'no-store' } });
+                const receipt=await createRepository(env.MAIN, ctx, env.CHECKPOINT_SIGNER).push(signed);
+                if(await env.MAIN.prepare('SELECT 1 FROM signed_rosters WHERE tenant_id=? AND vault_id=? LIMIT 1').bind(ctx.tenantId,ctx.vaultId).first()){
+                    if(!env.RECOVERY?.witness)return unavailable();
+                    const witness=await acknowledgeRoster(env.MAIN,ctx.tenantId,ctx.vaultId,{head:(t,v)=>env.RECOVERY.witnessHead!(t,v),witness:i=>env.RECOVERY.witness!(i)},env.CHECKPOINT_SIGNER);
+                    return Response.json({...receipt,witness},{headers:{'cache-control':'no-store'}});
+                }
+                return Response.json(receipt, { headers: { 'cache-control': 'no-store' } });
             }
             if (body || [...url.searchParams.keys()].some(k => !['cursor', 'limit'].includes(k)) || url.searchParams.getAll('cursor').length > 1 || url.searchParams.getAll('limit').length > 1)
                 throw new ApiError('invalid_request');

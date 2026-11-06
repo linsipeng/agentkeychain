@@ -41,7 +41,7 @@ export function publicRecovery(db: D1Database, config: BrowserConfig) {
             if (!/^[A-Za-z0-9_-]{43}$/.test(t.targetDeviceId) || t.signingKey === t.wrappingKey)
                 throw denied();
             const [account, proof] = await Promise.allSettled([
-                db.prepare('SELECT e.account_id,m.tenant_id,v.id AS vault_id FROM account_emails e JOIN memberships m ON m.account_id=e.account_id JOIN vaults v ON v.tenant_id=m.tenant_id WHERE e.lookup_hash=? AND e.verified=1 AND m.active=1 ORDER BY m.tenant_id,v.id LIMIT 2').bind(lookup).all<{
+                db.prepare('SELECT e.account_id,p.tenant_id,p.vault_id FROM account_emails e JOIN recovery_packages_v1 p ON p.account_id=e.account_id JOIN memberships m ON m.account_id=e.account_id AND m.tenant_id=p.tenant_id WHERE e.lookup_hash=? AND e.verified=1 AND m.active=1 AND p.id=? LIMIT 2').bind(lookup,t.packageId).all<{
                     account_id: string;
                     tenant_id: string;
                     vault_id: string;
@@ -71,6 +71,7 @@ export function publicRecovery(db: D1Database, config: BrowserConfig) {
                 if (!p)
                     throw denied();
                 await repo.start(session, body as unknown as StartRequest);
+                await repo.accountVerified(session,s.case_id);
             }
             else {
                 if (route === 'recovery/cancel') {

@@ -1,0 +1,86 @@
+import {expect,test} from 'bun:test';
+import {Database} from 'bun:sqlite';
+import {migrate} from '../src/db/migrate.ts';
+import {CloudStore} from '../src/cloud/persistence.ts';
+import {createCloudKeys,objectId} from '../src/cloud/crypto.ts';
+import {VaultMutationCoordinator} from '../src/cloud/coordinator.ts';
+import {randomBytes} from 'node:crypto';
+test('creation commits local row and exact queue together; high risk stages without changing local secret',async()=>{
+ const db=new Database(':memory:');migrate(db);const keys=await createCloudKeys(),store=new CloudStore(db,keys.csk),kek=randomBytes(32);
+ const c=new VaultMutationCoordinator(store,keys,{vaultId:'vault',deviceId:'a',publicKey:Buffer.from(keys.signingPublic).toString('base64'),revoked:false},kek,1);
+ c.mutate({name:'synthetic',value:'generated-test-only',scopes:['test'],metadata:null,localVersion:1},'put');
+ expect(db.query('SELECT count(*) AS n FROM secrets').get()).toEqual({n:1});expect(store.all('outbox').length).toBe(1);
+ const before=JSON.stringify(db.query('SELECT * FROM secrets').all());
+ expect(()=>c.mutate({name:'synthetic',value:'replacement',scopes:['test'],metadata:null,localVersion:2},'put')).toThrow('approval_required');
+ expect(JSON.stringify(db.query('SELECT * FROM secrets').all())).toBe(before);
+ expect(store.all('outbox').length).toBe(1);
+ db.run("UPDATE secrets SET scopes='[\"expanded\"]'");
+ c.reconcile();expect(store.all('outbox').length).toBe(1);expect(store.get<{state:string}>('state','health')?.state).toBe('approval_required');db.close();
+});
+test('legacy edits stage exact approval, survive restart, reject changed content and commit without echo',async()=>{
+ const db=new Database(':memory:');migrate(db);const keys=await createCloudKeys(),store=new CloudStore(db,keys.csk),kek=randomBytes(32),device={vaultId:'vault',deviceId:'a',publicKey:Buffer.from(keys.signingPublic).toString('base64'),revoked:false};
+ let c=new VaultMutationCoordinator(store,keys,device,kek,1);
+ c.mutate({name:'legacy',value:'value',scopes:['read'],metadata:null,localVersion:1},'put');
+ c.apply({signed:store.all<import('../src/cloud/coordinator.ts').OutboxEntry>('outbox')[0]!.value.signed,serverSequence:1});
+ db.run("UPDATE secrets SET scopes='[\"read\",\"write\"]',metadata='{\"note\":true}',version=version+1 WHERE name='legacy'");
+ c.reconcile();expect(c.pendingLegacy()).toEqual([{name:'legacy',action:'scope'}]);expect(store.all('outbox')).toHaveLength(0);
+ c.detach();c=new VaultMutationCoordinator(store,keys,device,kek,1);
+ const id=c.approveLegacy('legacy');expect(id.length).toBeGreaterThan(0);const queued=store.all<import('../src/cloud/coordinator.ts').OutboxEntry>('outbox')[0]!.value;
+ db.run("UPDATE secrets SET version=version+1 WHERE name='legacy'");const changed=JSON.stringify(db.query('SELECT * FROM secrets').all());c.apply({signed:queued.signed,serverSequence:2});expect(JSON.stringify(db.query('SELECT * FROM secrets').all())).toBe(changed);
+ c.approveLegacy('legacy');c.apply({signed:store.all<import('../src/cloud/coordinator.ts').OutboxEntry>('outbox')[0]!.value.signed,serverSequence:3});c.reconcile();expect(store.all('outbox')).toHaveLength(0);expect(c.pendingLegacy()).toHaveLength(0);
+ db.run("DELETE FROM secrets WHERE name='legacy'");c.reconcile();expect(c.pendingLegacy()).toEqual([{name:'legacy',action:'delete'}]);c.approveLegacy('legacy');c.apply({signed:store.all<import('../src/cloud/coordinator.ts').OutboxEntry>('outbox')[0]!.value.signed,serverSequence:4});c.reconcile();expect(store.all('outbox')).toHaveLength(0);expect(db.query("SELECT deleted_at FROM secrets WHERE name='legacy'").get()).not.toBeNull();
+ db.run("UPDATE secrets SET deleted_at=NULL WHERE name='legacy'");c.reconcile();expect(c.pendingLegacy()).toEqual([{name:'legacy',action:'restore'}]);c.approveLegacy('legacy');c.apply({signed:store.all<import('../src/cloud/coordinator.ts').OutboxEntry>('outbox')[0]!.value.signed,serverSequence:5});c.reconcile();expect(c.pendingLegacy()).toHaveLength(0);db.close();
+});
+test('an older client edit during acceptance of its queued create remains pending without losing the edit',async()=>{
+ const db=new Database(':memory:');migrate(db);const keys=await createCloudKeys(),store=new CloudStore(db,keys.csk),kek=randomBytes(32),c=new VaultMutationCoordinator(store,keys,{vaultId:'vault',deviceId:'a',publicKey:Buffer.from(keys.signingPublic).toString('base64'),revoked:false},kek,1);
+ c.mutate({name:'legacy-race',value:'value',scopes:['read'],metadata:null,localVersion:1},'put');const signed=store.all<import('../src/cloud/coordinator.ts').OutboxEntry>('outbox')[0]!.value.signed;
+ db.run("UPDATE secrets SET version=2,metadata='{\"edited\":true}' WHERE name='legacy-race'");const edited=JSON.stringify(db.query('SELECT * FROM secrets').all());
+ c.apply({signed,serverSequence:1});expect(JSON.stringify(db.query('SELECT * FROM secrets').all())).toBe(edited);c.reconcile();expect(c.pendingLegacy()).toEqual([{name:'legacy-race',action:'rotate'}]);expect(store.all('outbox')).toHaveLength(0);expect(c.approveLegacy('legacy-race').length).toBeGreaterThan(0);db.close();
+});
+test('replaced legacy approval is retired and late acceptance preserves newer local bytes',async()=>{
+ const db=new Database(':memory:');migrate(db);const keys=await createCloudKeys(),store=new CloudStore(db,keys.csk),kek=randomBytes(32);
+ const c=new VaultMutationCoordinator(store,keys,{vaultId:'vault',deviceId:'a',publicKey:Buffer.from(keys.signingPublic).toString('base64'),revoked:false},kek,1);
+ c.mutate({name:'replace',value:'value',scopes:['read'],metadata:null,localVersion:1},'put');
+ c.apply({signed:store.all<import('../src/cloud/coordinator.ts').OutboxEntry>('outbox')[0]!.value.signed,serverSequence:1});
+ db.run('UPDATE secrets SET version=version+1');c.reconcile();const oldId=c.approveLegacy('replace');
+ const old=store.all<import('../src/cloud/coordinator.ts').OutboxEntry>('outbox')[0]!;
+ db.run('UPDATE secrets SET version=version+1');const before=JSON.stringify(db.query('SELECT * FROM secrets').all());c.reconcile();
+ expect(store.all('outbox')).toHaveLength(0);
+ expect(c.pendingLegacy()).toEqual([{name:'replace',action:'rotate',state:'stale',requestId:oldId}]);
+ c.apply({signed:old.value.signed,serverSequence:2});expect(JSON.stringify(db.query('SELECT * FROM secrets').all())).toBe(before);
+ expect(c.approveLegacy('replace')).not.toBe(oldId);db.close();
+});
+test('remote conflict advances verified history while retaining the legacy value for a fresh approval',async()=>{
+ const db=new Database(':memory:');migrate(db);const keys=await createCloudKeys(),store=new CloudStore(db,keys.csk),kek=randomBytes(32);
+ const c=new VaultMutationCoordinator(store,keys,{vaultId:'vault',deviceId:'a',publicKey:Buffer.from(keys.signingPublic).toString('base64'),revoked:false},kek,1);
+ c.mutate({name:'conflict',value:'value',scopes:['read'],metadata:null,localVersion:1},'put');c.apply({signed:store.all<import('../src/cloud/coordinator.ts').OutboxEntry>('outbox')[0]!.value.signed,serverSequence:1});
+ c.requestApproval({name:'conflict',value:'remote-approved',scopes:['read'],metadata:null,localVersion:2},'put','rotate');const signed=store.all<import('../src/cloud/coordinator.ts').OutboxEntry>('outbox')[0]!.value.signed;
+ db.run('UPDATE secrets SET version=version+1');const local=JSON.stringify(db.query('SELECT * FROM secrets').all());
+ c.apply({signed,serverSequence:2});expect(JSON.stringify(db.query('SELECT * FROM secrets').all())).toBe(local);
+ expect(store.all('outbox')).toHaveLength(0);expect(store.all('history')).toHaveLength(2);expect(c.approveLegacy('conflict')).toBeString();db.close();
+});
+test('reverting a pending legacy edit to its exact shadow also retires the stale approval',async()=>{
+ const db=new Database(':memory:');migrate(db);const keys=await createCloudKeys(),store=new CloudStore(db,keys.csk),kek=randomBytes(32);
+ const c=new VaultMutationCoordinator(store,keys,{vaultId:'vault',deviceId:'a',publicKey:Buffer.from(keys.signingPublic).toString('base64'),revoked:false},kek,1);
+ c.mutate({name:'revert',value:'value',scopes:['read'],metadata:null,localVersion:1},'put');c.apply({signed:store.all<import('../src/cloud/coordinator.ts').OutboxEntry>('outbox')[0]!.value.signed,serverSequence:1});
+ db.run('UPDATE secrets SET version=version+1');c.reconcile();c.approveLegacy('revert');db.run('UPDATE secrets SET version=version-1');c.reconcile();
+ expect(store.all('outbox')).toHaveLength(0);expect(c.pendingLegacy()).toHaveLength(0);db.close();
+});
+test('batch preflight and injected failure leave no partial rows, shadow, outbox or audit',async()=>{
+ const db=new Database(':memory:');migrate(db);const keys=await createCloudKeys(),store=new CloudStore(db,keys.csk);
+ const c=new VaultMutationCoordinator(store,keys,{vaultId:'vault',deviceId:'a',publicKey:Buffer.from(keys.signingPublic).toString('base64'),revoked:false},randomBytes(32),1);
+ const payload=(name:string)=>({name,value:'synthetic',scopes:['read'],metadata:null,localVersion:1});
+ c.mutate(payload('existing'),'put');
+ const snapshot=()=>JSON.stringify(['secrets','cloud_outbox','cloud_shadow','cloud_audit','cloud_state'].map(t=>db.query(`SELECT * FROM ${t}`).all()));
+ const before=snapshot();
+ expect(()=>c.mutateBatch([payload('new'),payload('existing')])).toThrow('approval_required');expect(snapshot()).toBe(before);
+ expect(()=>c.mutateBatch([payload('new'),{...payload('invalid'),localVersion:0}])).toThrow();expect(snapshot()).toBe(before);
+ expect(()=>c.mutateBatch([payload('new'),payload('new')])).toThrow();expect(snapshot()).toBe(before);
+ db.exec("CREATE TRIGGER fail_batch BEFORE INSERT ON secrets WHEN NEW.name='fail' BEGIN SELECT RAISE(ABORT,'injected'); END");
+ expect(()=>c.mutateBatch([payload('new'),payload('fail')])).toThrow('injected');expect(snapshot()).toBe(before);
+ db.run("UPDATE secrets SET deleted_at=1 WHERE name='existing'");const tombstone=snapshot();expect(()=>c.mutateBatch([payload('new'),payload('existing')])).toThrow('approval_required');expect(snapshot()).toBe(tombstone);
+ db.exec("CREATE TRIGGER fail_import_audit BEFORE INSERT ON cloud_audit BEGIN SELECT RAISE(ABORT,'audit_injected'); END");expect(()=>c.mutateBatch([payload('one'),payload('two')])).toThrow('audit_injected');expect(snapshot()).toBe(tombstone);db.exec('DROP TRIGGER fail_import_audit');
+ c.mutateBatch([payload('one'),payload('two')]);expect(store.all('outbox')).toHaveLength(3);expect(store.all('audit')).toHaveLength(1);
+ const accepted=store.all<import('../src/cloud/coordinator.ts').OutboxEntry>('outbox').find(e=>JSON.parse(e.value.signed.canonical).objectId===objectId(keys.vdk,'one'))!;c.apply({signed:accepted.value.signed,serverSequence:1});db.run("DELETE FROM secrets WHERE name='one'");const missingLocal=snapshot();
+ expect(()=>c.mutateBatch([payload('fresh'),payload('one')])).toThrow('approval_required');expect(snapshot()).toBe(missingLocal);db.close();
+});

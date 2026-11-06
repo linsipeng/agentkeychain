@@ -1,3 +1,7 @@
+import {validatePayload} from './cloud/crypto.ts';
+import {acceptExport} from './cloud/export.ts';
+import {openCloudRuntime} from './cloud/runtime.ts';
+import { hasCloudState } from './cloud/coordinator.ts';
 /**
  * Vault export/import — encrypted bundle transfer between machines (v0.2 Phase 1).
  *
@@ -106,6 +110,13 @@ export async function exportVault(
 ): Promise<ExportResult> {
   await ensureSodium();
 
+
+
+  const vaultKek = await deriveKEK(password, vaultSalt(db));
+  let runtime:Awaited<ReturnType<typeof openCloudRuntime>>|undefined;
+  try {
+    if(hasCloudState(db))runtime=await openCloudRuntime(db,vaultKek);
+    const permit=runtime?await acceptExport(runtime,outPath):null;
   const rows = db
     .prepare(
       `SELECT name, ciphertext, nonce, scopes, metadata, version, created_at, updated_at
@@ -121,9 +132,6 @@ export async function exportVault(
       created_at: number;
       updated_at: number;
     }>;
-
-  const vaultKek = await deriveKEK(password, vaultSalt(db));
-  try {
     const entries: BundleEntry[] = [];
     for (const row of rows) {
       const plaintext = await decrypt(row.ciphertext, row.nonce, vaultKek);
@@ -160,7 +168,8 @@ export async function exportVault(
         Buffer.from(ciphertext).toString("base64"),
       ].join(":");
 
-      writeFileSync(outPath, payload + "\n", { mode: 0o600 });
+      if(permit)permit.write(payload+"\n");else writeFileSync(outPath, payload + "\n", { mode: 0o600 });
+      jsonBytes.fill(0);
 
       await auditOne(db, vaultKek, "export", basename(outPath), entries.length > 0);
 
@@ -169,6 +178,7 @@ export async function exportVault(
       bundleKek.fill(0);
     }
   } finally {
+    runtime?.close();
     vaultKek.fill(0);
   }
 }
@@ -218,10 +228,32 @@ export async function importBundle(
     }
 
     const vaultKek = await deriveKEK(bundlePassword, targetSalt);
+    let cloud:Awaited<ReturnType<typeof openCloudRuntime>>|undefined;
     try {
       const imported: string[] = [];
       const skipped: Array<{ name: string; reason: string }> = [];
       const now = Date.now();
+      // Validate every entry, including skipped entries, before any mutation.
+      if(!Array.isArray(envelope.entries))throw new Error('invalid_bundle_entries');
+      const names=new Set<string>();
+      for(const entry of envelope.entries){
+        if(!entry||typeof entry.name!=='string'||!entry.name.length||names.has(entry.name)||typeof entry.value!=='string'||!Array.isArray(entry.scopes)||!entry.scopes.every(v=>typeof v==='string')||!Number.isSafeInteger(entry.version)||entry.version<1||!Number.isSafeInteger(entry.createdAt)||!Number.isSafeInteger(entry.updatedAt)||(entry.metadata!==null&&(typeof entry.metadata!=='object'||Array.isArray(entry.metadata))))throw new Error('invalid_bundle_entry');
+        validatePayload({name:entry.name,value:entry.value,scopes:entry.scopes,metadata:entry.metadata,localVersion:entry.version});
+        if(Buffer.byteLength(JSON.stringify(entry))>256*1024-16)throw new Error('cloud_payload_too_large');
+        names.add(entry.name);
+      }
+      if(hasCloudState(db))cloud=await openCloudRuntime(db,vaultKek);
+      if(cloud){
+        const payloads=[];
+        for(const entry of envelope.entries){
+          const existing=db.prepare('SELECT deleted_at FROM secrets WHERE name=?').get(entry.name) as {deleted_at:number|null}|null;
+          if(existing&&existing.deleted_at===null&&!options.overwrite){skipped.push({name:entry.name,reason:'exists (use --overwrite to replace)'});continue;}
+          payloads.push({name:entry.name,value:entry.value,scopes:entry.scopes,metadata:entry.metadata,localVersion:entry.version});
+        }
+        cloud.coordinator.mutateBatch(payloads);
+        return {imported:payloads.map(p=>p.name),skipped};
+      }
+
 
       for (const entry of envelope.entries) {
         const existing = db
@@ -271,6 +303,7 @@ export async function importBundle(
 
       return { imported, skipped };
     } finally {
+      cloud?.close();
       vaultKek.fill(0);
     }
   } finally {

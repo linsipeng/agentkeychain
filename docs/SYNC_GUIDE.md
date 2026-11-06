@@ -38,7 +38,7 @@ Configuration is preserved; nothing is automatically uploaded, migrated or delet
 The old implementation remains in the source for compatibility review, outside the
 managed path. Custom `AGENTKEYCHAIN_HOME` uses the Vault's isolation guard.
 
-Limitations: this is not a production API. Device administration, key discovery and
+Historical Slice 1 limitations (superseded by the durable client and security repair below): this was not a production API. Device administration, key discovery and
 pull are trusted in-process seams, not authenticated public endpoints. The test
 approval issuer is a trusted harness, not a user confirmation interface. Existing
 v0.6.2 Vault schema/ciphertext and CLI/MCP behavior remain unchanged; local secret
@@ -50,7 +50,7 @@ are deferred. `DeviceKeyPackage` is an interface only. No account-recovery claim
 ## 中文
 
 AgentKeychain 只规划一种云产品模式：官方托管服务。目标体验是登录后，在获批设备间
-同步加密凭证。本分支只有本地内存协议、服务和客户端实现；尚无云部署或账号连接命令。
+同步加密凭证。早期 Slice 1 只有本地内存协议；当前已有持久客户端及账号连接命令，仍未部署生产服务。
 
 已实现并测试：
 
@@ -93,7 +93,7 @@ Pagination rejects gaps, duplicates, oversized pages, invalid continuation, an e
 page after promised continuation and termination below an acknowledged sequence.
 Without an authenticated log checkpoint it cannot detect a server hiding an unknown
 suffix or rolling back an entire otherwise valid snapshot. Full-history storage is
-unbounded in this local slice; durable storage/compaction is not implemented.
+unbounded in the historical memory-only slice. The current client persists encrypted history and secure anchors; history compaction remains deferred.
 
 `ManagedService.transactionScope` explicitly identifies a local-memory-only contract.
 Production approval lookup/consumption, device revocation check, idempotency, sequence
@@ -155,13 +155,13 @@ or VDK. The generated workerd bundle exercises the complete synthetic JSON flow.
 step-up 和显式确认；账号/Vault 范围来自认证记录，服务端不接收设备私钥或 VDK。
 生成的 workerd bundle 已验证完整合成 JSON 流程。
 
-The Slice 1 client and its earlier limitations above remain unchanged. Production client
-checkpoint persistence remains Phase 4; Phase 3 implements the ordinary-user `/app/devices` UI. A retained
+The historical Slice 1 implementation remains as a protocol fixture. The current durable client
+persists checkpoints and independent witness receipts; the web application implements the ordinary-user `/app/devices` UI. A retained
 trusted anchor is necessary to reject an entirely replayed old signed snapshot. No online
 audit or real browser/platform-authenticator validation is claimed under this task's
 no-network constraint and unavailable built-in browser tools.
 
-上文 Slice 1 客户端及其限制保持不变；生产客户端检查点持久化和普通用户 `/device` 界面属于
+上文 Slice 1 限制属于历史记录；当前持久客户端已保存检查点，设备界面已实现。原计划属于
 后续阶段。拒绝整个旧签名快照的回放需要独立保存的可信锚点。本任务禁止网络，且未提供内置
 浏览器工具，因此不声称完成在线漏洞审计或真实浏览器/平台认证器验收。
 
@@ -243,3 +243,60 @@ processed cursors, with a 300-second freshness window; delivery alone is not an 
 仅允许启动、状态及取消；所有密码学步骤走目标设备接口。取消只传设备签发的引用，
 不传签名授权正文。设备状态来自认证拉取时间和已处理游标，时效窗口为 300 秒；
 服务器发送数据不等于设备已确认。尚未部署，原生浏览器/Passkey 验收仍有限制。
+
+
+## Current client implementation / 当前客户端实现
+
+The separate durable client now persists encrypted outbox/history, validates release
+and enrollment trust, retains an independent checkpoint anchor, and supplies background
+sync plus CLI/MCP controls. These supersede the historical Phase 4 deferrals above.
+`cloud status` in an ordinary unprovisioned build reports
+`cloud_unavailable_not_provisioned`; no URL/token override exists. The legacy `sync`
+commands remain disabled and legacy configuration is never imported automatically.
+
+Compiled synthetic acceptance covers issuer intent/SAS/package/receipt interruptions,
+terminal and replacement requests, concurrent delivery, local/outbox atomicity,
+push/pull/cursor/anchor crashes, daemon leases, revocation and reconciliation decisions.
+Enrollment resumes only from exact protected signed/encrypted evidence; unknown or
+conflicting anchors fail closed. Export uses exclusive POSIX directory-relative
+publication with a durable inode receipt, exact staging cleanup, and tested parent
+rename/symlink/fsync failures. Existing Vault rows remain unchanged during enrollment.
+Use `cloud request-export <path>` before `export --out <path>` and
+`cloud reconcile [name]` to inspect or stage older-client edits.
+See [final local acceptance](PHASE45_FINAL_CONTINUATION.md).
+
+中文：最终三项内部缺口已完成本地实现及验收：签发端/守护进程中断与并发、部分注册锚
+恢复、目录描述符相对导出。恢复仅使用受保护的原始密钥和已验证信任证据；未知或冲突锚
+保持隔离。现仅保留外部生产配置、原生平台/浏览器验收及发布部署门槛。未使用真实数据。
+
+Signed roster/revocation contracts and freshness limits remain documented in
+[SIGNED_ROSTER.md](SIGNED_ROSTER.md). Completed local recovery activation is documented
+in [LOCAL_RECOVERY_ACTIVATION.md](LOCAL_RECOVERY_ACTIVATION.md).
+
+### Native recovery activation
+
+The development CLI now implements `cloud recover <packageId>` and journal resume
+with `cloud recover`. Use `--no-open` to print the safe verification URL, or
+`--restart` with a package ID to replace only a key-free terminal receipt. Recovery
+requires the existing locally initialized vault/private password boundary.
+Independent release signatures, an authority-encrypted trust bundle, protected
+refresh credentials and final server/local readback gate activation. See
+[local recovery implementation and acceptance](LOCAL_RECOVERY_ACTIVATION.md).
+Production endpoint/key provisioning remains fail-closed; this does not change the
+pinned public installation release or authorize real-vault migration.
+
+Latest local continuation: [crash delivery and reconciliation evidence](PHASE45_FINAL_CONTINUATION.md). Denied, cancelled, expired and stale legacy requests are retired locally; `cloud reconcile` reports the terminal request and an explicit new request is required.
+
+Current security lifecycle: Main acceptance → pending witness saga → independently
+verified Custodian receipt → client trust/activation. Revocation enforcement can precede
+its witnessed completion; the UI/API must not equate the two. Recovery refresh creates
+a new immutable receipt version before target-signed activation; committed history is
+retained. Managed imports commit an entire batch or nothing. See
+[final security repair](FINAL_SECURITY_REPAIR.md) and the
+[migration rollback runbook](SECURITY_REPAIR_MIGRATION_RUNBOOK.md).
+
+中文：当前生命周期为 Main 接受、独立见证待确认、Custodian 签名回执、客户端信任/激活。
+吊销执行不等于见证完成；激活前可刷新回执版本，激活后保留不可变历史。托管导入全批次
+提交或全部回滚。旧阶段计数是历史证据，最新验收以安全修复记录为准。
+
+精确恢复版本绑定、最后设备移除保护与无限历史的增量见证，以[最终复审契约及验收记录](LAST_FINAL_REVIEW.md)为准。

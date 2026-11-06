@@ -203,6 +203,7 @@ test('new recovery epoch invalidates an old case independently at both operators
     m.custodianShare = await seal(keys.custodian.publicKey, b, packageContext(m, 'custodian'));
     const canonical = JSON.stringify(m);
     await repo().enroll({ ...ctx, nonce: crypto.randomUUID() }, canonical, await sign(signing, canonical));
+    expect((await repo().detail(s,c.input.id,true)).state).toBe('conflict');
     await expect(repo().release(s, c.input.id, await evidence(c.canonical))).rejects.toThrow();
     await expect((async () => await env.RECOVERY.release(c.canonical, await evidence(c.canonical)))()).rejects.toThrow();
     expect(await db().prepare('SELECT count(*) n FROM devices').first('n')).toBe(1);
@@ -451,6 +452,15 @@ test('public email recovery completes through target-only HTTP delivery without 
         }
         const prepared=await deviceCall('recovery-target',body);expect(prepared.status).toBe(200);
         expect((await deviceCall('recovery-target',body)).status).not.toBe(200);
+        const retryRef=random();
+        const retrySignature=await sign(signer,JSON.stringify(['AgentKeychain-recovery-target-request-v1',t,retryRef]));
+        const next=await deviceCall('recovery-target-challenge',{target:t,signature});
+        const nc=await next.json() as {challengeRef:string;box:Parameters<typeof open>[1]};
+        const retryBody={target:t,signature:retrySignature,requestRef:retryRef,challengeRef:nc.challengeRef,proof:encode64(await open(target.privateKey,nc.box,'AgentKeychain-recovery-target-possession-v1\0'+nc.challengeRef+'\0'+JSON.stringify(t)))};
+        const first=await deviceCall('recovery-target',retryBody);expect(first.status).toBe(200);
+        const again=await deviceCall('recovery-target',retryBody);expect(again.status).toBe(200);
+        expect(await again.json()).toEqual(await first.json());
+        expect((await deviceCall('recovery-target',{...retryBody,requestRef:random()})).status).not.toBe(200);
         return await prepared.json() as {requestRef:string};
     };
     const substituted={...input,signingKey:await publicKey(signing)};
@@ -473,6 +483,7 @@ test('public email recovery completes through target-only HTTP delivery without 
     expect((await call('recovery/start',{})).status).toBe(401);
     expect(await db().prepare('SELECT count(*) n FROM recovery_sagas').first('n')).toBe(0);
     remember(await auth(new Request(origin+'/v1/auth/bootstrap')));
+    await db().batch([db().prepare("INSERT INTO vaults VALUES('t','second-vault',0)"),db().prepare("INSERT INTO tenants VALUES('second-tenant')"),db().prepare("INSERT INTO memberships VALUES('second-tenant','a',1)"),db().prepare("INSERT INTO vaults VALUES('second-tenant','third-vault',0)")]);
     const verified=await call('recovery/verify',{email:'synthetic@example.invalid',proof:'synthetic-independent-proof',requestRef});expect(verified.status).toBe(200);remember(verified);
     expect((await call('recovery/start',input)).status).not.toBe(200);
     expect((await call('recovery/cancel',{id:input.id,confirmed:true,authorization:{}})).status).not.toBe(200);
@@ -483,10 +494,15 @@ test('public email recovery completes through target-only HTTP delivery without 
     const detail=await targetCall('recovery-target-status');expect(detail.status).toBe(200);const c=await detail.json() as {canonical:string;challenge:Parameters<typeof open>[1]};
     expect((await deviceCall('recovery-target-status',{requestRef,signature:await sign(signing,'wrong')})).status).toBe(401);
     const early=await targetCall('recovery-target-release',{evidence:{mode:'cooldown',confirmerId:null,signature:null,proof:await sign(signing,'early')}});expect(early.status).not.toBe(200);
-    for(const route of ['recovery-target-status','recovery-target-release','recovery-target-finish']) {
+    for(const route of ['recovery-target-status','recovery-target-release','recovery-target-delivery','recovery-target-finish']) {
         const body={requestRef,...(route.endsWith('release')?{evidence:{}}:route.endsWith('finish')?{proof:'fake',completionSignature:'fake'}:{})};
         expect((await deviceCall(route,{...body,signature:await sign(browserSigning,JSON.stringify(['AgentKeychain-recovery-target-call-v1',route,body]))})).status).not.toBe(200);
     }
+    const authorization=await evidence(c.canonical);
+    const signedResponse=await targetCall('recovery-target-delivery',{evidence:authorization});expect(signedResponse.status).toBe(200);
+    const signedDelivery=await signedResponse.json() as {api:import('../../src/cloud/protocol.ts').SignedManagedOperation;custodian:import('../../src/cloud/protocol.ts').SignedManagedOperation;manifestCanonical:string};
+    await verifyRecoveryRelease(signedDelivery.api,await env.RECOVERY_RELEASE_SIGNER!.key(),'api',c.canonical,signedDelivery.manifestCanonical,authorization,Math.floor(Date.now()/1000));
+    await verifyRecoveryRelease(signedDelivery.custodian,await env.CUSTODIAN_TEST_RELEASE.key(),'custodian',c.canonical,signedDelivery.manifestCanonical,authorization,Math.floor(Date.now()/1000));
     const released=await targetCall('recovery-target-release',{evidence:await evidence(c.canonical)});expect(released.status).toBe(200);
     const delivery=await released.json() as {api:Parameters<typeof open>[1];custodian:Parameters<typeof open>[1];wrappedVDK:string};
     for(const party of ['api','custodian'] as const) await expect(open(browserWrapping.privateKey,delivery[party],releaseContext(c.canonical,party))).rejects.toThrow();
@@ -544,7 +560,7 @@ test('device web status follows scoped backend progress and vault availability',
     await db().prepare("DELETE FROM vault_devices WHERE device_id='d'").run();
     expect(await status()).toBe('unavailable');
     await db().prepare("UPDATE devices SET active=0 WHERE id='d'").run();
-    expect(await status()).toBe('removed');
+    expect(await status()).toBe('removalPending');
     expect((await web.query({view:'status'}) as {status:string}).status).toBe('waiting');
 });
 
@@ -563,3 +579,182 @@ test('web cancellation resolves only same-account confirmation and still require
     expect(result).toMatchObject({id:c.input.id,state:'cancelled'});
     assertSafeView(await web.query({view:'recovery',id:c.input.id}));
 });
+import {verifyRecoveryRelease} from '../shared/recovery-release.ts';
+test('independent Workers authenticate released ciphertext with separate role keys',async()=>{
+    const c=await started(),e=await evidence(c.canonical);
+    const delivery=await repo().authenticatedRelease(s,c.input.id,e);
+    const apiPin=await env.RECOVERY_RELEASE_SIGNER!.key();
+    const custodyPin=await env.CUSTODIAN_TEST_RELEASE.key();
+    expect(apiPin.publicKey).not.toBe(custodyPin.publicKey);
+    const now=Math.floor(Date.now()/1000);
+    const a=await verifyRecoveryRelease(delivery.api,apiPin,'api',c.canonical,delivery.manifestCanonical,e,now);
+    const b=await verifyRecoveryRelease(delivery.custodian,custodyPin,'custodian',c.canonical,delivery.manifestCanonical,e,now);
+    expect(joinRecoveryKey(await open(target.privateKey,a,releaseContext(c.canonical,'api')),await open(target.privateKey,b,releaseContext(c.canonical,'custodian')))).toEqual(recoveryKey);
+    await expect(verifyRecoveryRelease(delivery.custodian,apiPin,'api',c.canonical,delivery.manifestCanonical,e,now)).rejects.toThrow();
+    expect(await repo().authenticatedRelease(s,c.input.id,e)).toEqual(delivery);
+    await step('cancel',c.canonical);await repo().cancel(s,c.input.id,await cancelAuth(c.canonical));
+    await expect(repo().authenticatedRelease(s,c.input.id,e)).rejects.toThrow();
+});
+
+test('completed two-Worker recovery publishes immutable authority-encrypted trust and exact retries',async()=>{
+ const {canonicalRoster,ROSTER_DOMAIN,rosterDigest,verifyRoster}=await import('../shared/roster.ts');
+ const {recoveryTrustContext,parseRecoveryTrust,RECOVERY_TRUST_DOMAIN}=await import('../shared/recovery-trust.ts');
+ const {verify}=await import('../shared/contracts.ts');
+ const c=await started(),cp=await env.CHECKPOINT_SIGNER!.key(),authority=await env.CUSTODIAN_TEST_TRUST_SIGNER.key();
+ const services={api:await env.RECOVERY_RELEASE_SIGNER!.key(),custodian:await env.CUSTODIAN_TEST_RELEASE.key()};
+ const releaseCanonical=JSON.stringify({witnessKeys:[await env.CUSTODIAN_TEST_WITNESS_SIGNER.key()],recoveryServices:services,recoveryAuthorities:[authority],version:1,releaseId:'test-trust',apiOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[cp]});
+ await env.CUSTODIAN_TEST_TRUST_SIGNER.configure(releaseCanonical);
+ const wrapping=await publicKey(await crypto.subtle.generateKey('X25519',true,['deriveBits']) as CryptoKeyPair),now=Math.floor(Date.now()/1000);
+ await db().prepare("INSERT INTO device_keys VALUES('t','d',?)").bind(wrapping).run();
+ const canonical=canonicalRoster({version:1,accountId:'a',tenantId:'t',vaultId:'v',revision:1,previousDigest:null,keyEpoch:1,active:[{deviceId:'d',signingKey:await publicKey(signing),wrappingKey:wrapping}],revoked:[],issuer:{kind:'device',id:'d'},issuedAt:now,expiresAt:now+2592000,checkpointKeys:[cp],recoveryAuthorities:[authority],recovery:null});
+ const first={canonical,signature:await sign(signing,ROSTER_DOMAIN+canonical)};
+ await db().prepare("INSERT INTO signed_rosters VALUES('t','v','a',1,?,NULL,'d',?,?)").bind(await rosterDigest(first),canonical,first.signature).run();
+ await expect(repo().trustBundle(s,c.input.id)).rejects.toThrow();
+ await repo().release(s,c.input.id,await evidence(c.canonical));
+ const proof=encode64(await open(target.privateKey,c.challenge,releaseContext(c.canonical,'api')+'proof'));
+ await repo().finish(s,c.input.id,proof,await sign(targetSigning,JSON.stringify(['AgentKeychain-recovery-proof-v1',c.canonical,proof])));
+ const {acknowledgeRoster}=await import('../api-worker/roster-witness.ts');
+ await acknowledgeRoster(db(),'t','v',{witness:i=>env.RECOVERY.witness!(i)},env.CHECKPOINT_SIGNER!);
+ const delivery=await repo().trustBundle(s,c.input.id);
+ const plain=await open(target.privateKey,delivery.sealed,recoveryTrustContext(c.canonical),768*1024);
+ const signed=JSON.parse(new TextDecoder().decode(plain));plain.fill(0);
+ const bundle=parseRecoveryTrust(signed);expect(bundle.caseCanonical).toBe(c.canonical);expect(bundle.releaseCanonical).toBe(releaseCanonical);
+ expect(await verify(authority.publicKey,signed.signature,RECOVERY_TRUST_DOMAIN+signed.canonical)).toBe(true);
+ expect((await verifyRoster(bundle.rosters[1]!,first)).active.some(d=>d.deviceId===c.input.targetDeviceId)).toBe(true);
+ expect(await repo().trustBundle(s,c.input.id)).toEqual(delivery);
+ await expect((async()=>await env.RECOVERY.trustBundle!(c.canonical,[first],bundle.checkpoint,[{deviceId:'changed',acceptedThrough:bundle.checkpoint}]))()).rejects.toThrow('idempotency_conflict');
+ await expect((async()=>await env.RECOVERY.trustBundle!(JSON.stringify({...JSON.parse(c.canonical),targetDeviceId:random()}),[first],bundle.checkpoint,[]))()).rejects.toThrow('idempotency_conflict');
+ expect(await db().prepare('SELECT count(*) n FROM devices').first('n')).toBe(2);
+ expect(await db().prepare('SELECT count(*) n FROM signed_rosters').first('n')).toBe(2);
+ expect(await env.CUSTODIAN_TEST.prepare('SELECT count(*) n FROM recovery_trust_receipts').first('n')).toBe(1);
+ const readback=await repo().readback(s,c.input.id);expect(readback.completed).toBe(true);expect(readback.refreshDigest===bundle.refreshDigest).toBe(true);
+ const {deviceFetch}=await import('../api-worker/device-http.ts');
+ const body={deviceId:c.input.targetDeviceId,credential:bundle.refreshCredential,sessionToken:random(),timestamp:Math.floor(Date.now()/1000)};
+ const refresh=async(value:typeof body,signer=targetSigning,headers:Record<string,string>={})=>deviceFetch(new Request('https://local.invalid/v1/devices/recovery-refresh',{method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify({...value,signature:await sign(signer,JSON.stringify(['AgentKeychain-recovery-refresh-v1',value]))})}),{...env,AUTH_ORIGIN:'https://local.invalid',TRUSTED_AUTH_SOURCE:{resolve:async()=> 'synthetic-refresh'}});
+ expect((await refresh(body)).status).toBe(200);expect((await refresh(body)).status).toBe(200);
+ expect(await db().prepare('SELECT count(*) n FROM device_sessions WHERE device_id=?').bind(c.input.targetDeviceId).first('n')).toBe(1);
+ await db().prepare('UPDATE device_sessions SET expires_at=unixepoch()-1 WHERE device_id=?').bind(c.input.targetDeviceId).run();
+ expect((await refresh(body)).status).toBe(200);
+ expect(await db().prepare('SELECT count(*) n FROM device_sessions WHERE device_id=?').bind(c.input.targetDeviceId).first('n')).toBe(1);
+ expect((await refresh({...body,credential:random()})).status).not.toBe(200);
+ expect((await refresh(body,signing)).status).not.toBe(200);
+ expect((await refresh(body,targetSigning,{origin:'https://local.invalid'})).status).not.toBe(200);
+ expect(JSON.stringify(await db().prepare('SELECT * FROM recovery_refresh').all()).includes(bundle.refreshCredential)).toBe(false);
+ await db().prepare('UPDATE devices SET active=0 WHERE id=?').bind(c.input.targetDeviceId).run();
+ expect((await refresh(body)).status).not.toBe(200);
+ await expect(repo().readback(s,c.input.id)).rejects.toThrow();
+});
+
+test.each([false,true,'last-device','pending-refresh','long-history'] as const)('witness response loss=%s, historical prefix rejection, trust refresh and immutable activation',async mode=>{
+ const lose=mode===true;
+ const {canonicalRoster,ROSTER_DOMAIN,rosterDigest}=await import('../shared/roster.ts');
+ const {recoveryTrustContext,parseRecoveryTrust}=await import('../shared/recovery-trust.ts');
+ const c=await (mode==='last-device'?agedStarted():started()),cp=await env.CHECKPOINT_SIGNER!.key(),authority=await env.CUSTODIAN_TEST_TRUST_SIGNER.key();
+ const services={api:await env.RECOVERY_RELEASE_SIGNER!.key(),custodian:await env.CUSTODIAN_TEST_RELEASE.key()};
+ const releaseCanonical=JSON.stringify({witnessKeys:[await env.CUSTODIAN_TEST_WITNESS_SIGNER.key()],recoveryServices:services,recoveryAuthorities:[authority],version:1,releaseId:'test-trust',apiOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[cp]});
+ await env.CUSTODIAN_TEST_TRUST_SIGNER.configure(releaseCanonical);
+ const wrapping=await publicKey(await crypto.subtle.generateKey('X25519',true,['deriveBits']) as CryptoKeyPair),now=Math.floor(Date.now()/1000);
+ await db().prepare("INSERT INTO device_keys VALUES('t','d',?)").bind(wrapping).run();
+ const canonical=canonicalRoster({version:1,accountId:'a',tenantId:'t',vaultId:'v',revision:1,previousDigest:null,keyEpoch:1,active:[{deviceId:'d',signingKey:await publicKey(signing),wrappingKey:wrapping}],revoked:[],issuer:{kind:'device',id:'d'},issuedAt:now,expiresAt:now+2592000,checkpointKeys:[cp],recoveryAuthorities:[authority],recovery:null});
+ const first={canonical,signature:await sign(signing,ROSTER_DOMAIN+canonical)};
+ await db().prepare("INSERT INTO signed_rosters VALUES('t','v','a',1,?,NULL,'d',?,?)").bind(await rosterDigest(first),canonical,first.signature).run();
+ await expect(repo().trustBundle(s,c.input.id)).rejects.toThrow();
+ if(mode==='last-device'){
+  const {acknowledgeRoster}=await import('../api-worker/roster-witness.ts');
+  await acknowledgeRoster(db(),'t','v',{witness:i=>env.RECOVERY.witness!(i)},env.CHECKPOINT_SIGNER!);
+  const {deviceRepository}=await import('../api-worker/device-repository.ts'),devices=deviceRepository(db()),d=(await devices.list(s)).devices[0]!;
+  expect(d.recoveryReady).toBe(true);
+  await db().prepare('UPDATE browser_sessions SET step_up_digest=?,step_up_expires=unixepoch()+300 WHERE digest=?').bind(d.revokeActionDigest,s.digest).run();
+  await devices.revoke(s,'d');
+  const {acknowledgeLastDeviceRevocation}=await import('../api-worker/revocation-witness.ts');
+  await acknowledgeLastDeviceRevocation(db(),'t','d',{...env.RECOVERY,witnessRevocation:async canonical=>{await env.CUSTODIAN_TEST_TRUST.allowRevocation(canonical);return env.RECOVERY.witnessRevocation!(canonical);}},env.CHECKPOINT_SIGNER!);
+  await (env.RECOVERY_AUTH as unknown as RecoveryTestService).trust('a','t','v','d',null);await env.CUSTODIAN_TEST_TRUST.trust('a','t','v','d',null);
+  const account=await crypto.subtle.generateKey('Ed25519',true,['sign','verify']) as CryptoKeyPair;
+  await (env.RECOVERY_AUTH as unknown as RecoveryTestService).verifier('a',await publicKey(account));await env.CUSTODIAN_TEST_TRUST.verifier('a',await publicKey(account));
+  const ev:RecoveryEvidence={mode:'cooldown',confirmerId:null,signature:null,proof:await sign(account,JSON.stringify(['AgentKeychain-recovery-account-verified-v1',c.canonical]))};
+  await repo().release(s,c.input.id,ev);
+ }else await repo().release(s,c.input.id,await evidence(c.canonical));
+ const proof=encode64(await open(target.privateKey,c.challenge,releaseContext(c.canonical,'api')+'proof'));
+ await repo().finish(s,c.input.id,proof,await sign(targetSigning,JSON.stringify(['AgentKeychain-recovery-proof-v1',c.canonical,proof])));
+ const {acknowledgeRoster}=await import('../api-worker/roster-witness.ts');
+ await acknowledgeRoster(db(),'t','v',{witness:i=>env.RECOVERY.witness!(i)},env.CHECKPOINT_SIGNER!);
+
+ if(lose)await env.CUSTODIAN_TEST.prepare("CREATE TRIGGER injected_trust_failure BEFORE INSERT ON recovery_trust_versions BEGIN SELECT RAISE(ABORT,'synthetic_response_loss'); END").run();
+ if(lose){
+  await expect(repo().trustBundle(s,c.input.id)).rejects.toThrow();
+  const witnessed=await env.CUSTODIAN_TEST.prepare("SELECT roster FROM roster_witness WHERE tenant_id='t' AND vault_id='v' ORDER BY event DESC LIMIT 1").first<string>('roster');
+  const rival=JSON.parse(JSON.parse(witnessed!).canonical);rival.issuer={kind:'device',id:'d'};rival.recovery=null;
+  const rivalCanonical=canonicalRoster(rival);
+  await expect(db().prepare("INSERT INTO signed_rosters VALUES('t','v','a',2,?,?,'d',?,?)").bind(await rosterDigest({canonical:rivalCanonical,signature:await sign(signing,ROSTER_DOMAIN+rivalCanonical)}),rival.previousDigest,rivalCanonical,await sign(signing,ROSTER_DOMAIN+rivalCanonical)).run()).rejects.toThrow('witness_pending');
+  await env.CUSTODIAN_TEST.prepare('DROP TRIGGER injected_trust_failure').run();
+ }
+ const initial=await repo().trustBundle(s,c.input.id);
+ expect(await db().prepare("SELECT state FROM roster_witness_sagas WHERE tenant_id='t' AND vault_id='v' AND revision=2").first('state')).toBe('acknowledged');
+ const decode=async(sealed:import('../shared/recovery-crypto.ts').SealedShare)=>{const bytes=await open(target.privateKey,sealed,recoveryTrustContext(c.canonical),768*1024);try{return parseRecoveryTrust(JSON.parse(new TextDecoder().decode(bytes)));}finally{bytes.fill(0);}};
+ const firstTrust=await decode(initial.sealed),prior=firstTrust.rosters.at(-1)!,old=JSON.parse(prior.canonical);
+ if(mode==='long-history'){
+  let head=prior;
+  for(let revision=3;revision<=258;revision++){
+   const canonical=canonicalRoster({...JSON.parse(head.canonical),revision,previousDigest:await rosterDigest(head),issuer:{kind:'device',id:'d'},recovery:null});
+   const next={canonical,signature:await sign(signing,ROSTER_DOMAIN+canonical)};
+   await db().prepare('INSERT INTO signed_rosters VALUES(?,?,?,?,?,?,?,?,?)').bind('t','v','a',revision,await rosterDigest(next),await rosterDigest(head),'d',canonical,next.signature).run();head=next;
+  }
+  const refreshed=await repo().trustBundle(s,c.input.id),bundle=await decode(refreshed.sealed);
+  expect(bundle.rosters.length).toBeLessThanOrEqual(2);expect(JSON.parse(bundle.rosters.at(-1)!.canonical).revision).toBe(258);
+  const {activationMessage}=await import('../shared/trust-activation.ts');
+  expect(await repo().commitTrust(s,c.input.id,refreshed.receiptVersion,refreshed.binding.rosterDigest,await sign(targetSigning,activationMessage(refreshed.binding)))).toEqual({committed:true});return;
+ }
+
+ if(mode==='last-device'){
+  expect(old.active.map((d:{deviceId:string})=>d.deviceId)).toEqual([c.input.targetDeviceId]);expect(old.revoked.map((d:{deviceId:string})=>d.deviceId)).toEqual(['d']);
+  expect(await env.CUSTODIAN_TEST.prepare('SELECT count(*) n FROM recovery_revocation_witness').first('n')).toBe(1);
+  const {activationMessage}=await import('../shared/trust-activation.ts');
+  expect(await repo().commitTrust(s,c.input.id,initial.receiptVersion,await rosterDigest(prior),await sign(targetSigning,activationMessage(initial.binding)))).toEqual({committed:true});
+  return;
+ }
+ const revocation=JSON.stringify({version:1,accountId:'a',tenantId:'t',vaultId:'v',deviceId:'d',packageId:c.input.packageId,actionId:crypto.randomUUID(),actionCanonical:JSON.stringify(['t','a','d',await publicKey(signing),wrapping,'Access will require recovery']),acceptedThrough:firstTrust.checkpoint});
+ await env.CUSTODIAN_TEST_TRUST.allowRevocation(revocation);await env.RECOVERY.witnessRevocation!(revocation);
+ const {activationMessage:pendingMessage}=await import('../shared/trust-activation.ts');
+ await expect(repo().commitTrust(s,c.input.id,1,initial.binding.rosterDigest,await sign(targetSigning,pendingMessage(initial.binding)))).rejects.toThrow('witness_not_latest');
+ expect(await env.CUSTODIAN_TEST.prepare('SELECT count(*) n FROM recovery_trust_commits').first('n')).toBe(0);
+ await db().prepare("UPDATE devices SET active=0 WHERE tenant_id='t' AND id='d'").run();
+ if(mode==='pending-refresh'){
+  const refreshed=await repo().trustBundle(s,c.input.id),bundle=await decode(refreshed.sealed),head=bundle.rosters.at(-1)!;
+  expect(refreshed.receiptVersion).toBe(2);expect(JSON.parse(head.canonical).revoked.map((d:{deviceId:string})=>d.deviceId)).toEqual(['d']);
+  expect(await repo().commitTrust(s,c.input.id,2,refreshed.binding.rosterDigest,await sign(targetSigning,pendingMessage(refreshed.binding)))).toEqual({committed:true});return;
+ }
+
+ const nextCanonical=canonicalRoster({...old,revision:3,previousDigest:await rosterDigest(prior),active:old.active.filter((d:{deviceId:string})=>d.deviceId!=='d'),revoked:[{...old.active.find((d:{deviceId:string})=>d.deviceId==='d'),revokedRevision:3,acceptedThrough:firstTrust.checkpoint}],issuer:{kind:'device',id:c.input.targetDeviceId},recovery:null});
+ const next={canonical:nextCanonical,signature:await sign(targetSigning,ROSTER_DOMAIN+nextCanonical)};
+ await db().prepare('INSERT INTO signed_rosters VALUES(?,?,?,?,?,?,?,?,?)').bind('t','v','a',3,await rosterDigest(next),await rosterDigest(prior),c.input.targetDeviceId,next.canonical,next.signature).run();
+ await acknowledgeRoster(db(),'t','v',{witness:i=>env.RECOVERY.witness!(i)},env.CHECKPOINT_SIGNER!);
+ await expect((async()=>await env.RECOVERY.witness!({rosters:[first],checkpoints:[firstTrust.checkpoint]}))()).rejects.toThrow('rollback');
+ const commit=async(version:number,roster:import('../../src/cloud/protocol.ts').SignedManagedOperation)=>{const hash=await rosterDigest(roster),raw=await db().prepare('SELECT result FROM recovery_trust_requests WHERE case_id=? AND version=?').bind(c.input.id,version).first<string>('result');const {activationMessage}=await import('../shared/trust-activation.ts');return repo().commitTrust(s,c.input.id,version,hash,await sign(targetSigning,activationMessage(JSON.parse(raw!).binding)));};
+ await expect(commit(1,prior)).rejects.toThrow('witness_not_latest');
+ const refreshed=await repo().trustBundle(s,c.input.id),trust=await decode(refreshed.sealed);
+ expect(refreshed.receiptVersion).toBe(2);expect(trust.rosters.at(-1)).toEqual(next);expect(trust.witness).toBeTruthy();expect(trust.refreshDigest).not.toBe(firstTrust.refreshDigest);
+ const {checkpoint,advanceRoot}=await import('../shared/checkpoints.ts'),oldCP=JSON.parse(trust.checkpoint.canonical);
+ await db().prepare('INSERT INTO checkpoint_key VALUES(1,?,?)').bind(cp.keyId,cp.publicKey).run();
+ await db().prepare('INSERT INTO sync_checkpoints VALUES(?,?,?,?,?,?,?,?,?)').bind('t','v',0,oldCP.root,null,null,cp.keyId,trust.checkpoint.canonical,trust.checkpoint.signature).run();
+ const advanced=await advanceRoot(oldCP.root,1,next),nextCP=await checkpoint(env.CHECKPOINT_SIGNER!,'t','v',1,advanced.root,oldCP.root,advanced.operationDigest);
+ await db().prepare("UPDATE vaults SET sequence=1 WHERE tenant_id='t' AND id='v'").run();
+ await db().prepare('INSERT INTO sync_checkpoints VALUES(?,?,?,?,?,?,?,?,?)').bind('t','v',1,advanced.root,oldCP.root,advanced.operationDigest,cp.keyId,nextCP.canonical,nextCP.signature).run();
+ const newer=await repo().trustBundle(s,c.input.id);expect(newer.receiptVersion).toBe(3);
+ expect(newer.binding.rosterDigest).toBe(refreshed.binding.rosterDigest);expect(newer.binding.checkpointDigest).not.toBe(refreshed.binding.checkpointDigest);expect(newer.binding.refreshDigest).not.toBe(refreshed.binding.refreshDigest);expect(newer.binding.witnessDigest).not.toBe(refreshed.binding.witnessDigest);
+ const {activationMessage}=await import('../shared/trust-activation.ts'),substituted={...refreshed.binding,receiptVersion:3},attack=await sign(targetSigning,activationMessage(substituted));
+ await expect(repo().commitTrust(s,c.input.id,3,substituted.rosterDigest,attack)).rejects.toThrow('idempotency_conflict');
+ await expect((async()=>await env.RECOVERY.commitTrust!(c.canonical,3,substituted.rosterDigest,attack))()).rejects.toThrow('unauthorized');
+ expect(await env.CUSTODIAN_TEST.prepare('SELECT count(*) n FROM recovery_trust_commits').first('n')).toBe(0);
+ expect(await commit(3,next)).toEqual({committed:true});expect(await commit(3,next)).toEqual({committed:true});
+ expect(await repo().trustBundle(s,c.input.id)).toEqual(newer);
+ expect(await env.CUSTODIAN_TEST.prepare('SELECT count(*) n FROM recovery_trust_versions').first('n')).toBe(3);
+ await expect(env.CUSTODIAN_TEST.prepare('UPDATE recovery_trust_commits SET version=1').run()).rejects.toThrow();
+});
+
+async function agedStarted(){
+ const {digest}=await import('../shared/contracts.ts');
+ const m=await enrolled(),now=Math.floor(Date.now()/1000),input={version:1,id:crypto.randomUUID(),packageId:m.packageId,accountId:'a',tenantId:'t',vaultId:'v',keyEpoch:1,targetDeviceId:random(),signingKey:await publicKey(targetSigning),wrappingKey:await publicKey(target),createdAt:now-90000,notBefore:now-3600,expiresAt:now+3600,nonce:crypto.randomUUID()};
+ const canonical=JSON.stringify(input),proof=encode64(crypto.getRandomValues(new Uint8Array(32))),challenge=await seal(input.wrappingKey,Uint8Array.from(atob(proof),v=>v.charCodeAt(0)),releaseContext(canonical,'api')+'proof');
+ await db().prepare("INSERT INTO recovery_sagas(id,tenant_id,vault_id,account_id,package_id,canonical,request_digest,session_digest,state,not_before,expires_at,proof_digest,challenge) VALUES(?,'t','v','a',?,?,?,'browser','prepared',?,?,?,?)").bind(input.id,m.packageId,canonical,await digest(canonical),input.notBefore,input.expiresAt,await digest(proof),JSON.stringify(challenge)).run();
+ await env.RECOVERY.prepare(canonical);return {input,canonical,challenge};
+}

@@ -2,6 +2,7 @@
 /**
  * agentkeychain CLI entry — command router.
  */
+import { runCloud } from "./cloud.ts";
 import { VERSION } from "../index.ts";
 import { runInit } from "./init.ts";
 import { runStore } from "./store.ts";
@@ -21,6 +22,7 @@ import { runVerifyPassword } from "./verify-password.ts";
 import { redact } from "../util/redact.ts";
 
 type Command =
+  | "cloud"
   | "init"
   | "setup"
   | "store"
@@ -42,6 +44,7 @@ type Command =
 function parseArgs(argv: string[]): { command: Command; rest: string[] } {
   const first = argv[0] ?? "help";
   switch (first) {
+    case "cloud": return { command: "cloud", rest: argv.slice(1) };
     case "init": return { command: "init", rest: argv.slice(1) };
     case "setup": return { command: "setup", rest: argv.slice(1) };
     case "store": return { command: "store", rest: argv.slice(1) };
@@ -81,7 +84,9 @@ function printHelp(): void {
       `  agentkeychain export [--out <path>] Export encrypted bundle (v0.2)\n` +
       `  agentkeychain import <bundle> [--overwrite]\n` +
       `                                    Import bundle into this vault (v0.2)\n\n` +
-      `Managed Cloud (local/test-only Slice 1):\n` +
+      `Managed Cloud:\n` +
+      `  agentkeychain cloud status|login|recover [packageId]|logout|devices|sync-now\n` +
+      `  agentkeychain cloud service install|start|stop|status|run|uninstall\n` +
       `  agentkeychain sync status\n` +
       `                                    Show safe legacy compatibility status; connection is not available\n\n` +
       `Advanced (for agents / power users):\n` +
@@ -100,6 +105,7 @@ export async function main(): Promise<number> {
   const { command, rest } = parseArgs(process.argv.slice(2));
   try {
     switch (command) {
+      case "cloud": return runCloud(rest);
       case "init": return runInit();
       case "setup": return runSetup();
       case "store": return runStore(rest);
@@ -130,7 +136,7 @@ export async function main(): Promise<number> {
   }
 }
 
-main().then((code) => process.exit(code)).catch((err) => {
+await main().then((code) => process.exit(code)).catch((err) => {
   process.stderr.write(`fatal: ${err instanceof Error ? err.message : String(err)}\n`);
   process.exit(1);
 });

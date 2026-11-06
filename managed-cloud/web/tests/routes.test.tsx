@@ -12,20 +12,21 @@ let calls: {
 let verification = 'verified';
 let fail = false;
 let deviceActive = true;
+let lastDevice=false,recoveryReady=false,removalComplete=true;
 let deviceStatus = 'stale';
 let requestState = 'pending';
 let requestComplete = true;
 let session = true;
 let authAccepted = true;
 let recoveryState = 'prepared';
-const device = () => ({ id: 'device-one', active: deviceActive, status: deviceActive ? deviceStatus : 'removed', removeRef: deviceActive ? 'remove-reference' : null });
+const device = () => ({ id: 'device-one', active: deviceActive, status: deviceActive ? deviceStatus : 'removed', lastDevice,recoveryReady,revocationComplete:!deviceActive&&removalComplete,removeRef: deviceActive&&(!lastDevice||recoveryReady) ? 'remove-reference' : null });
 const request = () => ({ id: 'request-one', action: 'delete', state: requestState, deviceId: 'device-one', itemRef: 'item-one', createdAt: 1700000000, expiresAt: 1999999999, canAllow: requestComplete && requestState === 'pending', allowRef: requestComplete ? 'allow-reference' : null, denyRef: 'deny-reference' });
 const event = { id: 'event-one', category: 'device', action: 'approved', createdAt: 1700000000, deviceId: 'device-one' };
 beforeEach(() => {
     calls = [];
     verification = 'verified';
     fail = false;
-    deviceActive = true;
+    deviceActive = true;lastDevice=false;recoveryReady=false;removalComplete=true;
     deviceStatus = 'stale';
     requestState = 'pending';
     requestComplete = true;
@@ -245,4 +246,25 @@ test('account recovery uses only safe web query and cancellation action contract
     expect(calls.filter(c=>c.route.startsWith('recovery/'))).toEqual([]);
     expect(calls.find(c=>c.route==='web/execute')?.body).toEqual({ref:'cancel-reference',confirmed:true,confirmationRef:'c'.repeat(43)});
     expect(calls.some(c=>c.route==='web/query'&&c.body.view==='recovery')).toBe(true);
+});
+
+test('last device without recovery is non-removable and explains how to retain access',async()=>{
+ lastDevice=true;mount('/app/devices/device-one');
+ expect((await screen.findByRole('button',{name:'Remove device'})).hasAttribute('disabled')).toBe(true);
+ await screen.findByText(/Add another trusted device or prepare recovery/);
+ expect(calls.some(c=>c.route==='web/execute')).toBe(false);
+});
+test('last device with recovery requires the recovery warning before step-up and readback',async()=>{
+ lastDevice=true;recoveryReady=true;mount('/app/devices/device-one');const user=userEvent.setup();
+ await user.click(await screen.findByRole('button',{name:'Remove device'}));
+ expect(within(screen.getByRole('dialog')).getByText(/Access will require recovery after removal/)).toBeTruthy();
+ expect(deviceActive).toBe(true);
+ await user.click(within(screen.getByRole('dialog')).getByRole('button',{name:'Confirm'}));
+ await screen.findByText('Device removal confirmed.');expect(calls.filter(c=>c.body.view==='device').length).toBeGreaterThan(1);
+});
+
+test('enforced removal does not claim completion before independent witness readback',async()=>{
+ deviceActive=false;removalComplete=false;mount('/app/devices/device-one');
+ await screen.findByText('Access has been blocked. Independent confirmation of removal is still pending.');
+ expect(screen.queryByText('Device removal confirmed.')).toBeNull();
 });

@@ -49,6 +49,7 @@ export function vaultExists(): boolean {
   let db: Database | null = null;
   try {
     db = new Database(path, { create: false, readonly: true });
+    db.exec("PRAGMA busy_timeout=5000");
     const row = db
       .prepare(`SELECT 1 AS x FROM kek_meta WHERE id = 1 LIMIT 1`)
       .get() as { x: number } | null;
@@ -99,6 +100,7 @@ export function ensureVaultDir(): void {
 export function openDb(): Database {
   ensureVaultDir();
   const db = new Database(dbPath(), { create: true });
+  db.exec("PRAGMA busy_timeout=5000");
   migrate(db);
   return db;
 }

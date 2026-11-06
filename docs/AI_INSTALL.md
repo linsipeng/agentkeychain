@@ -63,12 +63,37 @@ The only planned cloud mode is the official managed service; users do not deploy
 infrastructure or supply shared sync credentials. In this development branch,
 `agentkeychain sync status` safely detects legacy configuration; old sync commands
 are disabled, and configuration is preserved without contacting an endpoint.
-No automatic migration, account recovery or approval UI is available. The approval
+No automatic legacy migration or deployed cloud is available; the account recovery/approval UI is locally tested. The approval
 contract does not change existing CLI/MCP plaintext delivery to trusted clients.
 
 ## Related docs
+
+This branch implements native secure-store helpers, signed-manifest build checks,
+metadata-only compatibility reporting and atomic executable replacement. Managed
+service restart is attempted only for a previously installed, running service.
+The macOS helper is built beside the binary and must be shipped with its checksum;
+master-password storage preserves the existing tuple and uses stdin, not secret argv.
+Unknown cloud schemas disable cloud integration while legacy local tables remain usable.
+The public installation protocol stays pinned to v0.6.2; do not upgrade an existing
+installation or install a host service during development acceptance. Production
+cloud composition fails closed until a verified release manifest is built in.
+Target enrollment can resume after browser approval using its original keys. Issuer
+delivery now retries its persisted sealed bytes and local phrase confirmation. Managed
+export requires exact cloud approval. The final local issuer/daemon interruption,
+protected enrollment-anchor recovery and directory-relative export matrices pass.
+Only external provisioning, native-platform/browser acceptance and release/deployment
+gates remain; see [final evidence](./PHASE45_FINAL_CONTINUATION.md).
 
 - Managed Cloud scope and compatibility: [SYNC_GUIDE.md](./SYNC_GUIDE.md)
 - 中文版安装指南: [AI_INSTALL.zh-CN.md](./AI_INSTALL.zh-CN.md)
 
 Phase 2A now has an independent locally tested Workers/D1 backend; it does not change installation or enable account login, enrollment or split-key recovery. See [Phase 2A evidence](./MANAGED_CLOUD_PHASE2A_EVIDENCE.md).
+
+Development-only signed roster/revocation propagation is described in [SIGNED_ROSTER.md](SIGNED_ROSTER.md). It does not change the pinned public installation release or permit real-vault migration.
+
+The development `cloud recover [packageId]` command now resumes secure-store-backed
+recovery, validates independent releases and authority-encrypted trust, and publishes
+local cloud state only after server and secure-store readback. Compiled synthetic
+recovery acceptance covers fast/delayed paths and crash/substitution cases. See [local recovery evidence](LOCAL_RECOVERY_ACTIVATION.md).
+
+Final development security contracts and migration semantics are recorded in [FINAL_SECURITY_REPAIR.md](FINAL_SECURITY_REPAIR.md). The public pinned installation release is unchanged; deployment and platform acceptance remain separate gates.

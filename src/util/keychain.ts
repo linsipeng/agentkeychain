@@ -21,7 +21,7 @@ import { promisify } from "node:util";
 import { homedir, platform } from "node:os";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 
 const execFileAsync = promisify(execFile);
 
@@ -173,19 +173,10 @@ export async function keychainSet(password: string): Promise<boolean> {
   if (!command) return false;
   try {
     if (backend === "macos-keychain") {
-      // -U updates if entry exists, otherwise creates
-      await execFileAsync(
-        command,
-        [
-          "add-generic-password",
-          "-a", KEYCHAIN_ACCOUNT,
-          "-s", keychainService(),
-          "-l", KEYCHAIN_LABEL,
-          "-w", password,
-          "-U",
-        ],
-        { encoding: "utf8", timeout: 10_000 }
-      );
+      // Preserve the historical tuple, but send the value through a private pipe
+      // to the bundled Security.framework helper. Never use security -w <password>.
+      const helper=process.env["AKC_KEYCHAIN_TEST_MODE"] === "1" ? command : join(dirname(process.execPath),"agentkeychain-secure-store");
+      await spawnWithInput(helper,["store-master","-s",keychainService()],JSON.stringify({action:"put",service:keychainService(),account:KEYCHAIN_ACCOUNT,value:Buffer.from(password,"utf8").toString("base64")}),10_000);
       return true;
     }
     if (backend === "linux-libsecret") {
@@ -207,11 +198,8 @@ export async function keychainSet(password: string): Promise<boolean> {
     }
     return false;
   } catch (err) {
-    const e = err as { code?: string; stderr?: string; message?: string };
-    process.stderr.write(
-      `warning: failed to save password to keychain: ${e.message ?? e.code ?? "unknown"}\n` +
-        (e.stderr ? `  (${e.stderr.trim()})\n` : "")
-    );
+    void err;
+    process.stderr.write("warning: failed to save password to keychain\n");
     return false;
   }
 }

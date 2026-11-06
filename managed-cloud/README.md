@@ -6,7 +6,7 @@ immutable encrypted key packages, and service-signed sync checkpoints. Phase 2D 
 exact approval APIs, signed activity and two-party recovery. Phase 3 adds the local
 React control center. Local Vault integration, deployment and production signer
 provisioning remain separate gates.
-The Slice 1 in-memory client is unchanged; its production persistence/transport belongs to Phase 4.
+The Slice 1 in-memory client is unchanged. A separate durable Phase 4 client now exists under `src/cloud`; current evidence and unfinished integration are recorded in `docs/MANAGED_CLOUD_PHASE4_BLOCKERS.md`.
 
 ## Local verification
 
@@ -75,8 +75,8 @@ step-up over its returned digest, and atomic one-use consumption at acceptance.
 | `devices/pending` | `{verificationCode,issuerDeviceId}` (null only for bootstrap) | `{requestId,deviceId,platform,phrase,canonical,actionDigest,denyActionDigest}` |
 | `devices/approve` | `{canonical,signature,confirmed:true}` (signature null only for bootstrap) | `{approved:true,deviceId}` |
 | `devices/deny` | `{requestId,confirmed:true}` | `{denied:true}` |
-| `devices/list` | `{}` | `{devices:[{id,public_key,wrapping_key,active,revokeActionDigest}]}` |
-| `devices/revoke` | `{deviceId,confirmed:true}` | `{revoked:true}` |
+| `devices/list` | `{}` | `{devices:[{id,active,lastDevice,recoveryReady,canRemove,revocationComplete,revokeActionDigest}]}` |
+| `devices/revoke` | `{deviceId,confirmed:true}` | `{revoked:false,enforced:true,witnessPending:true}` |
 
 Pending binds the request to the authenticated account/tenant and its sole vault. An
 ambiguous multi-vault account fails closed instead of accepting a caller-selected vault.
@@ -652,3 +652,99 @@ fields, including spelling variants in nested objects and arrays. WebAuthn optio
 are a separate authentication contract; their passkey challenge is not recovery
 material. Real GET `/v1/auth/session` 401 clears queries, activity receipts and the
 account risk warning before redirect; a different-account regression covers it.
+
+
+## Current Phase 4/5 client work
+
+The development branch includes signed-release endpoint policy, sealed and SAS-bound
+trusted enrollment, private-pipe native secure storage, CSK-encrypted SQLite tables,
+atomic mutation/apply, proof-bound HTTP, durable retries, checkpoint anchors, daemon
+leases/IPC and additive CLI/MCP controls. Migrations `0013` and `0014` add immutable
+opaque trust delivery and signed safe approval intents. `rotate` and `scope` intent
+labels are authenticated against the exact signed operation; unknown `put` requests
+remain unavailable for browser approval. No credential values enter browser views.
+
+The compiled-process harness uses the real CLI entrypoint with a separate synthetic
+build composition, real HTTP API/repositories and persistent SQLite with the actual
+migrations. Passkey approval is represented by a test authority; existing workerd
+bundle tests separately exercise virtual WebAuthn. It is not native-browser acceptance.
+Ordinary binaries cannot select the synthetic endpoint or secure store via environment.
+
+Production requires a release-build verified manifest; the repository's default is
+`cloud_unavailable_not_provisioned`. The final local issuer/daemon interruption,
+protected enrollment-anchor recovery and directory-relative export matrices pass.
+Signed-roster propagation and local recovery activation are implemented. Migrations
+`0015` and `0016` retain immutable retry/expiry and exact export authorization guards.
+Only external provisioning, native-platform/browser acceptance and release/deployment
+gates remain. See [final local evidence](../docs/PHASE45_FINAL_CONTINUATION.md).
+
+中文：最终三项内部缺口已完成本地实现及验收；现仅保留外部生产配置、原生平台/浏览器
+验收及发布部署门槛。未提交、部署或使用真实 Vault、Keychain、凭证和生产资源。
+
+Signed roster storage, possession-only revoked-device fetch, issuer publication and revocation sequence boundaries are implemented by migration `0017` and `roster-repository.ts`. Browser device lists contain no keys or signed roster data. See [contract and acceptance evidence](../docs/SIGNED_ROSTER.md).
+
+The native-only `recovery-target-delivery` route adds independent API/Custodian
+release signatures. Each Worker requires its own `RECOVERY_RELEASE_SIGNER` binding;
+public signing pins belong to the signed release manifest `recoveryServices` roles.
+Existing unsigned release contracts are preserved. The prior incomplete native activation record is superseded by
+[completed local recovery activation evidence](../docs/LOCAL_RECOVERY_ACTIVATION.md).
+
+Recovery activation adds `0018_recovery_evidence.sql`, `0019_recovery_refresh.sql`
+and Custodian `0003_recovery_trust.sql`. Target-only `evidence`, `trust` and `readback`
+endpoints complete the native flow. `recovery-confirm` accepts an enrolled device's
+exact case signature; the private account attester supplies the delayed-path assertion
+after public email verification. The Custodian requires independent
+`RECOVERY_TRUST_SIGNER` and `RECOVERY_TRUST_POLICY` bindings. The API requires
+`RECOVERY_ACCOUNT_ATTESTER` for delayed recovery. Missing bindings fail closed.
+The authority signs a target-encrypted refresh credential; D1 retains only its digest.
+`recovery-refresh` requires the target signature, checks live membership/revocation,
+and converges retries to the same proof-bound session. These are local contracts;
+no production binding, domain or key has been provisioned.
+
+Run `npm run test:recovery-process` for compiled synthetic recovery acceptance.
+
+Final local security repair and upgrade semantics: [repair record](../docs/FINAL_SECURITY_REPAIR.md), [migration/rollback runbook](../docs/SECURITY_REPAIR_MIGRATION_RUNBOOK.md). Local verification does not authorize release or deployment.
+
+
+### Final review repair — local verification complete
+
+Device list responses never contain signing or wrapping keys. The Web safe view
+contains `id`, `active`, `status`, `lastDevice`, `recoveryReady`,
+`revocationComplete`, and an opaque `removeRef` (null when removal is unavailable).
+The final trusted issuer for each affected vault cannot be removed without a
+current, non-revoked recovery readiness record for the latest package/key epoch.
+Readiness expires after 30 days and is renewed only after both services accept the
+package. Existing installations must re-confirm package readiness; migration 0022
+does not infer it. The transaction rechecks readiness, active issuers and the exact
+step-up action. Last-device actions explicitly bind “Access will require recovery”
+and preserve the package/action record. Device/session enforcement is immediate;
+`revocationComplete` requires the independently witnessed successor roster.
+
+Last-device recovery requires an independently authorized revocation receipt in
+Custodian (`RECOVERY_AUTH.rosterRevocation`), tied to the exact action, recovery
+package and checkpoint boundary. Main cannot manufacture that authorization. A
+missing provider or authorization leaves the witness pending and fails closed.
+Recovery retries deliver the exact revocation event for independent authorization;
+the pinned recovery authority then signs the successor carrying that boundary and
+the new target. Operators must provision the independent action registry before
+advertising last-device recovery readiness.
+
+Activation v2 signs a canonical `TrustActivationBinding`: case and immutable receipt
+version, exact signed and sealed bundle digests, refresh digest, checkpoint
+sequence/root/key/digest, witness event/revision/receipt digest, roster revision/digest,
+target signing and wrapping keys, epoch and expiry. The encrypted authority-signed
+bundle also contains its receipt version. Main and Custodian independently compare
+all fields to the selected immutable version. The client verifies the same binding
+before activation writes; unchanged roster digests cannot authorize substituted
+checkpoint, refresh or witness evidence.
+
+Witness pages contain at most 128 rosters and 128 checkpoints, including the exact
+stored anchors, plus the previous independent receipt. Roster and checkpoint heads
+advance independently and atomically. Main fetches bounded suffixes, catches up
+checkpoints before advancing rosters, and retries concurrent head conflicts. No
+256-roster or 10,000-checkpoint lifetime ceiling applies. Genesis still requires
+independent provisioning; upgrade anchors retain the migration runbook boundary.
+
+Final gates and exact source/artifact evidence: [last final review](../docs/LAST_FINAL_REVIEW.md).
+
+Recovery delivery uses the latest independently witnessed roster anchor and, when needed, its recovery-authority successor. It does not seal full roster history; existing local anchor checks still fail closed if their bridge is unavailable.

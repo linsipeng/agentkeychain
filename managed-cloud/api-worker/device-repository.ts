@@ -20,6 +20,10 @@ interface Pairing {
 const fail = () => new ApiError('not_found');
 export function deviceRepository(db: D1Database) {
     const nonce = (c: DeviceContext) => db.prepare('INSERT INTO accept_device_nonce VALUES(?,?,?,?,?,?,?)').bind(c.sessionDigest, c.tenantId, c.vaultId, c.deviceId, c.accountId, c.nonce, c.timestamp);
+    async function removal(tenant:string,id:string,active=true){
+        const rows=(await db.prepare('SELECT vault_id,package_id FROM last_device_vaults WHERE tenant_id=? AND device_id=? ORDER BY vault_id').bind(tenant,id).all<{vault_id:string;package_id:string|null}>()).results;
+        return {lastDevice:rows.length>0,recoveryReady:rows.length>0&&rows.every(r=>r.package_id!==null),canRemove:active&&rows.every(r=>r.package_id!==null)};
+    }
     return {
         async rejected() { await db.prepare("INSERT INTO device_audit(event) VALUES('rejected')").run(); },
         async cleanup() {
@@ -106,7 +110,7 @@ export function deviceRepository(db: D1Database) {
                 wrapping_key: string;
                 active: number;
             }>();
-            return { devices: await Promise.all(rows.results.map(async (r) => ({ ...r, revokeActionDigest: await actionDigest('revoke', JSON.stringify([s.tenant_id, s.account_id, r.id, r.public_key, r.wrapping_key])) }))) };
+            return { devices: await Promise.all(rows.results.map(async (r) => ({ id:r.id,active:r.active,...await removal(s.tenant_id,r.id,!!r.active), revocationComplete:r.active===0&&!(await db.prepare("SELECT 1 FROM device_revocation_boundaries b WHERE b.tenant_id=? AND b.device_id=? AND NOT EXISTS(SELECT 1 FROM signed_rosters r JOIN roster_witness_sagas w ON w.tenant_id=r.tenant_id AND w.vault_id=r.vault_id AND w.revision=r.revision WHERE r.tenant_id=b.tenant_id AND r.vault_id=b.vault_id AND w.state='acknowledged' AND r.revision=(SELECT max(revision) FROM signed_rosters WHERE tenant_id=b.tenant_id AND vault_id=b.vault_id) AND EXISTS(SELECT 1 FROM json_each(r.canonical,'$.revoked') j WHERE json_extract(j.value,'$.deviceId')=b.device_id)) LIMIT 1").bind(s.tenant_id,r.id).first()), revokeActionDigest: await actionDigest('revoke', JSON.stringify([s.tenant_id, s.account_id, r.id, r.public_key, r.wrapping_key,...((await removal(s.tenant_id,r.id)).lastDevice?['Access will require recovery']:[])])) }))) };
         },
         async revoke(s: SessionRow, id: string) {
             const row = await db.prepare('SELECT d.public_key,k.wrapping_key FROM devices d JOIN device_keys k ON k.tenant_id=d.tenant_id AND k.device_id=d.id WHERE d.tenant_id=? AND d.account_id=? AND d.id=? AND d.active=1').bind(s.tenant_id, s.account_id, id).first<{
@@ -115,9 +119,9 @@ export function deviceRepository(db: D1Database) {
             }>();
             if (!row)
                 throw fail();
-            const canonical = JSON.stringify([s.tenant_id, s.account_id, id, row.public_key, row.wrapping_key]);
+            const canonical = JSON.stringify([s.tenant_id, s.account_id, id, row.public_key, row.wrapping_key,...((await removal(s.tenant_id,id)).lastDevice?['Access will require recovery']:[])]);
             await db.prepare("INSERT INTO device_actions(id,session_digest,account_id,tenant_id,action,target,action_digest,canonical) VALUES(?,?,?,?,'revoke',?,?,?)").bind(random(), s.digest, s.account_id, s.tenant_id, id, await actionDigest('revoke', canonical), canonical).run();
-            return { revoked: true };
+            return { revoked: false, enforced: true, witnessPending: true };
         },
         async challenge(deviceId: string, challengeDigest: string) {
             const id = random();

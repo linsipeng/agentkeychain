@@ -43,9 +43,10 @@ test('pending exact approval is one-use and sync retry returns original receipt'
     await expect(repo().decide(s, 'r', 'approve')).rejects.toThrow();
 });
 test.each(['deny', 'cancel'] as const)('%s prevents grant creation', async (action) => {
-    await repo().create(fresh(), await signed(), 300);
+    const op=await signed();await repo().create(fresh(), op, 300);
     await step('r', action);
     await repo().decide(s, 'r', action);
+    expect((await repo().create(fresh(),op,300)).state).toBe(action==='deny'?'denied':'cancelled');
     await step();
     await expect(repo().decide(s, 'r', 'approve')).rejects.toThrow();
     expect(await db().prepare('SELECT count(*) AS n FROM approvals').first('n')).toBe(0);
@@ -155,4 +156,49 @@ test('Web history returns concurrent versions and deleted current state without 
     expect(result.versions).toHaveLength(2);expect(result.versions[0]).toMatchObject({kind:'delete',current:true});
     expect(JSON.stringify(result)).not.toMatch(/canonical|envelope|ciphertext|sequence|signature/);
     await expect(webRepository(db(),config,{...s,account_id:'other'}).query({view:'history',id:'o'})).rejects.toThrow('not_found');
+});
+
+test('Web rotation requires an exact device-signed safe intent and shows its specific action',async()=>{
+ const signer=await syntheticSigner();await createRepository(db(),fresh(),signer).push(await signed('put',null));
+ const op=await signed('put','rotation'),action='rotate';
+ const message=JSON.stringify(['AgentKeychain-approval-intent-v1',op.canonical,op.signature,action]);
+ const signature=btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign('Ed25519',key,new TextEncoder().encode(message)))));
+ await repo().create(fresh(),op,300,undefined,{action,signature});
+ const {webRepository}=await import('../api-worker/web-repository.ts');const web=webRepository(db(),{} as import('../api-worker/browser-auth.ts').BrowserConfig,s);
+ expect(await web.query({view:'request',id:'rotation'})).toMatchObject({action:'rotate',canAllow:true});
+ await expect(repo().create(fresh(),op,300,undefined,{action:'scope',signature})).rejects.toThrow();
+});
+test('export is exact, one-use, retry-safe and requires an unexpired browser decision',async()=>{
+ const {exportRepository}=await import('../api-worker/export-repository.ts');const {canonicalExport}=await import('../shared/export.ts');
+ const canonical=canonicalExport({version:1,action:'export',requestId:'export-id',accountId:'a',tenantId:'t',vaultId:'v',deviceId:'d',contentDigest:'a'.repeat(64),outputDigest:'b'.repeat(64),expiresAt:Math.floor(Date.now()/1000)+300});
+ const signed={canonical,signature:btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign('Ed25519',key,new TextEncoder().encode(canonical)))))};
+ const exports=exportRepository(db());await exports.request(fresh(),signed);
+ await expect(exports.consume(fresh(),signed)).rejects.toThrow('approval_required');
+ await step('export-id');await repo().decide(s,'export-id','approve');
+ expect(await exports.consume(fresh(),signed)).toEqual({accepted:true,requestId:'export-id'});
+ expect(await exports.consume(fresh(),signed)).toEqual({accepted:true,requestId:'export-id'});
+ await expect(repo().decide(s,'export-id','approve')).rejects.toThrow();
+ const changed=canonical.replace('b'.repeat(64),'c'.repeat(64));await expect(exports.consume(fresh(),{...signed,canonical:changed})).rejects.toThrow();
+ expect((await repo().detail(s,'export-id')).consumed_sequence).not.toBeNull();
+});
+test.each(['deny','cancel'] as const)('export %s stays denied and is safely listed in browser approval views',async action=>{
+ const {exportRepository}=await import('../api-worker/export-repository.ts');const {canonicalExport}=await import('../shared/export.ts');
+ const canonical=canonicalExport({version:1,action:'export',requestId:'export-deny',accountId:'a',tenantId:'t',vaultId:'v',deviceId:'d',contentDigest:'a'.repeat(64),outputDigest:'b'.repeat(64),expiresAt:Math.floor(Date.now()/1000)+300});
+ const signed={canonical,signature:btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign('Ed25519',key,new TextEncoder().encode(canonical)))))};
+ const exports=exportRepository(db());await exports.request(fresh(),signed);await exports.request(fresh(),signed);
+ const list=await repo().list(s,0,100,'pending');expect(list.requests).toHaveLength(1);expect(list.requests[0]!.state).toBe('pending');expect(list.requests[0]!.action).toBe('export');
+ await step('export-deny',action);await repo().decide(s,'export-deny',action);await expect(exports.consume(fresh(),signed)).rejects.toThrow('approval_required');
+ expect((await repo().list(s,0,100,'pending')).requests).toHaveLength(0);
+});
+test('expired export cannot be consumed, foreign device and revoked requester fail closed',async()=>{
+ const {exportRepository}=await import('../api-worker/export-repository.ts');const {canonicalExport}=await import('../shared/export.ts');const {digest}=await import('../shared/contracts.ts');
+ const canonical=canonicalExport({version:1,action:'export',requestId:'export-expired',accountId:'a',tenantId:'t',vaultId:'v',deviceId:'d',contentDigest:'a'.repeat(64),outputDigest:'b'.repeat(64),expiresAt:1});
+ const signed={canonical,signature:btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign('Ed25519',key,new TextEncoder().encode(canonical)))))};
+ const exports=exportRepository(db());await expect(exports.request(fresh(),signed)).rejects.toThrow();
+ await db().prepare("INSERT INTO export_requests(tenant_id,vault_id,id,account_id,device_id,canonical,signature,request_digest,expires_at,state) VALUES('t','v','export-expired','a','d',?,?,?,1,'approved')").bind(canonical,signed.signature,await digest(canonical)).run();
+ await expect(exports.consume(fresh(),signed)).rejects.toThrow('approval_required');
+ await expect(exports.consume({...fresh(),deviceId:'foreign'},signed)).rejects.toThrow('not_found');
+ const active=canonicalExport({...JSON.parse(canonical),requestId:'export-active',expiresAt:Math.floor(Date.now()/1000)+300});const current={canonical:active,signature:btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign('Ed25519',key,new TextEncoder().encode(active)))))};
+ await exports.request(fresh(),current);await step('export-active');await repo().decide(s,'export-active','approve');await db().prepare("UPDATE devices SET active=0 WHERE id='d'").run();await expect(exports.consume(fresh(),current)).rejects.toThrow();
+ expect((await repo().detail(s,'export-active')).consumed_sequence).toBeNull();
 });

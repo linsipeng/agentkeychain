@@ -131,7 +131,7 @@ test('pull pagination has no gaps; cursors bound to tenant, vault, device; audit
 test('private custodian binding is separate and public HTTP stays closed', async () => {
     expect('CUSTODIAN' in env).toBe(false);
     await expect(db().prepare('SELECT * FROM custodian_cases').all()).rejects.toThrow();
-    expect(await env.RECOVERY.describe()).toEqual({ component: 'custodian', protocol: 1, recoveryEnabled: true, bindings: ['CUSTODIAN','RECOVERY_AUTH','RECOVERY_KEYS'] });
+    expect(await env.RECOVERY.describe()).toEqual({ component: 'custodian', protocol: 1, recoveryEnabled: true, bindings: ['CUSTODIAN','RECOVERY_AUTH','RECOVERY_KEYS','RECOVERY_RELEASE_SIGNER','RECOVERY_TRUST_POLICY','RECOVERY_TRUST_SIGNER','ROSTER_WITNESS_SIGNER'] });
     expect((await env.RECOVERY.fetch('https://local.invalid/recovery')).status).toBe(404);
 });
 test.each([

@@ -1,3 +1,4 @@
+import {rpcData} from './rpc-data.ts';
 import { exactFields, identifier, base64 } from '../../src/cloud/protocol.ts';
 import { cancelMessage, manifest, recoveryCase, type CancelAuthorization, type RecoveryEvidence } from './recovery.ts';
 import { verify } from './contracts.ts';
@@ -53,4 +54,15 @@ export function recoveryAuthority(trust: RecoveryTrust) {
             return false;
         }
     };
+}
+
+/** Private identity-service adapter, invoked only after the public recovery route
+ * has verified the account proof. Its key is independently pinned by both operators. */
+export function recoveryAccountAttester(signer:import('./checkpoints.ts').CheckpointSigner,trust:Pick<RecoveryTrust,'accountVerifier'>){
+ return {async attest(canonical:string){
+  const c=recoveryCase(canonical),key=await rpcData(signer.key());
+  if(c.createdAt>Math.floor(Date.now()/1000)+60||c.expiresAt<=Math.floor(Date.now()/1000)||await trust.accountVerifier(c.accountId)!==key.publicKey)throw new Error('unauthorized');
+  const message=JSON.stringify(['AgentKeychain-recovery-account-verified-v1',canonical]),signature=await signer.sign(message);
+  if(!await verify(key.publicKey,signature,message))throw new Error('invalid_account_attester');return signature;
+ }};
 }

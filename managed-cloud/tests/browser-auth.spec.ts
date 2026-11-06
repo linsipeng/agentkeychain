@@ -814,7 +814,8 @@ test('recovery bootstrap has identical public response for real, unknown and fai
     }
     expect(await count('browser_sessions')).toBe(normal);
     const rows = (await env.MAIN.prepare('SELECT * FROM recovery_sessions').all()).results;
-    expect(rows.filter(r=>r.account_id!==null)).toHaveLength(1);
+    // Unknown target package remains a decoy even for a verified known email.
+    expect(rows.filter(r=>r.account_id!==null)).toHaveLength(0);
     expect(JSON.stringify(rows)).not.toContain(csrf);
 });
 test('recovery proof and bootstrap are one use, expire and cannot cross cases', async () => {

@@ -92,7 +92,7 @@ export interface RecoveryContract {
         recoveryEnabled: boolean;
         bindings: string[];
     }>;
-    fetch(input: RequestInfo, init?: RequestInit): Promise<Response>;
+    fetch(input: Request | string, init?: RequestInit): Promise<Response>;
 }
 /** Same domain-separated digest as the security-reviewed Slice 1 approval contract. */
 export function approvalDigest(canonical: string) { return digest("AgentKeychain-approval-v1\0" + canonical); }

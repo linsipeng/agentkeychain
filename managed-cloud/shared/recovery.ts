@@ -49,6 +49,8 @@ export interface RecoveryEvidence {
 /** Private independently provisioned services. Neither authorization decision is
  * inferred from the other service's result. Providers must bind the exact bytes. */
 export interface RecoveryAuthority {
+    rosterRevocation?(canonical:string):Promise<boolean>;
+    rosterGenesis?(roster:import('../../src/cloud/protocol.ts').SignedManagedOperation):Promise<boolean>;
     cancel(canonical: string, authorization: CancelAuthorization): Promise<boolean>;
     complete(canonical: string, proof: string, signature: string): Promise<boolean>;
     enrollment(canonical: string, signature: string): Promise<boolean>;
@@ -62,6 +64,13 @@ export interface RecoveryKeys {
     rewrap(keyId: string, box: SealedShare, sourceContext: string, targetKey: string, targetContext: string): Promise<SealedShare>;
 }
 export interface RecoveryRPC {
+    witnessHead?(tenant:string,vault:string):Promise<import('../../src/cloud/protocol.ts').SignedManagedOperation|null>;
+    witnessRevocation?(canonical:string):Promise<import('../../src/cloud/protocol.ts').SignedManagedOperation>;
+    committedVersion?(canonical:string):Promise<number|null>;
+    commitTrust?(canonical:string,version:number,digest:string,signature:string):Promise<{committed:boolean}>;
+    witness?(input:import('./roster-witness.ts').WitnessRequest):Promise<import('../../src/cloud/protocol.ts').SignedManagedOperation>;
+    trustBundle?(canonical:string,rosters:import('../../src/cloud/protocol.ts').SignedManagedOperation[],checkpoint:import('./checkpoints.ts').Checkpoint,revocations?:{deviceId:string;acceptedThrough:import('./checkpoints.ts').Checkpoint}[],receiptVersion?:number):Promise<import('./trust-activation.ts').TrustActivationMaterial & {binding:import('./trust-activation.ts').TrustActivationBinding;sealed:SealedShare;refreshDigest:string;witness?:import('../../src/cloud/protocol.ts').SignedManagedOperation;roster:import('../../src/cloud/protocol.ts').SignedManagedOperation}>;
+    authenticatedRelease?(canonical: string, evidence: RecoveryEvidence): Promise<import("../../src/cloud/protocol.ts").SignedManagedOperation>;
     key(): Promise<{
         keyId: string;
         publicKey: string;

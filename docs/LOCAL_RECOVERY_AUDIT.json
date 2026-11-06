@@ -1,0 +1,87 @@
+{
+  "date": "2026-11-06",
+  "scope": "complete-local-recovery-activation",
+  "activationComplete": true,
+  "validation": {
+    "root": {
+      "passed": 158,
+      "assertions": 854,
+      "files": 42
+    },
+    "backend": {
+      "passed": 280,
+      "files": 9
+    },
+    "web": {
+      "passed": 90,
+      "files": 3
+    },
+    "compiledRecovery": {
+      "passed": 51,
+      "mainMatrix": 48,
+      "expiryBeforeActivation": 1,
+      "expiryAfterActivation": 1,
+      "actualCompiledCli": true,
+      "twoLocalWorkers": true,
+      "fakeSecureStore": true,
+      "encryptedPayloadSyncAndDecryption": true,
+      "refreshLogoutRelogin": true,
+      "exactDeviceSessionReceiptCounts": true,
+      "plaintextArtifactChecks": true,
+      "liveEpochInvalidation": 1,
+      "unknownAuthorityKeyIdRejection": true,
+      "actualCheckpointPinSubstitution": true,
+      "actualRosterKeySubstitution": true
+    },
+    "recoveryResourceDiagnostics": {
+      "passed": 8,
+      "undisposedWarnings": 0
+    },
+    "lint": true,
+    "rootBackendWebTypechecks": true,
+    "rootNativeBackendWebBuilds": true,
+    "generatedBundle": true,
+    "compiledExistingClientRegression": true,
+    "browserDevtoolsAvailable": false
+  },
+  "audits": {
+    "npmFull": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "npmRuntime": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "bun": {}
+  },
+  "scan": {
+    "files": 106,
+    "highConfidenceFindings": 0,
+    "findingPaths": [],
+    "scope": "Changed/untracked source and documentation files up to 2 MB; no secret-value retrieval; not a comprehensive audit."
+  },
+  "noProductionOrHostVaultAccess": true,
+  "committed": false,
+  "deployed": false,
+  "externalGates": [
+    "Production domain, signed release trust and independent operator/identity bindings remain unprovisioned and fail closed.",
+    "Built-in Chrome/DevTools unavailable; no external Chrome or Hermes browser adapter used."
+  ],
+  "diagnostics": {
+    "syntheticFailureAssertion": "An initial negative test printed ephemeral synthetic key fields. Assertions were changed to metadata-only diagnostics and the temporary log was removed; no real credential was involved."
+  },
+  "currentContinuation": {
+    "record": "FINAL_SECURITY_REPAIR_AUDIT.json",
+    "localImplementationComplete": true,
+    "historicalCountsPreserved": true
+  }
+}

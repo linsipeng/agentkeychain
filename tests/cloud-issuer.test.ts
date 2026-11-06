@@ -1,0 +1,21 @@
+import {signRoster} from '../src/cloud/roster.ts';
+import {expect,test} from 'bun:test';
+import {Database} from 'bun:sqlite';
+import {CloudStore} from '../src/cloud/persistence.ts';
+import {createCloudKeys} from '../src/cloud/crypto.ts';
+import {issuerDelivery} from '../src/cloud/issuer.ts';
+import {canonicalGrant,type EnrollmentGrant} from '../managed-cloud/shared/device-protocol.ts';
+test('issuer journal retains exact sealed bytes across restart and forbids changed/expired requests',async()=>{
+ const keys=await createCloudKeys(),target=await createCloudKeys(),db=new Database(':memory:'),store=new CloudStore(db,keys.csk),b64=(b:Uint8Array)=>Buffer.from(b).toString('base64');
+ const grant:EnrollmentGrant={version:1,requestId:'request',accountId:'account',tenantId:'tenant',vaultId:'vault',deviceId:'target',signingKey:b64(target.signingPublic),wrappingKey:b64(target.wrappingPublic),issuerDeviceId:'issuer',keyEpoch:1,expiresAt:Math.floor(Date.now()/1000)+600};
+ const signedRoster=signRoster({version:1,accountId:'account',tenantId:'tenant',vaultId:'vault',revision:2,previousDigest:'0'.repeat(64),keyEpoch:1,active:[{deviceId:'issuer',signingKey:b64(keys.signingPublic),wrappingKey:b64(keys.wrappingPublic)},{deviceId:'target',signingKey:grant.signingKey,wrappingKey:grant.wrappingKey}],revoked:[],issuer:{kind:'device',id:'issuer'},issuedAt:grant.expiresAt-600,expiresAt:grant.expiresAt+1000,checkpointKeys:[{keyId:'checkpoint',publicKey:b64(keys.signingPublic)}],recoveryAuthorities:[],recovery:null},keys.signingPrivate);
+ const bundle={signedRoster,version:1 as const,kind:'enrollment' as const,request:grant,issuerKey:b64(keys.signingPublic),roster:[{vaultId:'vault',deviceId:'issuer',publicKey:b64(keys.signingPublic),revoked:false},{vaultId:'vault',deviceId:'target',publicKey:grant.signingKey,revoked:false}],checkpointKeys:[{keyId:"checkpoint",publicKey:b64(keys.signingPublic)}],nonce:'nonce',recoveryCase:null};
+ const first=issuerDelivery(store,canonicalGrant(grant),bundle,keys);
+ expect(first.confirmed).toBe(false);
+ const restarted=new CloudStore(db,keys.csk);
+ expect(issuerDelivery(restarted,canonicalGrant(grant),{...bundle,nonce:'another'},keys)).toEqual(first);
+ expect(()=>issuerDelivery(store,canonicalGrant({...grant,keyEpoch:2}),bundle,keys)).toThrow('cloud_issuer_request_conflict');
+ expect(()=>issuerDelivery(store,canonicalGrant(grant),bundle,keys,(grant.expiresAt+1)*1000)).toThrow('cloud_authorization_expired');
+ expect(Buffer.from(JSON.stringify(db.query('SELECT * FROM cloud_state').all())).includes(Buffer.from(first.sealed))).toBe(false);
+ store.destroy();restarted.destroy();db.close();
+});
