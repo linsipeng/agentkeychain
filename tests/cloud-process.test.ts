@@ -52,7 +52,7 @@ test('compiled CLI clients enroll via HTTP, compare SAS, capture, sync, retry an
   for(const slot of ['enrollment-intent','signing-private','wrapping-private','csk'])for(const timing of ['before','after']){
    const fault='secure:'+timing+':'+slot,crashed=cli(a,['cloud','login'],fault);expect(await crashed.done,fault+' '+crashed.err()).toBe(96);
   }
-  expect(await cli(a,['cloud','login'],'enrollment-interrupt').done).toBe(92);
+  const interrupted=cli(a,['cloud','login'],'enrollment-interrupt'),interruptedCode=await interrupted.done;if(interruptedCode!==92)throw new Error('enrollment-interrupt '+interruptedCode+' '+interrupted.err());
   for(const slot of ['enrollment-activation','roster-anchor','checkpoint-anchor'])for(const timing of ['before','after']){
    const fault='secure:'+timing+':'+slot,crashed=cli(a,['cloud','login'],fault);expect(await crashed.done,fault+' '+crashed.err()).toBe(96);await pause(600);
    const check=new Database(join(a,'vault.db'),{readonly:true});expect(JSON.stringify(check.query('SELECT * FROM secrets').all())).toBe(oldRows);check.close();

@@ -32,7 +32,7 @@ async function identity() {
     const wrap = await crypto.subtle.generateKey('X25519', true, ['deriveBits']) as CryptoKeyPair;
     return { signingKey: bytes(await crypto.subtle.exportKey('raw', sign.publicKey)), wrappingKey: bytes(await crypto.subtle.exportKey('raw', wrap.publicKey)), sign: async (v: string) => bytes(await crypto.subtle.sign('Ed25519', sign.privateKey, new TextEncoder().encode(v))) };
 }
-const api = (path: string, body: unknown, headers: Record<string, string> = {}) => deviceFetch(new Request(origin + '/v1/devices/' + path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) }), { MAIN: db(), AUTH_ORIGIN: origin, TRUSTED_AUTH_SOURCE: { resolve: async () => 'synthetic-device-source' } });
+const api = (path: string, body: unknown, headers: Record<string, string> = {}) => deviceFetch(new Request(origin + '/v1/devices/' + path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) }), { MAIN: db(), AUTH_ORIGIN: origin, DEVICE_API_ORIGIN: origin, TRUSTED_AUTH_SOURCE: { resolve: async () => 'synthetic-device-source' } });
 async function account(account = 'a', tenant = 't') {
     const token = crypto.randomUUID(), csrf = crypto.randomUUID();
     const s: SessionRow = { digest: await digest(token), csrf_digest: await digest(csrf), account_id: account, tenant_id: tenant, absolute_expires: Math.floor(Date.now() / 1000) + 3600, step_up_digest: null, step_up_expires: null };
@@ -308,7 +308,7 @@ test('short pairing code and three words, existing-device confirmation stays off
     const s=await account(),first=await enroll(s),issued=await session(first),next=await authorize();
     expect(next.verificationCode).toHaveLength(12);expect(next.phrase.split(' ')).toHaveLength(3);
     await deviceRepository(db()).pending(s,await digest(next.verificationCode),first.deviceId);
-    const bindings={MAIN:db(),AUTH_ORIGIN:origin,TRUSTED_AUTH_SOURCE:{resolve:async()=> 'synthetic-device-source'}};
+    const bindings={MAIN:db(),AUTH_ORIGIN:origin,DEVICE_API_ORIGIN:origin,TRUSTED_AUTH_SOURCE:{resolve:async()=> 'synthetic-device-source'}};
     const detail=await deviceFetch(await deviceRequest(first,issued.token,'/v1/devices/pairing-detail',JSON.stringify({id:next.requestId})),bindings);
     expect(detail.status).toBe(200);const {canonical}=await detail.json() as {canonical:string};
     const confirm=await deviceFetch(await deviceRequest(first,issued.token,'/v1/devices/pairing-confirm',JSON.stringify({id:next.requestId,signature:await first.sign(canonical)})),bindings);expect(confirm.status).toBe(200);

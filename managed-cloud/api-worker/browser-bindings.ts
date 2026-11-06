@@ -10,6 +10,7 @@ export interface BrowserBindings extends RecoveryBindings {
     CHECKPOINT_SIGNER?: CheckpointSigner;
     MAIN: D1Database;
     AUTH_ORIGIN?: string;
+    DEVICE_API_ORIGIN?: string;
     AUTH_RP_ID?: string;
     AUTH_BOOTSTRAP_KEY?: string;
     AUTH_EMAIL_KEY?: string;

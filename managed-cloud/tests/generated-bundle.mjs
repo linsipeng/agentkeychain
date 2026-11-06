@@ -51,7 +51,7 @@ Object.assign(recovery.serviceBindings,{
 });
 const raw = () => Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
 const proof = raw(), origin = 'https://local.invalid', email = 'bundle@example.invalid';
-const bindings = { AUTH_ORIGIN: origin, AUTH_RP_ID: 'local.invalid', AUTH_BOOTSTRAP_KEY: raw(), AUTH_EMAIL_KEY: raw(), AUTH_LOOKUP_KEY: raw() };
+const bindings = { AUTH_ORIGIN: origin, DEVICE_API_ORIGIN: origin, AUTH_RP_ID: 'local.invalid', AUTH_BOOTSTRAP_KEY: raw(), AUTH_EMAIL_KEY: raw(), AUTH_LOOKUP_KEY: raw() };
 const noOutbound = () => new Response(null, { status: 502 });
 const mf = new Miniflare(convertV4MiniflareOptions({
     host: '127.0.0.1', port: 0, inspectorPort: 0,

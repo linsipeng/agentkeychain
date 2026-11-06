@@ -7,7 +7,7 @@ export async function signedRecoveryTarget() {
     const signing = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']) as CryptoKeyPair;
     const wrapping = await crypto.subtle.generateKey('X25519', true, ['deriveBits']) as CryptoKeyPair;
     const target = { id: random(), packageId: random(), targetDeviceId: random(), signingKey: encode64(new Uint8Array(await crypto.subtle.exportKey('raw', signing.publicKey))), wrappingKey: encode64(new Uint8Array(await crypto.subtle.exportKey('raw', wrapping.publicKey))), nonce: random() };
-    const call = (route: string, body: unknown) => deviceFetch(new Request('https://local.invalid/v1/devices/' + route, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}), {...env, AUTH_ORIGIN:'https://local.invalid',TRUSTED_AUTH_SOURCE:{resolve:async()=> 'synthetic-target'}});
+    const call = (route: string, body: unknown) => deviceFetch(new Request('https://local.invalid/v1/devices/' + route, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}), {...env, AUTH_ORIGIN:'https://local.invalid',DEVICE_API_ORIGIN:'https://local.invalid',TRUSTED_AUTH_SOURCE:{resolve:async()=> 'synthetic-target'}});
     const signature = encode64(new Uint8Array(await crypto.subtle.sign('Ed25519',signing.privateKey,new TextEncoder().encode(JSON.stringify(['AgentKeychain-recovery-target-v1',target])))));
     const challenge = await call('recovery-target-challenge',{target,signature});
     expect(challenge.status).toBe(200);

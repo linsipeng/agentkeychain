@@ -69,12 +69,12 @@ export async function deviceFetch(request: Request, env: BrowserBindings) {
             throw new ApiError('payload_too_large');
         if (request.method === 'POST' && !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(request.headers.get('content-type') ?? ''))
             throw new ApiError('unsupported_media_type');
-        if (!env.AUTH_ORIGIN || !env.TRUSTED_AUTH_SOURCE)
+        if (!env.AUTH_ORIGIN || !env.DEVICE_API_ORIGIN || !env.TRUSTED_AUTH_SOURCE)
             return unavailable();
         let configuredOrigin: URL;
-        try { configuredOrigin = new URL(env.AUTH_ORIGIN); }
+        try { configuredOrigin = new URL(env.DEVICE_API_ORIGIN); }
         catch { return unavailable(); }
-        if (configuredOrigin.origin !== env.AUTH_ORIGIN || configuredOrigin.protocol !== 'https:' || url.origin !== configuredOrigin.origin)
+        if (configuredOrigin.origin !== env.DEVICE_API_ORIGIN || configuredOrigin.protocol !== 'https:' || url.origin !== configuredOrigin.origin)
             return unavailable();
         let sources: string[];
         try { sources = await Promise.all([env.TRUSTED_AUTH_SOURCE.resolve(request.clone() as Request), env.TRUSTED_AUTH_SOURCE.resolve(request.clone() as Request)]); }

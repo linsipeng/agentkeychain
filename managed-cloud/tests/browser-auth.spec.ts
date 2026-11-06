@@ -415,7 +415,7 @@ test('production entrypoint uses real adapter and explicit ephemeral bindings; n
     const { default: worker } = await import('../api-worker/index.ts');
     const { encode } = await import('../api-worker/webauthn.ts');
     const raw = () => encode(crypto.getRandomValues(new Uint8Array(32)));
-    const bindings = { MAIN: env.MAIN, RECOVERY: env.RECOVERY, AUTH_ORIGIN: origin, AUTH_RP_ID: 'local.invalid', AUTH_BOOTSTRAP_KEY: raw(), AUTH_EMAIL_KEY: raw(), AUTH_LOOKUP_KEY: raw(), TRUSTED_AUTH_SOURCE: { resolve: async () => 'synthetic-source' }, EMAIL_VERIFIER: { request:async()=>({accepted:true,retryAfter:60}), verify: async (e: string, p: string) => config.verifyEmail(e, JSON.parse(p)[2]) } };
+    const bindings = { MAIN: env.MAIN, RECOVERY: env.RECOVERY, AUTH_ORIGIN: origin, DEVICE_API_ORIGIN: origin, AUTH_RP_ID: 'local.invalid', AUTH_BOOTSTRAP_KEY: raw(), AUTH_EMAIL_KEY: raw(), AUTH_LOOKUP_KEY: raw(), TRUSTED_AUTH_SOURCE: { resolve: async () => 'synthetic-source' }, EMAIL_VERIFIER: { request:async()=>({accepted:true,retryAfter:60}), verify: async (e: string, p: string) => config.verifyEmail(e, JSON.parse(p)[2]) } };
     config.lookupKey = await crypto.subtle.importKey('raw', Uint8Array.from(atob(bindings.AUTH_LOOKUP_KEY.replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
     handle = request => worker.fetch(request, bindings);
     await bootstrap();
@@ -586,7 +586,7 @@ test('logout audit failure rolls back revocation and preserves session', async (
 test.each(['missing-source', 'non-string', 'empty', 'space', 'uppercase', 'oversized', 'unicode', 'throw', 'unstable', 'missing-verifier', 'malformed-key', 'short-key', 'equal-bootstrap-email', 'equal-bootstrap-lookup', 'equal-email-lookup'] as const)('production binding %s fails closed without leaking', async (mode) => {
     const { browserFetch } = await import('../api-worker/browser-bindings.ts');
     const bindings = {
-        MAIN: env.MAIN, AUTH_ORIGIN: origin, AUTH_RP_ID: 'local.invalid',
+        MAIN: env.MAIN, AUTH_ORIGIN: origin, DEVICE_API_ORIGIN: origin, AUTH_RP_ID: 'local.invalid',
         AUTH_BOOTSTRAP_KEY: random(), AUTH_EMAIL_KEY: random(), AUTH_LOOKUP_KEY: random(),
         EMAIL_VERIFIER: { request:async()=>({accepted:true,retryAfter:60}), verify: async () => true } as {
             request:()=>Promise<{accepted:boolean;retryAfter:number}>;
@@ -747,7 +747,7 @@ test('device approval uses actual Passkey step-up, exact action digest, confirma
     const { deviceFetch } = await import('../api-worker/device-http.ts');
     const { enrollmentProof } = await import('../shared/device-protocol.ts');
     const signer = await syntheticSigner(), key = await signer.key(), wrappingKey = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
-    const authorized = await deviceFetch(new Request(origin + '/v1/devices/authorize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ signingKey: key.publicKey, wrappingKey, platform: 'linux', proof: await signer.sign(enrollmentProof(key.publicKey, wrappingKey, 'linux')) }) }), { MAIN: env.MAIN, AUTH_ORIGIN: origin, TRUSTED_AUTH_SOURCE: { resolve: async () => 'synthetic-device-source' } });
+    const authorized = await deviceFetch(new Request(origin + '/v1/devices/authorize', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ signingKey: key.publicKey, wrappingKey, platform: 'linux', proof: await signer.sign(enrollmentProof(key.publicKey, wrappingKey, 'linux')) }) }), { MAIN: env.MAIN, AUTH_ORIGIN: origin, DEVICE_API_ORIGIN: origin, TRUSTED_AUTH_SOURCE: { resolve: async () => 'synthetic-device-source' } });
     expect(authorized.status).toBe(200);
     const pairing = await authorized.json() as {
         verificationCode: string;

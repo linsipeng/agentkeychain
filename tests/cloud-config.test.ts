@@ -1,10 +1,13 @@
 import { expect, test } from 'bun:test';
 import sodium from 'libsodium-wrappers-sumo';
-import { canonicalManifest, verifyReleaseManifest, productionPolicy } from '../src/cloud/config.ts';
+import { canonicalManifest, verifyReleaseManifest, productionPolicy, assertVerifiedPolicy } from '../src/cloud/config.ts';
 await sodium.ready;
-test('release gate has no default origin or environment override', () => {
+test('signed staging release ignores environment origin overrides', () => {
   process.env.AKC_CLOUD_ORIGIN = 'https://attacker.invalid';
-  expect(() => productionPolicy()).toThrow('cloud_unavailable_not_provisioned');
+  const policy=productionPolicy();
+  expect(policy.apiOrigin).toBe('https://api.agentkeychain.soupsam.com');
+  expect(policy.apiOrigin).not.toBe(process.env.AKC_CLOUD_ORIGIN);
+  expect(() => assertVerifiedPolicy(policy)).not.toThrow();
   delete process.env.AKC_CLOUD_ORIGIN;
 });
 test('canonical signed release pins allow rotation and reject substitution', () => {
