@@ -1,5 +1,7 @@
 import {readFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
+// Synthetic builds retain signed dual-origin verification; bootstrap substitutes only
+// localhost transport/secure-store adapters and enforces distinct API/Web roles.
 const bootstrap=resolve('scripts/phase45/bootstrap.ts');
 const result=await Bun.build({entrypoints:['scripts/phase45/client.ts'],compile:{outfile:process.argv[2]!},plugins:[{name:'synthetic-client-composition',setup(build){
  build.onLoad({filter:/release\.generated\.ts$/},()=>({contents:`import {bootstrap} from ${JSON.stringify(bootstrap)};export function releaseArtifact(){return {manifest:bootstrap.manifest,rootPublicKey:bootstrap.rootPublicKey};}`,loader:'ts'}));

@@ -602,7 +602,7 @@ test('completed two-Worker recovery publishes immutable authority-encrypted trus
  const {verify}=await import('../shared/contracts.ts');
  const c=await started(),cp=await env.CHECKPOINT_SIGNER!.key(),authority=await env.CUSTODIAN_TEST_TRUST_SIGNER.key();
  const services={api:await env.RECOVERY_RELEASE_SIGNER!.key(),custodian:await env.CUSTODIAN_TEST_RELEASE.key()};
- const releaseCanonical=JSON.stringify({witnessKeys:[await env.CUSTODIAN_TEST_WITNESS_SIGNER.key()],recoveryServices:services,recoveryAuthorities:[authority],version:1,releaseId:'test-trust',apiOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[cp]});
+ const releaseCanonical=JSON.stringify({witnessKeys:[await env.CUSTODIAN_TEST_WITNESS_SIGNER.key()],recoveryServices:services,recoveryAuthorities:[authority],version:1,releaseId:'test-trust',apiOrigin:'https://api.local.invalid',webOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[cp]});
  await env.CUSTODIAN_TEST_TRUST_SIGNER.configure(releaseCanonical);
  const wrapping=await publicKey(await crypto.subtle.generateKey('X25519',true,['deriveBits']) as CryptoKeyPair),now=Math.floor(Date.now()/1000);
  await db().prepare("INSERT INTO device_keys VALUES('t','d',?)").bind(wrapping).run();
@@ -651,7 +651,7 @@ test.each([false,true,'last-device','pending-refresh','long-history'] as const)(
  const {recoveryTrustContext,parseRecoveryTrust}=await import('../shared/recovery-trust.ts');
  const c=await (mode==='last-device'?agedStarted():started()),cp=await env.CHECKPOINT_SIGNER!.key(),authority=await env.CUSTODIAN_TEST_TRUST_SIGNER.key();
  const services={api:await env.RECOVERY_RELEASE_SIGNER!.key(),custodian:await env.CUSTODIAN_TEST_RELEASE.key()};
- const releaseCanonical=JSON.stringify({witnessKeys:[await env.CUSTODIAN_TEST_WITNESS_SIGNER.key()],recoveryServices:services,recoveryAuthorities:[authority],version:1,releaseId:'test-trust',apiOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[cp]});
+ const releaseCanonical=JSON.stringify({witnessKeys:[await env.CUSTODIAN_TEST_WITNESS_SIGNER.key()],recoveryServices:services,recoveryAuthorities:[authority],version:1,releaseId:'test-trust',apiOrigin:'https://api.local.invalid',webOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[cp]});
  await env.CUSTODIAN_TEST_TRUST_SIGNER.configure(releaseCanonical);
  const wrapping=await publicKey(await crypto.subtle.generateKey('X25519',true,['deriveBits']) as CryptoKeyPair),now=Math.floor(Date.now()/1000);
  await db().prepare("INSERT INTO device_keys VALUES('t','d',?)").bind(wrapping).run();

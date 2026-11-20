@@ -8,10 +8,10 @@
 
 仓库公开地址：`https://github.com/linsipeng/agentkeychain`。
 
-交接分支只有文档；实现基线是 `37d9eb9387d2bee60c4531266cf42d13cccde3ca`。未提交修复在 Sam 提供的 `agentkeychain-ai-handoff.zip` 中，内含 `working-tree.patch` 和 SHA-256 清单。
+完整 WIP 源码与交接文档已放在 `handoff/managed-cloud-ai-20261121` 分支，直接克隆并切换到该分支即可，无需 ZIP 或打补丁。实现基线是 `37d9eb9387d2bee60c4531266cf42d13cccde3ca`；分支上的修复快照尚未独立审查，也不是正式发布。
 
 - 在原 Mac 接手：使用 `/Users/mac/Projects/agentkeychain-managed-cloud-v07`，先检查 `feat/managed-cloud-v0.7` 的现有未提交更改；它已包含修复，不要重复打补丁、不 reset/stash/clean 他人代码。
-- 在新环境接手：从仓库建立基线的独立工作树，核对包内清单，先 `git apply --check working-tree.patch`，再应用；没有该包不能宣称拿到了全部最新修复。
+- 在新环境接手：直接检出 `handoff/managed-cloud-ai-20261121`，先比较其相对实现基线的 diff，再开始隔离验收；不需要另取压缩包。
 - 不复制真实 Vault、Keychain、导出的 D1、Cookie、生成的部署配置或任何私钥。新环境先做隔离的 synthetic 验收。
 
 ## 目标
@@ -47,4 +47,4 @@ Sam 已被反复要求登录/Touch ID，明确拒绝继续配合。你必须自�
 
 ## English summary for the receiving agent
 
-Read `docs/AI_HANDOFF.md` first. This is unfinished Managed Cloud development, not a request to install/reset the user's vault. The documentation-only handoff branch needs the separately provided WIP patch when working from a new checkout. On the original Mac preserve the existing dirty worktree and do not reapply it. Finish isolated reproduction, review trust boundaries and enrollment expiry/resume, then run full compiled/bundle acceptance. Treat the Safari-session attribution as unproven. Do not ask Sam to repeat authentication attempts, bypass Passkey, use production credentials in tests, or treat past cleanup permission as continuing authorization. Deployment, destructive changes, merge and release require separate approval.
+Read `docs/AI_HANDOFF.md` first. This is unfinished Managed Cloud development, not a request to install/reset the user's vault. The `handoff/managed-cloud-ai-20261121` branch contains the full WIP source snapshot and documents; check it out directly without a ZIP or patch. These repairs remain unreviewed, not release-ready. On the original Mac preserve the existing dirty worktree and do not reapply changes. Finish isolated reproduction, review trust boundaries and enrollment expiry/resume, then run full compiled/bundle acceptance. Treat the Safari-session attribution as unproven. Do not ask Sam to repeat authentication attempts, bypass Passkey, use production credentials in tests, or treat past cleanup permission as continuing authorization. Deployment, destructive changes, merge and release require separate approval.

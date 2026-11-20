@@ -34,7 +34,7 @@ export async function activateRecovery(db:Database,kek:Uint8Array,packageId:stri
   const checkDeadline=async()=>{const s=journal.snapshot();if(['created','awaiting_verification','waiting_for_release','released','reconstructed'].includes(s.stage)&&typeof s.data.requestDeadline==='number'&&s.data.requestDeadline<=Date.now()){await journal.advance('expired');store.remove('state','recovery-intent');throw new Error('cloud_recovery_expired');}};
   await checkDeadline();
   if(journal.snapshot().stage==='awaiting_verification'){
-   const url=composition.policy.apiOrigin+'/recovery#requestRef='+journal.snapshot().data.requestRef;
+   const url=composition.policy.webOrigin+'/recovery#requestRef='+journal.snapshot().data.requestRef;
    let verified=false;
    try{await target.call('status');verified=true;}catch(error){if(!(error instanceof CloudHttpError)||error.code!=='not_found')throw error;}
    if(!verified){ui.status('awaiting_verification',url);await ui.open(url);}

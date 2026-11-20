@@ -7,8 +7,8 @@ Prepared: 2026-11-21 (local clock). The enrollment/debugging events below occurr
 - Product repository: `linsipeng/agentkeychain` (PUBLIC).
 - Baseline commit: `37d9eb9387d2bee60c4531266cf42d13cccde3ca`.
 - Development worktree: `/Users/mac/Projects/agentkeychain-managed-cloud-v07`, branch `feat/managed-cloud-v0.7`.
-- The handoff branch contains documentation only on top of that baseline. It does **not** contain the uncommitted repairs as reviewed commits.
-- Sam receives a separate `agentkeychain-ai-handoff.zip` containing this documentation plus `working-tree.patch` and a hash inventory. Apply that patch to the exact baseline in a fresh worktree. On this same Mac, prefer inspecting the existing dirty development worktree; do not apply the patch twice.
+- Branch `handoff/managed-cloud-ai-20261121` now contains the complete WIP source snapshot as well as these documents. Clone/check out this branch directly; no ZIP or patch application is required.
+- The source repairs are preserved for takeover, **not independently reviewed or release-ready**. Compare with the baseline above and rerun acceptance. On this same Mac, preserve the existing dirty development worktree; do not apply the changes twice.
 - Existing production/local credentials and cloud provisioning outputs are deliberately NOT included. A clean clone cannot deploy or access the real Vault using this handoff.
 - Next-agent prompt: [AI_TAKEOVER_PROMPT.md](AI_TAKEOVER_PROMPT.md).
 

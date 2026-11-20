@@ -1,3 +1,4 @@
+import {validateReleaseOrigins} from './release-origins.mjs';
 import {WorkerEntrypoint} from 'cloudflare:workers';
 import {base64,exactFields,type SignedManagedOperation} from '../../src/cloud/protocol.ts';
 import {recoveryAuthority} from './recovery-authorization.ts';
@@ -78,8 +79,9 @@ export class AccountAttesterBase extends Private {
 }
 export class RecoveryTrustPolicyBase extends Private {
  async manifest(){return safe(async()=>{
-  const local=await rings(this.env,'custodian');const raw=this.env.RELEASE_POLICY,p=JSON.parse(raw) as Required<import('../../src/cloud/config.ts').ReleaseTrustManifest>;exactFields(p,['version','releaseId','apiOrigin','protocolMin','protocolMax','checkpointKeys','witnessKeys','recoveryAuthorities','recoveryServices']);
-  if(JSON.stringify(p)!==raw||p.version!==1||new URL(p.apiOrigin).origin!==p.apiOrigin||!p.apiOrigin.startsWith('https://')||p.protocolMin!==2||p.protocolMax!==2)throw new Error('unavailable');
+  const local=await rings(this.env,'custodian');const raw=this.env.RELEASE_POLICY,p=JSON.parse(raw) as Required<import('../../src/cloud/config.ts').ReleaseTrustManifest>;exactFields(p,['version','releaseId','apiOrigin','webOrigin','protocolMin','protocolMax','checkpointKeys','witnessKeys','recoveryAuthorities','recoveryServices']);
+  validateReleaseOrigins(p.apiOrigin,p.webOrigin);
+  if(JSON.stringify(p)!==raw||p.version!==1||p.protocolMin!==2||p.protocolMax!==2)throw new Error('unavailable');
   const pins=[...p.checkpointKeys,...p.witnessKeys,...p.recoveryAuthorities,p.recoveryServices.api,p.recoveryServices.custodian];
   if(!p.checkpointKeys.length||!p.witnessKeys.length||!p.recoveryAuthorities.length||new Set(pins.map(k=>k.publicKey)).size!==pins.length)throw new Error('unavailable');
   for(const pin of pins){exactFields(pin,['keyId','publicKey']);base64(pin.publicKey,32,32);if(pin.keyId!==await digest(pin.publicKey))throw new Error('unavailable');}

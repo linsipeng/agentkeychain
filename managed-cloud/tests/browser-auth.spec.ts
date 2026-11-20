@@ -847,6 +847,20 @@ test('expired restricted cookie and invalid origin/CSRF never reach recovery', a
     for(const headers of [{origin:'https://foreign.invalid'},{'x-csrf-token':'wrong'}] as Record<string,string>[]) expect((await call('recovery/verify',{email,proof:random(),target:recoveryTarget()},headers)).status).toBe(401);
     expect(await count('recovery_sessions')).toBe(1);
 });
+test('web step-up reuses the validated ingress context instead of recursively resolving a synthetic request',async()=>{
+    const {authenticator}=await register();
+    config.trustedSource=async request=>{if(new URL(request.url).pathname.includes('/step-up/'))throw new Error('synthetic requests are not trusted ingress');return 'synthetic-source';};
+    handle=createBrowserAuth(env.MAIN,config);
+    const session=await env.MAIN.prepare("SELECT account_id,tenant_id FROM browser_sessions WHERE revoked=0 ORDER BY created_at DESC LIMIT 1").first<{account_id:string;tenant_id:string}>();
+    const ref=random(),action=await digest('web-step-up-action');
+    await env.MAIN.prepare('INSERT INTO web_actions VALUES(?,?,?,?,?,?,?,unixepoch()+300)').bind(ref,session!.account_id,session!.tenant_id,'pair',random(),action,'{}').run();
+    const options=await call('web/options',{ref});
+    expect(options.status).toBe(200);
+    const body=await options.json() as Options;
+    const verified=await call('web/verify',{ref,challengeId:body.challengeId,response:await authenticator.assert(body.options.challenge)});
+    expect(verified.status).toBe(200);
+});
+
 test('web read models require normal authentication and project safe account-scoped metadata',async()=>{
     expect((await call('web/query',{view:'home'})).status).toBe(401);
     await register();

@@ -1,3 +1,4 @@
+import {validateReleaseOrigins} from '../shared/release-origins.mjs';
 import {readFileSync,mkdirSync,writeFileSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {resolve,dirname} from 'node:path';
@@ -15,7 +16,7 @@ export function manifests(input){
  return Object.fromEntries(Object.entries(plan.workers).map(([folder,name])=>{
   const config={name,main:`../../${folder}/index.ts`,compatibility_date:plan.compatibilityDate,compatibility_flags:plan.compatibilityFlags,workers_dev:false,preview_urls:false,observability:{enabled:false}};
   if(folder==='api-worker')Object.assign(config,{routes:[webDomain,apiDomain].map(pattern=>({pattern,custom_domain:true})),d1_databases:[db('MAIN','main',main,'api-worker')],services:[service('RECOVERY','recovery-worker','Custodian'),service('EMAIL_VERIFIER','auth-trust-worker','EmailVerifier'),service('TRUSTED_AUTH_SOURCE','auth-trust-worker','TrustedAuthSource'),service('CHECKPOINT_SIGNER','api-trust-worker','CheckpointSigner'),a('api-trust-worker'),k('api-trust-worker'),r('api-trust-worker'),service('RECOVERY_ACCOUNT_ATTESTER','api-trust-worker','AccountAttester')],vars:{AUTH_ORIGIN:'https://'+webDomain,DEVICE_API_ORIGIN:'https://'+apiDomain,AUTH_RP_ID:webDomain},assets:{directory:'../../web/dist',binding:'ASSETS',run_worker_first:true,not_found_handling:'single-page-application'}});
-  if(folder==='recovery-worker')Object.assign(config,{d1_databases:[db('CUSTODIAN','custodian',custodian,'recovery-worker')],services:[a('custody-trust-worker'),k('custody-trust-worker'),r('custody-trust-worker'),service('ROSTER_WITNESS_SIGNER','custody-trust-worker','RosterWitnessSigner'),service('RECOVERY_TRUST_SIGNER','custody-trust-worker','RecoveryTrustSigner'),service('RECOVERY_TRUST_POLICY','custody-trust-worker','RecoveryTrustPolicy')]});
+  if(folder==='recovery-worker')Object.assign(config,{d1_databases:[db('CUSTODIAN','custodian',custodian,'recovery-worker')],services:[a('custody-trust-worker'),service('GENESIS_AUTH','api-trust-worker','RecoveryAuthority'),k('custody-trust-worker'),r('custody-trust-worker'),service('ROSTER_WITNESS_SIGNER','custody-trust-worker','RosterWitnessSigner'),service('RECOVERY_TRUST_SIGNER','custody-trust-worker','RecoveryTrustSigner'),service('RECOVERY_TRUST_POLICY','custody-trust-worker','RecoveryTrustPolicy')]});
   if(folder==='auth-trust-worker')Object.assign(config,{d1_databases:[db('AUTH','auth',auth,'auth-trust-worker')],send_email:[{name:'EMAIL'}],triggers:{crons:['17 * * * *']},vars:{EMAIL_FROM:emailFrom}});
   if(folder==='api-trust-worker')Object.assign(config,{d1_databases:[db('TRUST_DB','main',main,'api-worker')]});
   if(folder==='custody-trust-worker')Object.assign(config,{d1_databases:[db('TRUST_DB','custodian',custodian,'recovery-worker')]});
@@ -35,13 +36,14 @@ export function validateReleaseOwnership(release,peer){
  for(const p of [...release.witnessKeys,...release.recoveryAuthorities,release.recoveryServices.custodian])if(!peer.custodian.includes(p.publicKey))throw new Error('custody_pin_mismatch');
  return release;
 }
-export function releaseManifest(input,apiDomain,peer){
+export function releaseManifest(input,apiDomain,webDomain,peer){
+ validateReleaseOrigins('https://'+apiDomain,'https://'+webDomain);
  const groups=['checkpointKeys','witnessKeys','recoveryAuthorities'];const all=[];
  for(const group of groups){if(!Array.isArray(input[group])||!input[group].length||input[group].length>16)throw new Error('missing_public_pins');all.push(...input[group]);}
  if(!input.recoveryServices?.api||!input.recoveryServices?.custodian)throw new Error('missing_public_pins');all.push(input.recoveryServices.api,input.recoveryServices.custodian);
  for(const pin of all){if(Object.keys(pin).sort().join(',')!=='keyId,publicKey'||typeof pin.publicKey!=='string'||Buffer.from(pin.publicKey,'base64').length!==32||Buffer.from(pin.publicKey,'base64').toString('base64')!==pin.publicKey||pin.keyId!==createHash('sha256').update(pin.publicKey).digest('hex'))throw new Error('invalid_public_pin');}
  if(new Set(all.map(p=>p.publicKey)).size!==all.length||typeof input.releaseId!=='string'||! /^[A-Za-z0-9_-]{1,128}$/.test(input.releaseId))throw new Error('invalid_release_pins');
- const release={witnessKeys:[...input.witnessKeys].sort((a,b)=>a.keyId.localeCompare(b.keyId)),recoveryServices:input.recoveryServices,recoveryAuthorities:[...input.recoveryAuthorities].sort((a,b)=>a.keyId.localeCompare(b.keyId)),version:1,releaseId:input.releaseId,apiOrigin:'https://'+apiDomain,protocolMin:2,protocolMax:2,checkpointKeys:[...input.checkpointKeys].sort((a,b)=>a.keyId.localeCompare(b.keyId))};
+ const release={witnessKeys:[...input.witnessKeys].sort((a,b)=>a.keyId.localeCompare(b.keyId)),recoveryServices:input.recoveryServices,recoveryAuthorities:[...input.recoveryAuthorities].sort((a,b)=>a.keyId.localeCompare(b.keyId)),version:1,releaseId:input.releaseId,apiOrigin:'https://'+apiDomain,webOrigin:'https://'+webDomain,protocolMin:2,protocolMax:2,checkpointKeys:[...input.checkpointKeys].sort((a,b)=>a.keyId.localeCompare(b.keyId))};
  return validateReleaseOwnership(release,peer);
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
@@ -50,7 +52,7 @@ if(process.argv[1]===fileURLToPath(import.meta.url)){
   const configs=manifests(input);
   // Provisioning must supply actual public pins; no synthetic release fallback.
   const peer=JSON.parse(process.env.AKC_OPERATOR_PUBLIC_KEYS??'');
-  const release=releaseManifest(JSON.parse(process.env.AKC_PUBLIC_PINS??''),input.apiDomain,peer);
+  const release=releaseManifest(JSON.parse(process.env.AKC_PUBLIC_PINS??''),input.apiDomain,input.webDomain,peer);
   configs['api-trust-worker'].vars={PEER_PUBLIC_KEYS:JSON.stringify(peer.custodian)};
   configs['custody-trust-worker'].vars={PEER_PUBLIC_KEYS:JSON.stringify(peer.api),RELEASE_POLICY:JSON.stringify(release)};
   const output=resolve(root,'provisioning/generated');mkdirSync(output,{recursive:true,mode:0o700});

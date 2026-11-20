@@ -1,4 +1,4 @@
-import { URL } from "node:url";
+import {validateReleaseOrigins} from '../../managed-cloud/shared/release-origins.mjs';
 import sodium from 'libsodium-wrappers-sumo';
 import { base64, exactFields, identifier, type SignedManagedOperation } from './protocol.ts';
 import type { CheckpointKey } from '../../managed-cloud/shared/checkpoints.ts';
@@ -8,6 +8,7 @@ export interface ReleaseTrustManifest {
   version: 1;
   releaseId: string;
   apiOrigin: string;
+  webOrigin: string;
   protocolMin: number;
   protocolMax: number;
   checkpointKeys: readonly CheckpointKey[];
@@ -19,11 +20,10 @@ const verified = new WeakSet<object>();
 export type ManagedEndpointPolicy = Readonly<ReleaseTrustManifest>;
 export function canonicalManifest(input: unknown): string {
   if(!input||typeof input!=='object')throw new Error('invalid_release_manifest');
-  exactFields(input, ['version','releaseId','apiOrigin','protocolMin','protocolMax','checkpointKeys',...('witnessKeys' in input?['witnessKeys']:[]),...('recoveryAuthorities' in input?['recoveryAuthorities']:[]),...('recoveryServices' in input?['recoveryServices']:[])]);
+  exactFields(input, ['version','releaseId','apiOrigin','webOrigin','protocolMin','protocolMax','checkpointKeys',...('witnessKeys' in input?['witnessKeys']:[]),...('recoveryAuthorities' in input?['recoveryAuthorities']:[]),...('recoveryServices' in input?['recoveryServices']:[])]);
   identifier(input.releaseId);
-  if (typeof input.apiOrigin !== 'string') throw new Error('invalid_release_manifest');
-  const url = new URL(input.apiOrigin);
-  if (url.protocol !== 'https:' || url.origin !== input.apiOrigin || url.username || url.password || input.version !== 1 ||
+  validateReleaseOrigins(input.apiOrigin,input.webOrigin);
+  if (input.version !== 1 ||
       !Number.isSafeInteger(input.protocolMin) || !Number.isSafeInteger(input.protocolMax) ||
       (input.protocolMin as number) < 1 || (input.protocolMin as number) > 2 || (input.protocolMax as number) < 2) throw new Error('incompatible_release_manifest');
   if (!Array.isArray(input.checkpointKeys) || !input.checkpointKeys.length || input.checkpointKeys.length > 16) throw new Error('invalid_release_pins');
@@ -45,7 +45,7 @@ export function canonicalManifest(input: unknown): string {
   }
   let witnessKeys:CheckpointKey[]|undefined;
   if('witnessKeys' in input){if(!Array.isArray(input.witnessKeys)||!input.witnessKeys.length||input.witnessKeys.length>16)throw new Error('invalid_witness_pins');witnessKeys=input.witnessKeys.map((p:unknown)=>{exactFields(p,['keyId','publicKey']);identifier(p.keyId);base64(p.publicKey,32,32);return {keyId:p.keyId,publicKey:p.publicKey};});if(new Set(witnessKeys.map(p=>p.keyId)).size!==witnessKeys.length||new Set(witnessKeys.map(p=>p.publicKey)).size!==witnessKeys.length||witnessKeys.some(p=>pins.some(k=>k.publicKey===p.publicKey)||recoveryAuthorities?.some(k=>k.publicKey===p.publicKey)))throw new Error('invalid_witness_pins');witnessKeys.sort((a,b)=>a.keyId<b.keyId?-1:1);}
-  return JSON.stringify({...('witnessKeys' in input?{witnessKeys}:{}),...('recoveryServices' in input?{recoveryServices}:{}),...('recoveryAuthorities' in input?{recoveryAuthorities}:{}),version:1,releaseId:input.releaseId,apiOrigin:input.apiOrigin,protocolMin:input.protocolMin,protocolMax:input.protocolMax,checkpointKeys:pins});
+  return JSON.stringify({...('witnessKeys' in input?{witnessKeys}:{}),...('recoveryServices' in input?{recoveryServices}:{}),...('recoveryAuthorities' in input?{recoveryAuthorities}:{}),version:1,releaseId:input.releaseId,apiOrigin:input.apiOrigin,webOrigin:input.webOrigin,protocolMin:input.protocolMin,protocolMax:input.protocolMax,checkpointKeys:pins});
 }
 /** The root is supplied by the signed build, never by the network or user configuration. */
 export function verifyReleaseManifest(signed: SignedManagedOperation, root: Uint8Array): ManagedEndpointPolicy {

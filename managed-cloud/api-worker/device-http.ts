@@ -94,7 +94,27 @@ export async function deviceFetch(request: Request, env: BrowserBindings) {
         if(route==='roster-fetch'){
             exactFields(b,['accountId','tenantId','vaultId','deviceId','after','timestamp','signature']);for(const f of ['accountId','tenantId','vaultId','deviceId'])identifier(b[f]);base64(b.signature,64,64);if(!env.RECOVERY?.witness||!env.CHECKPOINT_SIGNER)return unavailable();result=await consistentWitnessSnapshot(()=>rosterRepository(env.MAIN).fetch(b as never),()=>acknowledgeRoster(env.MAIN,b.tenantId as string,b.vaultId as string,{head:(t,v)=>env.RECOVERY!.witnessHead!(t,v),witness:i=>env.RECOVERY!.witness!(i)},env.CHECKPOINT_SIGNER!));
         }else if(route==='roster-put'||route==='roster-pending'){
-            exactFields(b,route==='roster-put'?['canonical','signature']:[]);const c=await authenticate(env.MAIN,request,null,raw);const rosters=rosterRepository(env.MAIN);if(route==='roster-put'){if(!env.RECOVERY?.witness||!env.CHECKPOINT_SIGNER)return unavailable();await rosters.put(c,b as unknown as import('../../src/cloud/protocol.ts').SignedManagedOperation);const witness=await acknowledgeRoster(env.MAIN,c.tenantId,c.vaultId,{head:(t,v)=>env.RECOVERY!.witnessHead!(t,v),witness:i=>env.RECOVERY!.witness!(i)},env.CHECKPOINT_SIGNER);if(JSON.parse(witness.canonical).revision!==JSON.parse(b.canonical as string).revision)throw new ApiError('idempotency_conflict');result={accepted:true,witness};}else{if(!env.CHECKPOINT_SIGNER)return unavailable();result=await rosters.pending(c,env.CHECKPOINT_SIGNER);}
+            exactFields(b,route==='roster-put'?['canonical','signature']:[]);
+            const c=await authenticate(env.MAIN,request,null,raw),rosters=rosterRepository(env.MAIN);
+            if(route==='roster-put'){
+                if(!env.RECOVERY?.witness||!env.CHECKPOINT_SIGNER)return unavailable();
+                let stage='store';
+                try{
+                    await rosters.put(c,b as unknown as import('../../src/cloud/protocol.ts').SignedManagedOperation);
+                    stage='witness';
+                    const witness=await acknowledgeRoster(env.MAIN,c.tenantId,c.vaultId,{head:(t,v)=>env.RECOVERY!.witnessHead!(t,v),witness:i=>env.RECOVERY!.witness!(i)},env.CHECKPOINT_SIGNER);
+                    stage='revision-check';
+                    if(JSON.parse(witness.canonical).revision!==JSON.parse(b.canonical as string).revision)throw new ApiError('idempotency_conflict');
+                    result={accepted:true,witness};
+                }catch(error){
+                    const reason=error instanceof Error&&/^[a-z0-9_]{1,80}$/.test(error.message)?error.message:error instanceof Error?error.name:'unknown';
+                    console.error(JSON.stringify({event:'roster_pipeline_failure',stage,reason}));
+                    throw error;
+                }
+            }else{
+                if(!env.CHECKPOINT_SIGNER)return unavailable();
+                result=await rosters.pending(c,env.CHECKPOINT_SIGNER);
+            }
         }else if(route==='export-request'||route==='export-consume'){
             exactFields(b,['canonical','signature']);const c=await authenticate(env.MAIN,request,null,raw);const exports=exportRepository(env.MAIN);result=route==='export-request'?await exports.request(c,b as unknown as import('../../src/cloud/protocol.ts').SignedManagedOperation):await exports.consume(c,b as unknown as import('../../src/cloud/protocol.ts').SignedManagedOperation);
         }

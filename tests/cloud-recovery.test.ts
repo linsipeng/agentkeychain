@@ -12,7 +12,7 @@ const b=(v:Uint8Array)=>Buffer.from(v).toString('base64');
 async function fixture(){
  const api=sodium.crypto_sign_keypair(),custodian=sodium.crypto_sign_keypair(),root=sodium.crypto_sign_keypair(),authority=sodium.crypto_sign_keypair(),target=sodium.crypto_box_keypair(),signing=sodium.crypto_sign_keypair();
  const pins={api:{keyId:'api',publicKey:b(api.publicKey)},custodian:{keyId:'custodian',publicKey:b(custodian.publicKey)}};
- const canonical=canonicalManifest({version:1,releaseId:'test',apiOrigin:'https://synthetic.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[pins.api],recoveryAuthorities:[{keyId:'authority',publicKey:b(authority.publicKey)}],recoveryServices:pins});
+ const canonical=canonicalManifest({version:1,releaseId:'test',apiOrigin:'https://api.synthetic.invalid',webOrigin:'https://synthetic.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[pins.api],recoveryAuthorities:[{keyId:'authority',publicKey:b(authority.publicKey)}],recoveryServices:pins});
  const policy=verifyReleaseManifest({canonical,signature:b(sodium.crypto_sign_detached(canonical,root.privateKey))},root.publicKey);
  const now=Math.floor(Date.now()/1000),c:RecoveryCase={version:1,id:'case',packageId:'package',accountId:'a',tenantId:'t',vaultId:'v',keyEpoch:1,targetDeviceId:'x'.repeat(43),signingKey:b(signing.publicKey),wrappingKey:b(target.publicKey),createdAt:now,notBefore:now+86400,expiresAt:now+172800,nonce:'nonce'};
  const recoveryKey=sodium.randombytes_buf(32),vdk=sodium.randombytes_buf(32),shares=splitRecoveryKey(recoveryKey),empty=await seal(b(target.publicKey),shares[0],'unused');

@@ -752,3 +752,18 @@ Recovery delivery uses the latest independently witnessed roster anchor and, whe
 ## Production support and staging artifacts
 
 Auth Trust, API Trust and Custody Trust now implement private production bindings. Context-bound email codes, the bilingual send-code UI, rotation keyrings and ignored deployment-manifest generation are covered by `npm run test:support-bundle`. Read [operator contracts and external gates](../docs/MANAGED_CLOUD_SUPPORT_WORKERS.md) before provisioning; no deployment has occurred. Historical phase notes above describe their original acceptance scope.
+
+
+The signed release contract requires both `apiOrigin` and `webOrigin`: canonical
+HTTPS origins without credentials, paths, queries or fragments. They must differ,
+and the API hostname must be a strict subdomain of the Web hostname. Device HTTP
+uses `apiOrigin`; login browser/verification URLs and device management use
+`webOrigin`. Neither role can be replaced by environment variables. Provisioning
+renders both from `apiDomain`/`webDomain`; Custody validates the same origin rules
+while retaining independent API/Custody key ownership checks.
+
+The 2026-11-06 dual-origin repair regenerates only the ignored unsigned staging
+candidate and Custody `RELEASE_POLICY`. The existing single-origin signed artifact
+is preserved and fails closed under the new contract. The controller must review
+and sign the new canonical bytes with the offline root, rebuild the client, and
+coordinate deployment separately. No signing or deployment is part of this repair.

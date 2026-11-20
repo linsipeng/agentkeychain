@@ -15,7 +15,8 @@ export interface Env extends BrowserBindings {
 export default {
     async fetch(request: Request, env: Env): Promise<Response> {
         try {
-            if (new URL(request.url).pathname.startsWith('/v1/devices/'))
+            const requestUrl=new URL(request.url);
+            if (requestUrl.pathname.startsWith('/v1/devices/'))
                 return await deviceFetch(request, env);
             if (new URL(request.url).pathname.startsWith('/v1/auth/'))
                 return await browserFetch(request, env);

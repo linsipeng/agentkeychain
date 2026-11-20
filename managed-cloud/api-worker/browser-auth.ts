@@ -193,9 +193,29 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
                     return response(await web.execute(body.ref, body.confirmationRef));
                 }
                 const a = await web.resolve(body.ref);
-                const headers = new Headers(request.headers);
-                const next = route === 'web/options' ? { actionDigest: a.action_digest } : { actionDigest: a.action_digest, challengeId: body.challengeId, response: body.response };
-                return createBrowserAuth(db, config)(new Request(config.origin + '/v1/auth/step-up/' + (route === 'web/options' ? 'options' : 'verify'), { method: 'POST', headers, body: JSON.stringify(next) }));
+                const action = a.action_digest;
+                if (route === 'web/options') {
+                    await rateIdentity(accountIdentity!);
+                    const challenge = random(), id = random();
+                    const row: ChallengeRow = { auth_expires: session.absolute_expires, id, challenge_digest: await digest(challenge), purpose: 'step-up', session_digest: sessionHash, identity_hash: accountIdentity!, account_id: session.account_id, verification_id: null, request_digest: await digest(JSON.stringify(['step-up', accountIdentity!, action, session.account_id])) };
+                    await repo.challenge(row);
+                    return response({ challengeId: id, options: await webauthn.authenticationOptions(config, challenge) });
+                }
+                const c = await repo.attempt(field(body, 'challengeId'), sessionHash, 'step-up');
+                if (!c || await digest(JSON.stringify(['step-up', c.identity_hash, action, session.account_id])) !== c.request_digest)
+                    throw unauthorized();
+                await rateIdentity(c.identity_hash);
+                const supplied = body.response as AuthenticationResponseJSON;
+                const stored = await repo.key(supplied.id, c.identity_hash);
+                if (!stored || stored.account_id !== session.account_id || (supplied.response.userHandle && supplied.response.userHandle !== stored.account_id))
+                    throw unauthorized();
+                const counter = await webauthn.authentication(config, c.challenge_digest, supplied, { id: stored.id, publicKey: decode(stored.public_key), counter: stored.counter });
+                const membership = await repo.membership(stored.account_id);
+                if (!membership || membership.tenant_id !== session.tenant_id)
+                    throw unauthorized();
+                const next = random(), nextCsrf = random();
+                await repo.accept({ challenge: c, account: stored.account_id, tenant: session.tenant_id, key: { ...stored, counter }, sessionDigest: await digest(next), csrfDigest: await digest(nextCsrf), absoluteExpiry: session.absolute_expires, actionDigest: action });
+                return response({ authenticated: true }, next, nextCsrf, Math.max(0, session.absolute_expires - Math.floor(Date.now() / 1000)));
             }
             if (route === 'recovery/verify') {
                 if (session || restricted) throw unauthorized();

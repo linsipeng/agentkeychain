@@ -5,7 +5,7 @@ import {canonicalManifest,verifyReleaseManifest} from '../src/cloud/config.ts';
 import {ManagedHttpClient} from '../src/cloud/http.ts';
 import {createDevice} from '../src/cloud/device.ts';
 const b64=(x:Uint8Array)=>Buffer.from(x).toString('base64');
-export async function testPolicy(){await sodium.ready;const key=sodium.crypto_sign_keypair();const canonical=canonicalManifest({version:1,releaseId:'test',apiOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[{keyId:'test',publicKey:b64(key.publicKey)}]});return {policy:verifyReleaseManifest({canonical,signature:b64(sodium.crypto_sign_detached(canonical,key.privateKey))},key.publicKey),key};}
+export async function testPolicy(){await sodium.ready;const key=sodium.crypto_sign_keypair();const canonical=canonicalManifest({version:1,releaseId:'test',apiOrigin:'https://api.local.invalid',webOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[{keyId:'test',publicKey:b64(key.publicKey)}]});return {policy:verifyReleaseManifest({canonical,signature:b64(sodium.crypto_sign_detached(canonical,key.privateKey))},key.publicKey),key};}
 test('HTTP refuses redirects, large bodies and unverified policies; proof headers never in query',async()=>{
  const {policy}=await testPolicy(),identity=await createDevice('vault','device');let count=0;
  const http=new ManagedHttpClient(policy,identity,async(url,init)=>{

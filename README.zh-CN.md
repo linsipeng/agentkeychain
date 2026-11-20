@@ -318,3 +318,15 @@ Phase 2A 新增独立的 `managed-cloud/` Workers/D1 本地可测后端，包含
 精确激活版本绑定、最后设备保护及增量独立见证的最新契约与证据：[最终复审记录](docs/LAST_FINAL_REVIEW.md)。
 
 开发分支现已提供私有生产支持 Worker、绑定上下文的邮件验证码及缺失配置即拒绝的 staging 清单生成器；尚未部署或配置真实资源。详见[支持 Worker 与上线门禁](docs/MANAGED_CLOUD_SUPPORT_WORKERS.zh-CN.md)。
+
+
+签名发布契约必须同时包含 `apiOrigin` 和 `webOrigin`：两者均为规范 HTTPS
+origin，不含凭据、路径、查询或片段；两者不同，API 主机名必须是 Web 主机名的
+严格子域。设备 HTTP 使用 `apiOrigin`；登录浏览器地址、验证地址和设备管理使用
+`webOrigin`。环境变量不能替换任何角色。渲染器从 `apiDomain`/`webDomain` 写入
+两者；Custody 运行时执行相同校验，并保持 API/Custody 密钥角色归属检查。
+
+2026-11-06 修复仅重新生成被 Git 忽略的 staging 未签名候选及 Custody
+`RELEASE_POLICY`。已有单 origin 签名产物保持不变，并在新契约下安全拒绝。
+控制器需审阅新的规范字节，使用离线根签名，重建客户端并另行协调部署；本次不签名、
+不部署。

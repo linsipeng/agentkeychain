@@ -3,6 +3,7 @@ import {protectEnrollmentKeys,restoreEnrollmentKeys,prepareEnrollmentActivation,
 import {RosterStore,enrollmentRoster,refreshRoster,rosterPins,publishRoster} from './roster.ts';
 import {parseRoster} from '../../managed-cloud/shared/roster.ts';
 import {issuerDelivery,type IssuerDelivery} from './issuer.ts';
+import {assertVerifiedPolicy,type ManagedEndpointPolicy} from './config.ts';
 import { URL } from "node:url";
 /* eslint-disable no-unused-vars -- callback declarations */
 import sodium from 'libsodium-wrappers-sumo';
@@ -17,7 +18,19 @@ import {productionComposition,type CloudComposition,type CloudEnrollment,openClo
 import {hasCloudState} from './coordinator.ts';
 import type {SignedManagedOperation} from './protocol.ts';
 const b64=(b:Uint8Array)=>Buffer.from(b).toString('base64');
-export interface LoginUI {open(url:string):Promise<void>;confirmPhrase(phrase:string):Promise<boolean>;wait(ms:number):Promise<void>}
+export interface LoginUI {open(url:string):Promise<void>;showPhrase?(phrase:string):void;confirmPhrase(phrase:string):Promise<boolean>;wait(ms:number):Promise<void>}
+/** Both browser entrypoints are owned by the signed Web origin. */
+export function authorizationBrowser(policy:ManagedEndpointPolicy,authorization:{browserUri:string;verificationUri:string}):URL {
+ assertVerifiedPolicy(policy);
+ try {
+  const browser=new URL(authorization.browserUri),verification=new URL(authorization.verificationUri);
+  for(const [url,path] of [[browser,'/app/devices/add'],[verification,'/v1/auth/devices/verification']] as const){
+   if(url.origin!==policy.webOrigin||url.username||url.password||url.hash||url.pathname!==path)throw new Error('cloud_invalid_authorization');
+  }
+  if(verification.search)throw new Error('cloud_invalid_authorization');
+  return browser;
+ }catch{throw new Error('cloud_invalid_authorization');}
+}
 /** New requests must never inherit a previous request's randomized trust/package. */
 export function replaceEnrollmentRequest(store:CloudStore,authorization:unknown){
  store.transaction(()=>{
@@ -54,7 +67,7 @@ export async function loginCloud(db:Database,ui:LoginUI,composition:CloudComposi
   store.put('state','health',{state:'enrolling'});
   const identity={record:{vaultId:'pending',deviceId:'pending',publicKey:b64(keys.signingPublic),revoked:false},privateKey:keys.signingPrivate};
   const http=new ManagedHttpClient(policy,identity,composition.network),platform=process.platform==='darwin'?'macos':process.platform==='linux'?'linux':'other';
-  type PendingAuthorization={deviceCode:string;deviceId:string;requestId:string;browserUri:string;interval:number;expiresIn:number;deadline:number};
+  type PendingAuthorization={deviceCode:string;deviceId:string;requestId:string;browserUri:string;verificationUri:string;phrase:string;interval:number;expiresIn:number;deadline:number};
   let authorization=store.get<PendingAuthorization>('state','pending');
   if(!authorization||authorization.deadline<=Date.now()){
   if(store.get('state','roster-current'))throw new Error('cloud_partial_activation_requires_resume');
@@ -62,13 +75,14 @@ export async function loginCloud(db:Database,ui:LoginUI,composition:CloudComposi
   authorization={...result,deadline:Date.now()+result.expiresIn*1000};
   replaceEnrollmentRequest(store,authorization);
   }
-  const browser=new URL(authorization.browserUri);
-  if(browser.origin!==policy.apiOrigin||browser.pathname!=='/app/devices/add'||!Number.isFinite(authorization.interval)||authorization.interval<5||authorization.interval>60||!Number.isFinite(authorization.expiresIn)||authorization.expiresIn<1||authorization.expiresIn>600)throw new Error('cloud_invalid_authorization');
+  const browser=authorizationBrowser(policy,authorization);
+  if(!/^[a-z]+(?: [a-z]+){2}$/.test(authorization.phrase)||authorization.phrase.length>128||!Number.isFinite(authorization.interval)||authorization.interval<5||authorization.interval>60||!Number.isFinite(authorization.expiresIn)||authorization.expiresIn<1||authorization.expiresIn>600)throw new Error('cloud_invalid_authorization');
   store.put('state','pending',authorization);
   const timestamp=Math.floor(Date.now()/1000);
   const initial=await http.publicCall('/v1/devices/resume',{requestId:authorization.requestId,deviceId:authorization.deviceId,timestamp,signature:b64(sodium.crypto_sign_detached(JSON.stringify(['AgentKeychain-enrollment-resume-v1',authorization.requestId,authorization.deviceId,timestamp]),keys.signingPrivate))}) as {state:string;deviceId?:string;requestId?:string;vaultId?:string};
   if(initial.state==='denied'){store.transaction(()=>{for(const id of ['pending','pending-package','pending-self-roster'])store!.remove('state',id);});throw new Error('cloud_authorization_denied');}
   if(initial.state!=='approved')await ui.open(browser.href);
+  ui.showPhrase?.(authorization.phrase);
   const deadline=authorization.deadline;let approved=false;
   while(Date.now()<deadline){
    if(initial.state!=='approved')await ui.wait(authorization.interval*1000);

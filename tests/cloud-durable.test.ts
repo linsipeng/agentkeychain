@@ -15,7 +15,7 @@ import {parseCanonicalOperation,type SignedManagedOperation,type ManagedVersion}
 test('durable retry reuses signed bytes, two stores converge, anchor rejects database rollback',async()=>{
  const a=await createCloudKeys(),b=await createCloudKeys();b.vdk.set(a.vdk);const cp=sodium.crypto_sign_keypair(),b64=(v:Uint8Array)=>Buffer.from(v).toString('base64');
  const pin={keyId:'test',publicKey:b64(cp.publicKey)},signer={key:async()=>pin,sign:async(c:string)=>b64(sodium.crypto_sign_detached(c,cp.privateKey))};
- const canonical=canonicalManifest({version:1,releaseId:'test',apiOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[pin]});
+ const canonical=canonicalManifest({version:1,releaseId:'test',apiOrigin:'https://api.local.invalid',webOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[pin]});
  const policy=verifyReleaseManifest({canonical,signature:b64(sodium.crypto_sign_detached(canonical,cp.privateKey))},cp.publicKey);
  const roster=[a,b].map((k,i)=>({vaultId:'vault',deviceId:i?'b':'a',publicKey:b64(k.signingPublic),revoked:false}));
  const dbs=[new Database(':memory:'),new Database(':memory:')];dbs.forEach(migrate);
@@ -48,7 +48,7 @@ import {rosterDigest,type TrustedDeviceRoster} from '../managed-cloud/shared/ros
 import type {ManagedHttpClient} from '../src/cloud/http.ts';
 test('revoked signer history needs the exact pre-revocation checkpoint; later writes and truncated proof never apply',async()=>{
  const a=await createCloudKeys(),b=await createCloudKeys();b.vdk.set(a.vdk);const cp=sodium.crypto_sign_keypair(),b64=(v:Uint8Array)=>Buffer.from(v).toString('base64'),pin={keyId:'cp',publicKey:b64(cp.publicKey)},signer={key:async()=>pin,sign:async(c:string)=>b64(sodium.crypto_sign_detached(c,cp.privateKey))};
- const manifest=canonicalManifest({version:1,releaseId:'test',apiOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[pin]}),policy=verifyReleaseManifest({canonical:manifest,signature:b64(sodium.crypto_sign_detached(manifest,cp.privateKey))},cp.publicKey),now=Math.floor(Date.now()/1000);
+ const manifest=canonicalManifest({version:1,releaseId:'test',apiOrigin:'https://api.local.invalid',webOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[pin]}),policy=verifyReleaseManifest({canonical:manifest,signature:b64(sodium.crypto_sign_detached(manifest,cp.privateKey))},cp.publicKey),now=Math.floor(Date.now()/1000);
  const dbB=new Database(':memory:');migrate(dbB);const storeB=new CloudStore(dbB,b.csk),deviceB={vaultId:'v',deviceId:'b',publicKey:b64(b.signingPublic),revoked:false},source=new VaultMutationCoordinator(storeB,b,deviceB,randomBytes(32),1);
  source.mutate({name:'old',value:'synthetic',scopes:['test'],metadata:null,localVersion:1},'put');source.mutate({name:'new',value:'synthetic',scopes:['test'],metadata:null,localVersion:1},'put');
  const versions=storeB.all<{signed:SignedManagedOperation}>('outbox').map((e,i)=>({signed:e.value.signed,serverSequence:i+1}));let root=await genesisRoot('t','v');const checkpoints=[await checkpoint(signer,'t','v',0,root,null,null)];for(const v of versions){const chain=await advanceRoot(root,v.serverSequence,v.signed);checkpoints.push(await checkpoint(signer,'t','v',v.serverSequence,chain.root,root,chain.operationDigest));root=chain.root;}

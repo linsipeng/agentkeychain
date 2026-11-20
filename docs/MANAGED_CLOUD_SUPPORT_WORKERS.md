@@ -182,3 +182,18 @@ real Passkey and delayed-recovery staging rehearsal; browser/Chrome accessibilit
 and visual acceptance; explicit deployment/release approval. No built-in Codex
 Chrome interface was available in this session; no external Chrome or Hermes
 browser adapter was used. These gates are not claimed as completed by local tests.
+
+
+The signed release contract requires both `apiOrigin` and `webOrigin`: canonical
+HTTPS origins without credentials, paths, queries or fragments. They must differ,
+and the API hostname must be a strict subdomain of the Web hostname. Device HTTP
+uses `apiOrigin`; login browser/verification URLs and device management use
+`webOrigin`. Neither role can be replaced by environment variables. Provisioning
+renders both from `apiDomain`/`webDomain`; Custody validates the same origin rules
+while retaining independent API/Custody key ownership checks.
+
+The 2026-11-06 dual-origin repair regenerates only the ignored unsigned staging
+candidate and Custody `RELEASE_POLICY`. The existing single-origin signed artifact
+is preserved and fails closed under the new contract. The controller must review
+and sign the new canonical bytes with the offline root, rebuild the client, and
+coordinate deployment separately. No signing or deployment is part of this repair.

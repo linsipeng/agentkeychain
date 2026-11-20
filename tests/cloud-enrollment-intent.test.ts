@@ -22,7 +22,7 @@ test('secure activation repairs absent SQLite journal and profile; conflicts rem
  const {prepareEnrollmentActivation,resumeEnrollmentActivation}=await import('../src/cloud/enrollment-intent.ts');
  const {RosterStore}=await import('../src/cloud/roster.ts');
  const keys=await createCloudKeys(),secure=new MemorySecureStore(),b64=(v:Uint8Array)=>Buffer.from(v).toString('base64');
- const canonical=canonicalManifest({version:1,releaseId:'test',apiOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[{keyId:'one',publicKey:b64(keys.signingPublic)}]});
+ const canonical=canonicalManifest({version:1,releaseId:'test',apiOrigin:'https://api.local.invalid',webOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,checkpointKeys:[{keyId:'one',publicKey:b64(keys.signingPublic)}]});
  const policy=verifyReleaseManifest({canonical,signature:b64(sodium.crypto_sign_detached(canonical,keys.signingPrivate))},keys.signingPublic);
  const grant={version:1 as const,requestId:'req',accountId:'a',tenantId:'t',vaultId:'v',deviceId:'d',keyEpoch:1,issuerDeviceId:null,signingKey:b64(keys.signingPublic),wrappingKey:b64(keys.wrappingPublic),expiresAt:Math.floor(Date.now()/1000)+300};
  const trust=selfAnchor(grant,keys,policy,true),enrollment={accountId:'a',tenantId:'t',vaultId:'v',deviceId:'d',keyEpoch:1,signingPublic:grant.signingKey,wrappingPublic:grant.wrappingKey,vdk:b64(keys.vdk),roster:trust.roster,checkpointKeys:policy.checkpointKeys,releaseId:policy.releaseId,apiOrigin:policy.apiOrigin};

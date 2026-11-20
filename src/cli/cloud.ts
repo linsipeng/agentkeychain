@@ -17,7 +17,7 @@ import {readConfirm} from '../util/prompt.ts';
 import {decrypt} from '../crypto/xchacha.ts';
 const run=(command:string,args:string[])=>new Promise<void>((resolve,reject)=>{const child=spawn(command,args,{stdio:'ignore'});child.on('error',()=>reject(new Error('cloud_local_command_failed')));child.on('exit',code=>code===0?resolve():reject(new Error('cloud_local_command_failed')));});
 const browser=async(url:string)=>{if(process.platform==='darwin')await run('/usr/bin/open',[url]);else if(process.platform==='linux')await run('xdg-open',[url]);else throw new Error('cloud_browser_unavailable');};
-const ui:LoginUI={open:browser,wait:ms=>new Promise(resolve=>setTimeout(resolve,ms)),confirmPhrase:async phrase=>{process.stdout.write(`Compare on both devices: ${phrase}\n`);return readConfirm('Do both devices show exactly the same phrase? [y/N] ');}};
+const ui:LoginUI={open:browser,showPhrase:phrase=>process.stdout.write(`Device pairing phrase: ${phrase}\n`),wait:ms=>new Promise(resolve=>setTimeout(resolve,ms)),confirmPhrase:async phrase=>{process.stdout.write(`Compare on both devices: ${phrase}\n`);return readConfirm('Do both devices show exactly the same phrase? [y/N] ');}};
 export function cloudStatus(){
  try{const policy=productionPolicy();if(!existsSync(dbPath()))return {available:true,state:'not_enrolled',releaseId:policy.releaseId};const db=new Database(dbPath(),{readonly:true,create:false});try{const schema=db.query("SELECT 1 FROM sqlite_master WHERE name='cloud_schema'").get();if(!schema)return {available:true,state:'not_enrolled'};const version=db.query('SELECT version FROM cloud_schema WHERE id=1').get() as {version:number}|null;return {available:true,state:version?.version===1?'configured':'incompatible',schema:version?.version??null};}finally{db.close();}}
  catch(error){if(error instanceof Error&&error.message==='cloud_unavailable_not_provisioned')return {available:false,state:'cloud_unavailable_not_provisioned'};throw error;}
@@ -85,7 +85,7 @@ export async function runCloud(argv:string[],platform:string=process.platform):P
     case 'sync-now':await runtime.engine.sync();break;
     case 'devices':process.stdout.write(JSON.stringify(runtime.enrollment.roster.map(d=>({deviceId:d.deviceId,revoked:d.revoked})))+'\n');break;
     case 'approve-device':await approveDevice(runtime,argv[1]??'',ui);break;
-    case 'revoke-device':await browser(runtime.http.policy.apiOrigin+'/app/devices/'+encodeURIComponent(argv[1]??''));break;
+    case 'revoke-device':await browser(runtime.http.policy.webOrigin+'/app/devices/'+encodeURIComponent(argv[1]??''));break;
     case 'logout':runtime.http.logout();runtime.store.put('state','health',{state:'auth_required'});break;
     case 'service':{const controller=new globalThis.AbortController(),stop=()=>controller.abort();process.once('SIGINT',stop);process.once('SIGTERM',stop);try{await runCloudDaemon(runtime,vaultDir(),controller.signal);}finally{process.removeListener('SIGINT',stop);process.removeListener('SIGTERM',stop);}break;}
     default:throw new Error('cloud_unknown_command');

@@ -16,7 +16,7 @@ function ring(algorithm){const pair=generateKeyPairSync(algorithm),publicKey=pai
 const apiRings={CHECKPOINT_KEYRING:ring('ed25519'),ACCOUNT_KEYRING:ring('ed25519'),WRAP_KEYRING:ring('x25519'),RELEASE_KEYRING:ring('ed25519')},custodyRings={WITNESS_KEYRING:ring('ed25519'),TRUST_KEYRING:ring('ed25519'),WRAP_KEYRING:ring('x25519'),RELEASE_KEYRING:ring('ed25519')};
 const pub=r=>({keyId:r.activeId,publicKey:r.keys[0].publicKey});
 const apiPeer=Object.values(apiRings).flatMap(r=>r.keys.map(k=>k.publicKey)),custodyPeer=Object.values(custodyRings).flatMap(r=>r.keys.map(k=>k.publicKey));
-const policy=releaseManifest({releaseId:'synthetic-support',checkpointKeys:[pub(apiRings.CHECKPOINT_KEYRING)],witnessKeys:[pub(custodyRings.WITNESS_KEYRING)],recoveryAuthorities:[pub(custodyRings.TRUST_KEYRING)],recoveryServices:{api:pub(apiRings.RELEASE_KEYRING),custodian:pub(custodyRings.RELEASE_KEYRING)}},plan.apiDomain,{api:apiPeer,custodian:custodyPeer});
+const policy=releaseManifest({releaseId:'synthetic-support',checkpointKeys:[pub(apiRings.CHECKPOINT_KEYRING)],witnessKeys:[pub(custodyRings.WITNESS_KEYRING)],recoveryAuthorities:[pub(custodyRings.TRUST_KEYRING)],recoveryServices:{api:pub(apiRings.RELEASE_KEYRING),custodian:pub(custodyRings.RELEASE_KEYRING)}},plan.apiDomain,plan.webDomain,{api:apiPeer,custodian:custodyPeer});
 const configs=manifests({main:'11111111-1111-4111-8111-111111111111',custodian:'22222222-2222-4222-8222-222222222222',auth:'33333333-3333-4333-8333-333333333333',emailFrom:'verify@agentkeychain.soupsam.com'});
 const encoded=r=>Object.fromEntries(Object.entries(r).map(([k,v])=>[k,JSON.stringify(v)]));
 const authKeys={EMAIL_HASH_KEY:randomBytes(32).toString('base64'),CODE_HASH_KEY:randomBytes(32).toString('base64'),SOURCE_HASH_KEY:randomBytes(32).toString('base64')};
@@ -36,6 +36,18 @@ workers.push({name:'synthetic-mailbox',modules:true,compatibilityDate:plan.compa
  async submit(email,route,body,headers){const proof=messages.get(email);if(!proof)throw new Error('missing_test_email');return this.env.API.fetch(new Request('https://${plan.webDomain}/v1/auth/'+route,{method:'POST',headers,body:JSON.stringify({...body,email,proof}),cf:{colo:'SJC'}}));}
 }export default Mailbox;`});
 for(const [folder,entrypoints] of [['api-trust-worker',['CheckpointSigner','RecoveryReleaseSigner','RecoveryAuthority','RecoveryKeys','AccountAttester']],['custody-trust-worker',['RosterWitnessSigner','RecoveryTrustSigner','RecoveryReleaseSigner','RecoveryTrustPolicy','RecoveryAuthority','RecoveryKeys']]])for(const entrypoint of entrypoints)workers.push({name:folder+'-'+entrypoint,modules:true,compatibilityDate:plan.compatibilityDate,serviceBindings:{TARGET:{name:plan.workers[folder],entrypoint}},script:`import {WorkerEntrypoint} from 'cloudflare:workers';export default class extends WorkerEntrypoint{async key(){const k=await this.env.TARGET.key();return JSON.stringify({keyId:k.keyId,publicKey:k.publicKey});}async sign(m){return this.env.TARGET.sign(m);}async manifest(){return this.env.TARGET.manifest();}async rewrap(...a){const v=await this.env.TARGET.rewrap(...a);try{return JSON.stringify(structuredClone(v));}finally{v[Symbol.dispose]?.();}}async authorize(...a){return this.env.TARGET.authorize(...a);}async probe(method){return await this.env.TARGET[method]();}}`});
+const invalidPolicies=[
+ {...policy,webOrigin:undefined}, {...policy,apiOrigin:policy.webOrigin},
+ {...policy,webOrigin:policy.apiOrigin}, {...policy,webOrigin:'https://attacker.test'},
+ {...policy,webOrigin:policy.webOrigin+'/'}, {...policy,apiOrigin:policy.apiOrigin+'?x'},
+ {...policy,recoveryServices:{api:policy.recoveryServices.custodian,custodian:policy.recoveryServices.api}},
+ {...policy,witnessKeys:policy.checkpointKeys,checkpointKeys:policy.witnessKeys}
+];
+for(const [i,p] of invalidPolicies.entries()){
+ const name='invalid-policy-'+i,base=workers.find(w=>w.name===plan.workers['custody-trust-worker']);
+ workers.push({...base,name,bindings:{...base.bindings,RELEASE_POLICY:JSON.stringify(p)}});
+ workers.push({name:name+'-probe',modules:true,compatibilityDate:plan.compatibilityDate,serviceBindings:{TARGET:{name,entrypoint:'RecoveryTrustPolicy'}},script:`import {WorkerEntrypoint} from 'cloudflare:workers';export default class extends WorkerEntrypoint{async manifest(){return this.env.TARGET.manifest();}}`});
+}
 const mf=new Miniflare(convertV4MiniflareOptions({host:'127.0.0.1',port:0,inspectorPort:0,log:new Log(LogLevel.NONE),workers}));
 try{
  await mf.ready;
@@ -64,6 +76,7 @@ try{
  await assert.rejects(async()=>await signer.sign('arbitrary'));
  for(const [folder,entrypoint] of [['api-trust-worker','RecoveryReleaseSigner'],['custody-trust-worker','RosterWitnessSigner'],['custody-trust-worker','RecoveryTrustSigner'],['custody-trust-worker','RecoveryReleaseSigner']]){const s=await mf.getWorker(folder+'-'+entrypoint);assert.ok(JSON.parse(await s.key()).keyId);await assert.rejects(async()=>await s.sign('arbitrary'));}
  assert.equal(await (await mf.getWorker('custody-trust-worker-RecoveryTrustPolicy')).manifest(),JSON.stringify(policy));
+ for(const i of invalidPolicies.keys())await assert.rejects(async()=>await (await mf.getWorker('invalid-policy-'+i+'-probe')).manifest());
  const custodyDb=await mf.getD1Database('CUSTODIAN',plan.workers['recovery-worker']);
  const issuer=await crypto.subtle.generateKey('Ed25519',true,['sign','verify']),issuerKey=encode64(new Uint8Array(await crypto.subtle.exportKey('raw',issuer.publicKey))),targetPair=await crypto.subtle.generateKey('X25519',true,['deriveBits']);
  const wrappingKey=encode64(new Uint8Array(await crypto.subtle.exportKey('raw',targetPair.publicKey))),now=Math.floor(Date.now()/1000);
