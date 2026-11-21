@@ -104,7 +104,14 @@ static void kill_at(struct run r,enum fence barrier) {
     const int status=wait_child(worker);
     CHECK(seen&&busy==lease_busy&&other<0&&killed==0&&WIFSIGNALED(status)&&WTERMSIG(status)==SIGKILL);
 }
+#ifdef AKC_COMBINED_BRIDGE
+static bool combined_bridge(struct run r);
+#endif
+#ifdef AKC_COMBINED_BRIDGE
+static int receipt_fixture(void) {
+#else
 int main(void) {
+#endif
     CHECK(getuid()!=0&&getuid()==geteuid()&&sqlite3_libversion_number()==3054001&&!strcmp(sqlite3_sourceid(),sqlite_source));
     umask(077);
     char temp[]="/tmp/akc-broker-receipt-XXXXXX";CHECK(mkdtemp(temp)!=NULL);
@@ -136,6 +143,14 @@ int main(void) {
         "INSERT INTO receipt VALUES(1,'" SEED "','" SEED_RECEIPT "');COMMIT;");
     close_exact(&r,&v,db);
     r=(struct run){.scope={dir,d.st_dev,d.st_uid,d.st_ino},.parent=top,.lease=-1,.fence_fd=-1,.lock_inode=l.st_ino};
+#ifdef AKC_COMBINED_BRIDGE
+    if(!combined_bridge(r)){
+        CHECK(acquire(&r.scope,top,r.lock_inode,&r.lease)==lease_held);
+        CHECK(unlinkat(dir,main_name,0)==0&&unlinkat(dir,lease_name,0)==0);
+        close_checked(r.lease);close_checked(dir);CHECK(unlinkat(top,"pilot",AT_REMOVEDIR)==0);
+        close_checked(top);CHECK(rmdir(temp)==0);return 77;
+    }
+#else
     kill_at(r,first_dirty);
     CHECK(gate_access(&r.scope,rollback_name)==1);
     /* An independently reopened connection must recover both old rows. */
@@ -155,6 +170,7 @@ int main(void) {
     CHECK(sqlite3_extended_errcode(db)==SQLITE_CONSTRAINT_TRIGGER);
     inspect(db,2);CHECK(r.deletions==0);close_exact(&r,&v,db);
 
+#endif
     db=open_exact(&r,&v,true);inspect(db,2);close_exact(&r,&v,db);
     CHECK(gate_access(&r.scope,rollback_name)==0);
     CHECK(acquire(&r.scope,top,r.lock_inode,&r.lease)==lease_held);
@@ -162,6 +178,10 @@ int main(void) {
     CHECK(unlinkat(dir,main_name,0)==0&&unlinkat(dir,lease_name,0)==0);
     close_checked(r.lease);close_checked(dir);CHECK(unlinkat(top,"pilot",AT_REMOVEDIR)==0);
     close_checked(top);CHECK(rmdir(temp)==0);
+#ifdef AKC_COMBINED_BRIDGE
+    puts("PASS native peer + signed fixed handoff + descriptor-relative durable receipt replay (synthetic only)");
+#else
     puts("PASS pinned SQLite snapshot+receipt atomic rollback, lost reply and exact replay (synthetic fixture only)");
+#endif
     return 0;
 }

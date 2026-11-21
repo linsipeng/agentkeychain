@@ -8,6 +8,7 @@ on:
       - '.github/workflows/pilot-sqlite-fixture.yml'
       - 'tests/native/pilot_sqlite*.c'
       - 'tests/native/pilot_broker_unix_peer.c'
+      - 'tests/native/pilot_broker_unix_receipt.c'
       - 'tests/native/PILOT_SQLITE_DIRFD_ACCEPTANCE.md'
 
 permissions:
@@ -95,3 +96,18 @@ jobs:
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
           "$AKC_SQLITE_FIXTURE_DIR/broker-peer"
+
+      - name: Verify signed fixed broker request and durable receipt together
+        if: matrix.runner == 'ubuntu-24.04'
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(id -u)" != 0
+          pkg-config --atleast-version=3.0.0 libcrypto
+          fixture="$AKC_SQLITE_FIXTURE_DIR"
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I"$fixture" -c tests/native/pilot_broker_unix_receipt.c -o "$fixture/broker-receipt.o"
+          cc "$fixture/broker-receipt.o" "$fixture/sqlite3.o" -lm -lpthread -lcrypto -o "$fixture/broker-receipt"
+          "$fixture/broker-receipt"
