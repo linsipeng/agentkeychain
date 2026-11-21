@@ -61,8 +61,38 @@ FIRST_PROMPT = "/org/freedesktop/secrets/prompt/p1"
 PROMPT_IFACE = "org.freedesktop.Secret.Prompt"
 
 
+# dbus-daemon omits message paths from rejection diagnostics but reports
+# the number of matched rules. Add DENY-only diagnostic rules *before* the
+# existing allow rules. Last-match semantics keep every decision unchanged.
+# Encode only exact p0/p1, expected destination and zero FD matches.
+def prompt_ready_deny_markers():
+    base = ('send_interface="org.gnome.keyring.internal.Prompter.Callback" '
+            'send_member="PromptReady" send_type="method_call"')
+    known = (("", 1), ('send_path="/org/gnome/keyring/Prompt/p0"', 1),
+             ('send_path="/org/gnome/keyring/Prompt/p1"', 2),
+             (f'send_destination="{SERVICE}"', 4), ('max_fds="0"', 8))
+    return [f"<deny {base} {attributes}/>" for attributes, count in known for _ in range(count)]
+
+
+def prompt_ready_denial_shape(raw):
+    if b' type="method_call"' not in raw:
+        return "other-type"
+    if b' interface="org.gnome.keyring.internal.Prompter.Callback"' not in raw:
+        return "other-interface"
+    shape = re.search(rb"Rejected send message, ([0-9]{1,2}) matched rules;", raw)
+    if shape is None:
+        return "unclassified"
+    score = int(shape[1]) - 1
+    if not 0 <= score <= 14 or score & 3 == 3:
+        return "unclassified"
+    path = {0: "other-path", 1: "callback-p0", 2: "callback-p1"}[score & 3]
+    role = "expected-destination" if score & 4 else "other-destination"
+    fds = "zero-fds" if score & 8 else "has-fds"
+    return "-".join((path, role, fds, "expected-interface"))
+
+
 def prompt_cancel_policy():
-    rules = [f'<allow own="{PROMPTER}"/>', f'<allow own="{FIXTURE_CLIENT}"/>']
+    rules = prompt_ready_deny_markers() + [f'<allow own="{PROMPTER}"/>', f'<allow own="{FIXTURE_CLIENT}"/>']
     routes = (
         (FIXTURE_CLIENT, SERVICE, FIRST_PROMPT, PROMPT_IFACE, ("Prompt", "Dismiss")),
         (SERVICE, PROMPTER, "/org/gnome/keyring/Prompter", "org.gnome.keyring.internal.Prompter",
@@ -390,6 +420,8 @@ def prompt_child_label(role, raw):
         if direction is not None:
             member = re.search(rb' member="([A-Za-z]{1,32})"', raw)
             method = PROMPT_METHODS.get(member[1], "other") if member else "other"
+            if direction == "send" and method == "ready":
+                method += "-" + prompt_ready_denial_shape(raw)
             return "bus-rejected-" + direction + "-" + method
         return "bus-stderr-other"
     if b"cannot open display" in line or b"failed to open display" in line:
