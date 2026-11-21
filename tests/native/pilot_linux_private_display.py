@@ -207,7 +207,7 @@ def screen_windows(display, mark, input_scope=None):
                 # and modifier changes may drain only before the map snapshot;
                 # pointer-only changes cannot invalidate the key map.
                 before_map = (label.startswith("input-dialog-") or
-                              label in ("input-xtest-extension", "input-focus-setup"))
+                              label in ("input-xtest-extension", "input-focus-setup", "input-focus-warmup"))
                 for _ in range(4):
                     if header[0] in (0, 1):
                         break
@@ -397,23 +397,54 @@ def enter_fixture_password(reply, request, mark, setup, root, window, password, 
     first, last = setup[26:28]
     need(8 <= first < last and last - first <= 247)
     count = last - first + 1
-    header, body = reply("input-keymap", 101, struct.pack("<BB2x", first, count))
-    stride = header[1]
-    need(0 < stride <= 16 and len(body) == count * stride * 4)
     symbols = (*range(48, 58), 0xff09, 0xff0d)
-    keys = {}
-    for symbol in symbols:
-        candidates = [first + i for i in range(count)
-                      if struct.unpack_from("<I", body, i * stride * 4)[0] == symbol]
-        need(len(candidates) == 1)
-        keys[symbol] = candidates[0]
 
-    keymap, keymap_body = reply("input-no-held-keys", 44)
-    # QueryKeymap reply is 40 bytes: eight framing bytes and 32 key bytes.
-    mark("input-no-held-keys-reply-shape")
-    need(len(keymap_body) == 8)
-    mark("input-held-keys-present")
-    need(not any(keymap[8:32] + keymap_body))
+    def mapping(stage):
+        header, body = reply("input-" + stage + "-keymap", 101, struct.pack("<BB2x", first, count))
+        mark("input-" + stage + "-keymap-shape")
+        stride = header[1]
+        need(0 < stride <= 16 and len(body) == count * stride * 4)
+        keys = {}
+        for symbol in symbols:
+            candidates = [first + i for i in range(count)
+                          if struct.unpack_from("<I", body, i * stride * 4)[0] == symbol]
+            need(len(candidates) == 1)
+            keys[symbol] = candidates[0]
+
+        header, body = reply("input-" + stage + "-modifiers", 119)
+        mark("input-" + stage + "-modifiers-shape")
+        need(header[1] <= 32 and len(body) == 8 * header[1])
+        mark("input-" + stage + "-modifier-target")
+        need(not any(key in body for key in keys.values()))
+        return keys
+
+    def no_held_keys(stage):
+        keymap, keymap_body = reply("input-" + stage + "-held-keys", 44)
+        # QueryKeymap reply is 40 bytes: eight framing bytes and 32 key bytes.
+        mark("input-" + stage + "-held-keys-reply-shape")
+        need(len(keymap_body) == 8)
+        mark("input-" + stage + "-held-keys-present")
+        need(not any(keymap[8:32] + keymap_body))
+        header, body = reply("input-" + stage + "-modifier-state", 38, struct.pack("<I", window))
+        # QueryPointer's exact root and modifier/button mask. No physical
+        # or latched modifier may affect translation of the input keycodes.
+        mark("input-" + stage + "-modifier-state-shape")
+        need(not body and header[1] == 1 and struct.unpack_from("<I", header, 8)[0] == root)
+        mark("input-" + stage + "-live-modifiers")
+        need(struct.unpack_from("<H", header, 24)[0] == 0)
+
+    # Xorg XTEST dispatches KeyRelease through GetKeyboardEvents, which
+    # updates the master device before emitting the event. An already-up
+    # nonmodifier release cannot insert a character. Cross the focus RPC
+    # barrier on this same socket before trusting a fresh map.
+    preliminary = mapping("before-warmup")
+    no_held_keys("before-warmup")
+    exact_focus("before-warmup")
+    mark("input-warmup-release-only")
+    request(extension[9], struct.pack("<BB2xII20x", 3, preliminary[48], 0, root), minor=2)
+    exact_focus("warmup")
+    keys = mapping("authoritative")
+    no_held_keys("authoritative")
     for stage, group in (("before-password", password), ("after-password", (0xff09,)),
                          ("after-tab", password), ("after-confirmation", (0xff0d,))):
         exact_focus(stage)
