@@ -31,6 +31,8 @@ async function main(){
  if(!isAbsolute(outfile)||basename(outfile)!==INSTALLED_PILOT_BINARY)throw new Error('invalid_pilot_input');
  const artifact=JSON.parse(await readBounded(options.get('--artifact')!,64*1024)) as ContinuationPilotBuildArtifact;
  const rootPublicKey=(await readBounded(options.get('--root-public-key')!,256)).trim();
+ // The optional native read pin is verified from this same public artifact.
+ // No environment, runtime file, or separate CLI selector grants native access.
  await verifyInstalledContinuationPilot(artifact,rootPublicKey,`${process.platform}-${process.arch}`);
  const source=fileURLToPath(new URL('../src/cli/continuation-pilot.ts',import.meta.url));
  const stub=fileURLToPath(new URL('../src/cli/continuation-pilot.generated.ts',import.meta.url));

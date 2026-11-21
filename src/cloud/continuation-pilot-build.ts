@@ -16,6 +16,7 @@ export interface ContinuationPilotBuildArtifact {
  commitAppendix:SignedManagedOperation;
  rolloutAppendix:SignedManagedOperation;
  installation:SignedManagedOperation;
+ nativeReaderAppendix?:SignedManagedOperation;
 }
 
 export interface VerifiedInstalledContinuationPilot {
@@ -27,6 +28,44 @@ type TransportScope={policy:ManagedEndpointPolicy;authOrigin:string;authOriginAp
  authAppendix:SignedManagedOperation;commitAppendix:SignedManagedOperation;
  rollout:Readonly<{keyId:string;publicKey:string}>;installationDigest:string;target:string};
 const installedScopes=new WeakMap<VerifiedInstalledContinuationPilot,Readonly<TransportScope>>();
+const nativeReaderDomain='AgentKeychain-installed-continuation-pilot-native-reader-v1';
+export const INSTALLED_PILOT_NATIVE_READER_ABI='pilot-broker-inspect-v1';
+type PublicPin=Readonly<{keyId:string;publicKey:string}>;
+const nativeReaderScopes=new WeakMap<VerifiedInstalledContinuationPilot,Readonly<{
+ installationDigest:string;target:string;nativeImageSha256:string;abi:typeof INSTALLED_PILOT_NATIVE_READER_ABI;
+ readerPin:PublicPin;expiresAt:number;
+}>>();
+/** This verifies signed intent only. A consumer must still prove executable,
+ * kernel peer, fresh response, and held profile identity before using it. */
+export function installedContinuationPilotNativeReaderScope(gate:VerifiedInstalledContinuationPilot){
+ const scope=nativeReaderScopes.get(gate);
+ if(!scope||Math.floor(Date.now()/1000)>=Math.min(gate.expiresAt,scope.expiresAt))throw deny();
+ return scope;
+}
+
+async function verifyNativeReaderAppendix(value:unknown,rootPublicKey:string,installationDigest:string,target:string,
+ installationIssuedAt:number,installationExpiresAt:number,forbidden:readonly PublicPin[]){
+ exactFields(value,['canonical','signature']);
+ if(typeof value.canonical!=='string'||Buffer.byteLength(value.canonical)>2048)throw deny();
+ base64(value.signature,64,64);
+ const claim:unknown=JSON.parse(value.canonical);
+ exactFields(claim,['version','domain','installationDigest','target','nativeImageSha256','abi','readerPin','issuedAt','expiresAt']);
+ exactFields(claim.readerPin,['keyId','publicKey']);
+ const {keyId,publicKey}=claim.readerPin;
+ const {nativeImageSha256,issuedAt,expiresAt}=claim;
+ if(typeof keyId!=='string'||typeof publicKey!=='string'||typeof nativeImageSha256!=='string'||
+    nativeImageSha256.length!==64||!/^[a-f0-9]{64}$/.test(nativeImageSha256)||
+    typeof issuedAt!=='number'||typeof expiresAt!=='number'||!Number.isSafeInteger(issuedAt)||!Number.isSafeInteger(expiresAt)||
+    issuedAt<installationIssuedAt||issuedAt>Math.floor(Date.now()/1000)||expiresAt<=issuedAt||
+    expiresAt>installationExpiresAt||expiresAt<=Math.floor(Date.now()/1000))throw deny();
+ base64(publicKey,32,32);
+ if(keyId!==await digest(publicKey)||forbidden.some(pin=>pin.keyId===keyId||pin.publicKey===publicKey))throw deny();
+ const readerPin=Object.freeze({keyId,publicKey}),abi=INSTALLED_PILOT_NATIVE_READER_ABI;
+ const canonical=JSON.stringify({version:1,domain:nativeReaderDomain,installationDigest,target,nativeImageSha256,abi,readerPin,issuedAt,expiresAt});
+ if(canonical!==value.canonical||!await verify(rootPublicKey,value.signature,canonical)||Math.floor(Date.now()/1000)>=expiresAt)throw deny();
+ return Object.freeze({installationDigest,target,nativeImageSha256,abi,readerPin,expiresAt});
+}
+
 export function installedContinuationPilotScope(gate:VerifiedInstalledContinuationPilot){
  const scope=installedScopes.get(gate);
  if(!scope||Math.floor(Date.now()/1000)>=gate.expiresAt)throw deny();
@@ -48,7 +87,9 @@ export async function verifyInstalledContinuationPilot(artifact:ContinuationPilo
   // Take an immutable local snapshot before the first asynchronous check.
   artifact=JSON.parse(JSON.stringify(artifact)) as ContinuationPilotBuildArtifact;
   if(!/^(darwin|linux)-(arm64|x64)$/.test(target))throw deny();
-  exactFields(artifact,['manifest','authOriginAppendix','authAppendix','commitAppendix','rolloutAppendix','installation']);
+  const nativeReaderPresent=Object.hasOwn(artifact,'nativeReaderAppendix');
+  exactFields(artifact,['manifest','authOriginAppendix','authAppendix','commitAppendix','rolloutAppendix','installation',
+   ...(nativeReaderPresent?['nativeReaderAppendix']:[])]);
   base64(rootPublicKey,32,32);
   const standard=releaseArtifact();
   if(!standard||standard.rootPublicKey===rootPublicKey)throw deny();
@@ -93,10 +134,18 @@ export async function verifyInstalledContinuationPilot(artifact:ContinuationPilo
    authPinDigest:await signedDigest(artifact.authAppendix),mainPinDigest:await signedDigest(artifact.commitAppendix),
    rolloutPinDigest:await signedDigest(artifact.rolloutAppendix),genesisPin,issuedAt,expiresAt});
   if(installation.canonical!==canonical||!await verify(rootPublicKey,installation.signature,canonical)||Math.floor(Date.now()/1000)>=expiresAt)throw deny();
+  const installationDigest=await signedDigest(installation);
   const gate=Object.freeze({releaseId:manifest.releaseId,contract:INSTALLED_PILOT_CONTRACT,expiresAt});
+  if(nativeReaderPresent){
+   const scope=await verifyNativeReaderAppendix(artifact.nativeReaderAppendix,rootPublicKey,installationDigest,target,issuedAt,expiresAt,
+    [...pins,...oldPins,{keyId:await digest(rootPublicKey),publicKey:rootPublicKey},
+     {keyId:await digest(standard.rootPublicKey),publicKey:standard.rootPublicKey}]);
+   nativeReaderScopes.set(gate,scope);
+  }
+  if(Math.floor(Date.now()/1000)>=expiresAt)throw deny();
   installedScopes.set(gate,Object.freeze({policy:manifest,authOrigin,authOriginAppendix:Object.freeze(artifact.authOriginAppendix),
    authAppendix:Object.freeze(artifact.authAppendix),commitAppendix:Object.freeze(artifact.commitAppendix),rollout,
-   installationDigest:await signedDigest(installation),target}));
+   installationDigest,target}));
   return gate;
  }catch{throw deny();}
 }

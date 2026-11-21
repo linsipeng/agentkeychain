@@ -5,7 +5,8 @@ import {mkdtemp,readFile,rm,symlink,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {canonicalManifest} from '../src/cloud/config.ts';
-import {INSTALLED_PILOT_BINARY,INSTALLED_PILOT_CONTRACT,verifyInstalledContinuationPilot} from '../src/cloud/continuation-pilot-build.ts';
+import {INSTALLED_PILOT_BINARY,INSTALLED_PILOT_CONTRACT,INSTALLED_PILOT_NATIVE_READER_ABI,
+ installedContinuationPilotNativeReaderScope,verifyInstalledContinuationPilot} from '../src/cloud/continuation-pilot-build.ts';
 import {digest} from '../managed-cloud/shared/contracts.ts';
 
 async function authority(){
@@ -37,6 +38,33 @@ async function makeArtifact(target=`${process.platform}-${process.arch}`){
  return {artifact,root:root!,target,expiresAt,auth:auth!,main:main!,witness:witness!,rollout:rollout!};
 }
 
+async function makeNativeClaim(artifact:Awaited<ReturnType<typeof makeArtifact>>['artifact'],target:string,
+ readerPin:{keyId:string;publicKey:string},expiresAt:number){
+ const {issuedAt}=JSON.parse(artifact.installation.canonical) as {issuedAt:number};
+ return {version:1,domain:'AgentKeychain-installed-continuation-pilot-native-reader-v1',
+  installationDigest:await digest(JSON.stringify([artifact.installation.canonical,artifact.installation.signature])),target,
+  nativeImageSha256:'a'.repeat(64),abi:INSTALLED_PILOT_NATIVE_READER_ABI,readerPin,issuedAt,expiresAt};
+}
+
+test('native read pin is root-only, exact installation, role, target, ABI and time bound',async()=>{
+ const {artifact,root,target,expiresAt,rollout,auth}=await makeArtifact('linux-x64'),reader=await authority();
+ const claim=await makeNativeClaim(artifact,target,reader.pin,expiresAt);
+ const open=(nativeReaderAppendix:unknown)=>verifyInstalledContinuationPilot(
+  {...artifact,nativeReaderAppendix} as typeof artifact,root.publicKey,target);
+ const positive=await open(await root.sign(JSON.stringify(claim)));
+ expect(installedContinuationPilotNativeReaderScope(positive)).toEqual({installationDigest:claim.installationDigest,target,
+  nativeImageSha256:claim.nativeImageSha256,abi:claim.abi,readerPin:reader.pin,expiresAt});
+ expect(()=>installedContinuationPilotNativeReaderScope({...positive})).toThrow('cloud_continuation_pilot_not_provisioned');
+ const legacy=await verifyInstalledContinuationPilot(artifact,root.publicKey,target);
+ expect(()=>installedContinuationPilotNativeReaderScope(legacy)).toThrow('cloud_continuation_pilot_not_provisioned');
+ for(const fields of [{installationDigest:'b'.repeat(64)},{target:'linux-arm64'},{nativeImageSha256:'A'.repeat(64)},
+  {abi:'other'},{readerPin:auth.pin},{readerPin:root.pin},{expiresAt:expiresAt+1},{expiresAt:claim.issuedAt},{extra:true}]){
+  await expect(open(await root.sign(JSON.stringify({...claim,...fields})))).rejects.toThrow('cloud_continuation_pilot_not_provisioned');
+ }
+ await expect(open(await rollout.sign(JSON.stringify(claim)))).rejects.toThrow('cloud_continuation_pilot_not_provisioned');
+ await expect(open(null)).rejects.toThrow('cloud_continuation_pilot_not_provisioned');
+});
+
 test('only the isolated, signed pilot artifact can compile an inert pilot installation',async()=>{
  if(!/^(linux|darwin)-(arm64|x64)$/.test(`${process.platform}-${process.arch}`))return;
  const {artifact,root,target,expiresAt}=await makeArtifact();
@@ -67,7 +95,11 @@ test('only the isolated, signed pilot artifact can compile an inert pilot instal
   expect(rejected).toBe(1);
   expect(await Bun.file(bin).exists()).toBe(false);
   await rm(artifactPath);
-  await writeFile(artifactPath,JSON.stringify(artifact));
+  const nativeClaim=await makeNativeClaim(artifact,target,(await authority()).pin,expiresAt);
+  await writeFile(artifactPath,JSON.stringify({...artifact,nativeReaderAppendix:await root.sign(JSON.stringify({...nativeClaim,abi:'wrong'}))}));
+  expect(compile(bin).exitCode).not.toBe(0);
+  expect(await Bun.file(bin).exists()).toBe(false);
+  await writeFile(artifactPath,JSON.stringify({...artifact,nativeReaderAppendix:await root.sign(JSON.stringify(nativeClaim))}));
   expect(compile(join(dir,'agentkeychain')).exitCode).not.toBe(0);
   const result=compile(bin);
   expect(result.stderr.toString()).toBe('');
