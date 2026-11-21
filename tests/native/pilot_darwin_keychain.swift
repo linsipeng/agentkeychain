@@ -1,6 +1,7 @@
 // Standalone synthetic native acceptance. Never installed or compiled into the CLI.
-// Opens two pre-created disposable file-based Keychains. Does not create,
-// delete, unlock, configure, enumerate their contents, or change any search list.
+// Item checks use two explicit disposable file-based Keychains. Optional
+// preparation is limited to two new private fixtures. No configuration mutators
+// are called; an observed search-list/default delta causes failure.
 import Foundation
 import Security
 import Darwin
@@ -121,20 +122,106 @@ struct Fixture {
  }
 }
 
+// Candidate fixture preparation only. Public SecKeychainCreate uses the
+// private-path branch in the reviewed Apple Security source. Check observed
+// default/search-list state around each create on the disposable runner.
+func provisionDisposableKeychains(before: [String]) throws -> String {
+ let parent = "/private/tmp"
+ let parentURL = URL(fileURLWithPath: parent, isDirectory: true)
+ try require(parentURL.resolvingSymlinksInPath().path == parent)
+ // Only the fixed canonical system scratch ancestor is accepted. Its writable
+ // final component must be root-owned + sticky; the new child is owner-only.
+ for name in ["/", "/private", parent] {
+  var metadata = stat()
+  try require(name.withCString { lstat($0, &metadata) } == 0 &&
+              (metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR) && metadata.st_uid == 0)
+  if name == parent { try require((metadata.st_mode & 0o1000) != 0) }
+  else { try require((metadata.st_mode & 0o022) == 0) }
+ }
+ let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+ try require(suffix.range(of: #"^[a-f0-9]{32}$"#, options: .regularExpression) != nil)
+ let root = parent + "/akc-pilot-native-" + suffix
+ try require(root.withCString { mkdir($0, 0o700) } == 0)
+ let original = try privateMetadata(root, directory: true)
+ try require(URL(fileURLWithPath: root, isDirectory: true).resolvingSymlinksInPath().path == root)
+ // No recursive filesystem cleanup and no Keychain delete or config API.
+ // Only dispose the ephemeral runner; partial synthetic fixtures remain there.
+ func checkRoot() throws {
+  let current = try privateMetadata(root, directory: true)
+  try require(current.st_dev == original.st_dev && current.st_ino == original.st_ino)
+ }
+ func create(_ name: String) throws {
+  try require(["pilot-primary.keychain-db", "pilot-sibling.keychain-db"].contains(name))
+  try checkRoot()
+  try require(try snapshot() == before)
+  let path = root + "/" + name
+  var old = stat()
+  try require(path.withCString { lstat($0, &old) } == -1 && errno == ENOENT)
+  var entropy = Data(count: 32)
+  defer { entropy.resetBytes(in: 0..<entropy.count) }
+  try signedStatus(entropy.withUnsafeMutableBytes { raw in
+   guard let address = raw.baseAddress else { return errSecParam }
+   return SecRandomCopyBytes(kSecRandomDefault, raw.count, address)
+  })
+  // Produce canonical UTF-8 ASCII without making a String or passing the
+  // generated value to argv, environment, stdout, or a separate process.
+  let hex = Array("0123456789abcdef".utf8)
+  var password = Data(count: 64)
+  defer { password.resetBytes(in: 0..<password.count) }
+  for i in 0..<entropy.count {
+   password[2 * i] = hex[Int(entropy[i] >> 4)]
+   password[2 * i + 1] = hex[Int(entropy[i] & 15)]
+  }
+  var selected: SecKeychain?
+  let createStatus = path.withCString { file in password.withUnsafeBytes { raw in
+   SecKeychainCreate(file, UInt32(raw.count), raw.baseAddress, false, nil, &selected)
+  } }
+  // Use only the returned new fixture. If the observable search list/default
+  // changed, abort: never compensate by writing preferences.
+  try require(try snapshot() == before)
+  try checkRoot()
+  try signedStatus(createStatus)
+  guard let keychain = selected, try keychainPath(keychain) == path else { throw GateFailure.denied }
+  let created = try privateMetadata(path, directory: false)
+  var status: SecKeychainStatus = 0
+  try signedStatus(SecKeychainGetStatus(keychain, &status))
+  if (status & kSecUnlockStateStatus) == 0 {
+   let unlockStatus = password.withUnsafeBytes { raw in
+    SecKeychainUnlock(keychain, UInt32(raw.count), raw.baseAddress, true)
+   }
+   try require(try snapshot() == before)
+   try checkRoot()
+   try signedStatus(unlockStatus)
+  }
+  try signedStatus(SecKeychainGetStatus(keychain, &status))
+  try require((status & kSecUnlockStateStatus) != 0)
+  let still = try privateMetadata(path, directory: false)
+  try require(still.st_dev == created.st_dev && still.st_ino == created.st_ino)
+  try require(try snapshot() == before)
+ }
+ try create("pilot-primary.keychain-db")
+ try create("pilot-sibling.keychain-db")
+ try checkRoot()
+ return root
+}
+
 func run() throws {
  // Explicitly gated to a GitHub-hosted disposable account; marker is a
  // guard, not a substitute for operator/runner isolation. CI never runs this.
  let env = ProcessInfo.processInfo.environment
  try require(CommandLine.arguments.count == 2 && getuid() != 0 && getuid() == geteuid() &&
-             env["GITHUB_ACTIONS"] == "true" && env["RUNNER_ENVIRONMENT"] == "github-hosted" &&
-             env["AKC_DISPOSABLE_DARWIN_FIXTURE"] == "explicit-two-keychains-v1")
- let root = CommandLine.arguments[1]
+             env["GITHUB_ACTIONS"] == "true" && env["RUNNER_ENVIRONMENT"] == "github-hosted")
+ let argument = CommandLine.arguments[1]
+ let provision = argument == "--provision-disposable"
+ let marker = provision ? "create-two-private-keychains-v1" : "explicit-two-keychains-v1"
+ try require(env["AKC_DISPOSABLE_DARWIN_FIXTURE"] == marker)
+ let before = try snapshot()
+ let root = provision ? try provisionDisposableKeychains(before: before) : argument
  let url = URL(fileURLWithPath: root, isDirectory: true)
  try require(root.hasPrefix("/") && url.resolvingSymlinksInPath().path == root &&
              url.lastPathComponent.range(of: #"^akc-pilot-native-[a-f0-9]{32}$"#, options: .regularExpression) != nil)
  _ = try privateMetadata(root, directory: true)
  var aliases = Set<String>()
- let before = try snapshot()
  for configured in before where !configured.isEmpty {
   aliases.insert(configured)
   aliases.insert(URL(fileURLWithPath: configured).resolvingSymlinksInPath().path)

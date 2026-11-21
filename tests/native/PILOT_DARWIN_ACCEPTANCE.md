@@ -49,3 +49,45 @@ owner's Mac or a self-hosted runner.
 Sources: [Apple TN3137: macOS Keychain API behavior](https://developer.apple.com/documentation/technotes/tn3137-on-mac-keychains),
 [explicit search list key](https://developer.apple.com/documentation/security/ksecmatchsearchlist),
 [Apple's Security tool source](https://github.com/apple-oss-distributions/Security/blob/main/SecurityTool/macOS/security.c).
+
+## Optional direct provisioner, pending review and a disposable Darwin run
+
+Apple's open-source Security implementation distinguishes the direct API
+from the CLI. `SecKeychainCreate` calls `StorageManager::make` and then
+`KeychainImpl::create`, which notifies `StorageManager::created`. Both list
+update paths use `shouldAddToSearchList`: outside App Sandbox it opts in only
+the special system or login paths, not an explicitly named private file under
+`/private/tmp`. This is implementation evidence, not a cross-version guarantee.
+The process independently compares the observed default/search-list metadata
+before and after each call, and bails out without attempting to restore
+preferences if the installed implementation behaves differently.
+
+The optional mode must be reviewed, then typechecked on the exact intended
+Darwin image, before any run. It is not executed by the candidate workflow or the CLI.
+An independently supervised runtime job must take out-of-process metadata
+snapshots before and after (including after failure), never expose the paths
+in logs, and reject any drift without restoring preferences. It must use a
+fresh hosted VM, no imported credentials or certificates, no retained
+checkout credentials and no unrelated steps under the same user.
+Use a GitHub-hosted runner destroyed after that job; a temporary HOME on an
+existing Mac does not isolate its Security session. No system Keychain values
+are read: only configuration identity is observed and all item calls use the
+two new explicit file objects. A new owner-only child directory is created
+inside a fixed canonical root-owned sticky scratch parent, without accepting
+environment path overrides. Each fixture uses independent random synthetic
+UTF-8 bytes generated and used solely in process memory, noninteractive new
+file creation, and an explicit unlock only if the proven new fixture is
+locked. If exact path, identity, mode or status does not match, stop; no
+normal-store fallback, no preference edits, and no recursive cleanup.
+
+Once explicitly approved, the command for a reviewed, temporary executable is:
+
+```sh
+AKC_DISPOSABLE_DARWIN_FIXTURE=create-two-private-keychains-v1 \
+  "$standalone_harness" --provision-disposable
+```
+
+Sources: [SecKeychainCreate public API](https://developer.apple.com/documentation/security/seckeychaincreate%28_%3A_%3A_%3A_%3A_%3A_%3A%29?language=objc),
+[Security SecKeychain.cpp](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_keychain/lib/SecKeychain.cpp),
+[Keychains.cpp create hook](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_keychain/lib/Keychains.cpp),
+and [StorageManager.cpp list guards](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_keychain/lib/StorageManager.cpp).
