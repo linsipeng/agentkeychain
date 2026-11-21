@@ -4,7 +4,7 @@ import {type EnrollmentGrant} from '../../managed-cloud/shared/device-protocol.t
 import type {ContinuationHandoffStage} from '../../managed-cloud/shared/continuation-handoff-wire.ts';
 import {assertSyntheticContinuationIntent,assertSyntheticContinuationScope,verifySyntheticContinuationRollout} from './continuation-rollout.ts';
 import {verifyContinuationHandoffOrigin,type ManagedEndpointPolicy} from './config.ts';
-import {prepareContinuationBrowserHandoff} from './continuation-handoff.ts';
+import {pollContinuationBrowserApproval,prepareContinuationBrowserHandoff} from './continuation-handoff.ts';
 import {assertContinuationLease,finalizeGenesisContinuationLocked,newContinuationReadbackNonce,readStagedGenesisContinuation,stageGenesisContinuation,verifyGenesisContinuationPreflight,withContinuationEnrollmentLease} from './enrollment-intent.ts';
 import type {CloudStore} from './persistence.ts';
 import type {SignedManagedOperation} from './protocol.ts';
@@ -13,7 +13,6 @@ import type {CloudFetch} from './http.ts';
 
 type SignedRollout=Parameters<typeof verifySyntheticContinuationRollout>[1];
 type Fresh={witness:SignedManagedOperation;freshHead:SignedManagedOperation};
-type Poll={status:'pending'}|{status:'approved';approval:SignedManagedOperation};
 type Handoff={locator:string;stage:ContinuationHandoffStage;browserUrl:string};
 type OwnerProof={nonce:string;stage:ContinuationHandoffStage;approval:SignedManagedOperation;fresh:Fresh};
 /* eslint-disable no-unused-vars -- synthetic transport contract arguments */
@@ -25,7 +24,7 @@ export interface SyntheticContinuationFlow {
  authorize:(targetDigest:string)=>Promise<SignedRollout>;
  open:(browserUrl:string)=>Promise<void>;
  displayPairCode:(code:string)=>void;
- poll:(authOrigin:string,handoff:Handoff)=>Promise<Poll>;
+ pollNetwork:CloudFetch;
  custodyHead:(owner:Omit<OwnerProof,'fresh'>)=>Promise<Fresh>;
  commitOrRead:(apiOrigin:string,owner:OwnerProof)=>Promise<SignedManagedOperation>;
  custodyPost:(nonce:string,commit:SignedManagedOperation)=>Promise<SignedManagedOperation>;
@@ -37,7 +36,7 @@ const blocked=()=>new Error('cloud_continuation_not_provisioned');
 
 export function assertSyntheticContinuationFlow(flow:SyntheticContinuationFlow){
  if(!flow.authOriginAppendix||!flow.oldGrantCanonical||!flow.roster||!flow.keyPackage||
-   ['prepareNetwork','authorize','open','displayPairCode','poll','custodyHead','commitOrRead','custodyPost'].some(k=>typeof flow[k as keyof SyntheticContinuationFlow]!=='function'))throw blocked();
+   ['prepareNetwork','authorize','open','displayPairCode','pollNetwork','custodyHead','commitOrRead','custodyPost'].some(k=>typeof flow[k as keyof SyntheticContinuationFlow]!=='function'))throw blocked();
 }
 /** One finite attempt. Persist exact evidence before each fallible remote step.
  * It does not implement/enable production transport or print sensitive data. */
@@ -83,7 +82,8 @@ export async function advanceSyntheticContinuation(secure:SecureStore,store:Clou
     JSON.stringify(stage.keyPackage)!==JSON.stringify(flow.keyPackage)||new URL(saved.handoff.browserUrl).origin!==authOrigin)throw blocked();
   const permit=await verifySyntheticContinuationRollout(policy,saved.signed);
   await assertSyntheticContinuationIntent(policy,permit,stage.target);
-  const reply=saved.approval?{status:'approved' as const,approval:saved.approval}:await flow.poll(authOrigin,saved.handoff);
+  const reply=saved.approval?{status:'approved' as const,approval:saved.approval}:await pollContinuationBrowserApproval({secure,store,policy,authOriginAppendix:flow.authOriginAppendix,authAuthorityAppendix:saved.signed.authAppendix,
+   locator:saved.handoff.locator,stage,network:async(url,init)=>{fence();if(new URL(url).origin!==authOrigin)throw blocked();return flow.pollNetwork(url,init);}});
   fence();
   if(reply.status==='pending')return 'waiting-for-approval';
   if(reply.status!=='approved')throw blocked();
@@ -104,5 +104,25 @@ export async function advanceSyntheticContinuation(secure:SecureStore,store:Clou
   if(!await finalizeGenesisContinuationLocked(secure,store,policy,obtain,lease,permit))throw blocked();
   store.transaction(()=>{fence();store.remove('state',stateKey);store.remove('state','pending-continuation-browser-handoff');});
   return 'active';
+ });
+}
+
+/** Explicit resume display only; everything remains local and lease-bound. */
+// eslint-disable-next-line no-unused-vars -- explicit local-only presenter
+export async function showSyntheticContinuationHandoff(store:CloudStore,policy:ManagedEndpointPolicy,flow:SyntheticContinuationFlow,display:(url:string,code:string)=>void){
+ const authOrigin=await verifyContinuationHandoffOrigin(policy,flow.authOriginAppendix);
+ return withContinuationEnrollmentLease(store,async lease=>{
+  const saved=store.get<Saved>('state',stateKey);
+  if(!saved?.published||saved.approval||saved.commit||typeof display!=='function')throw blocked();
+  const {stage,locator,browserUrl}=saved.handoff;
+  if(stage.oldGrantCanonical!==flow.oldGrantCanonical||JSON.stringify(stage.roster)!==JSON.stringify(flow.roster)||
+    JSON.stringify(stage.keyPackage)!==JSON.stringify(flow.keyPackage))throw blocked();
+  const permit=await verifySyntheticContinuationRollout(policy,saved.signed);
+  await assertSyntheticContinuationIntent(policy,permit,stage.target);
+  const {displayPreparedContinuationHandoff}=await import('./continuation-handoff.ts');
+  await displayPreparedContinuationHandoff(store,authOrigin,locator,browserUrl,stage,()=>{
+   assertContinuationLease(store,lease);
+   if(Math.floor(Date.now()/1000)>=permit.expiresAt||JSON.stringify(store.get('state',stateKey))!==JSON.stringify(saved))throw blocked();
+  },display);
  });
 }

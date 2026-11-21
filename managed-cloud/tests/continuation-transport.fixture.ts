@@ -6,10 +6,9 @@ import {canonicalGenesisCommitProofExpectation,proveGenesisPackageCommit} from '
 import type {CheckpointKey} from '../shared/checkpoints.ts';
 import {digest} from '../shared/contracts.ts';
 import {canonicalGrant,type EnrollmentGrant} from '../shared/device-protocol.ts';
-import {proveContinuationAuthReadiness,proveFreshContinuationHead,provePostCommitContinuationHead,type ContinuationFreshHeadRequest} from '../shared/continuation-fresh-head.ts';
+import {proveFreshContinuationHead,provePostCommitContinuationHead,type ContinuationFreshHeadRequest} from '../shared/continuation-fresh-head.ts';
 import {rosterWitness,type WitnessRequest} from '../shared/roster-witness.ts';
 import {rpcData} from '../shared/rpc-data.ts';
-import type {ContinuationAuthReadinessRequest} from '../shared/continuation-auth-readiness.ts';
 
 import {canonicalFixturePost,fixtureTransportOrigin,type PostExpectation} from './continuation-transport-contract.ts';
 const unavailable=()=>new Error('fixture_continuation_unavailable');
@@ -44,16 +43,6 @@ export class CustodyContinuationTransport extends WorkerEntrypoint<CustodyEnv>{
  async post(input:ContinuationFreshHeadRequest,prior:SignedManagedOperation,main:SignedManagedOperation){
   const p=JSON.parse(this.env.PINS) as PinPolicy;
   return provePostCommitContinuationHead(this.env.CUSTODIAN,input,prior,main,{mainCommitAuthority:p.main,authority:p.approval,witnessKeys:[p.witness],checkpointKeys:[p.checkpoint],recoveryAuthorities:[],otherReleaseKeys:[]},await localSigner(this.env.ROLE_KEY,p.witness));
- }
-}
-
-/** Auth gets only this private synthetic service entrypoint. */
-export class CustodyContinuationReadinessTransport extends WorkerEntrypoint<CustodyEnv>{
- override async fetch(_request?:Request|string){return new Response(null,{status:404});}
- async readiness(input:ContinuationAuthReadinessRequest){
-  const p=JSON.parse(this.env.PINS) as PinPolicy;
-  return proveContinuationAuthReadiness(this.env.CUSTODIAN,input,
-   {authority:p.approval,witnessKeys:[p.witness],checkpointKeys:[p.checkpoint],recoveryAuthorities:[]},await localSigner(this.env.ROLE_KEY,p.witness));
  }
 }
 

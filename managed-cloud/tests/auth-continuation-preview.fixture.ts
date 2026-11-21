@@ -3,7 +3,7 @@ import {WorkerEntrypoint} from 'cloudflare:workers';
 import {continuationApprovalUi} from '../auth-trust-worker/experimental/continuation-ui.ts';
 import {continuationIssuer} from '../auth-trust-worker/experimental/continuation-issuer.ts';
 import type {CheckpointKey} from '../shared/checkpoints.ts';
-import type {CustodyContinuationReadinessTransport} from './continuation-transport.fixture.ts';
+import type {CustodyReadinessPort} from '../custody-trust-worker/continuation-readiness.ts';
 import {rpcData} from '../shared/rpc-data.ts';
 
 const origin='https://continuation-auth.fixture.invalid';
@@ -12,7 +12,7 @@ interface Env {
  AUTH:D1Database;
  ROLE_KEY:string;
  PINS:string;
- CUSTODY_READY:CustodyContinuationReadinessTransport;
+ CUSTODY_READY:CustodyReadinessPort;
 }
 interface Pins {genesis:CheckpointKey;approval:CheckpointKey;checkpoint:CheckpointKey;witness:CheckpointKey}
 

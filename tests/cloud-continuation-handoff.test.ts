@@ -11,7 +11,7 @@ import {prepareContinuationBrowserHandoff} from '../src/cloud/continuation-hando
 import type {CloudFetch} from '../src/cloud/http.ts';
 import {canonicalGrant} from '../managed-cloud/shared/device-protocol.ts';
 import {digest,verify} from '../managed-cloud/shared/contracts.ts';
-import {handoffCodeDigest,handoffPrepareProof,handoffStageDigest} from '../managed-cloud/shared/continuation-handoff-wire.ts';
+import {handoffCodeDigest,handoffDevicePollProof,handoffPrepareProof,handoffStageDigest} from '../managed-cloud/shared/continuation-handoff-wire.ts';
 
 test('CLI restarts with the same protected handoff; no plaintext pair code in network or URL',async()=>{
  await sodium.ready;
@@ -70,7 +70,7 @@ test('CLI restarts with the same protected handoff; no plaintext pair code in ne
 
 test('synthetic continuation reuses one exact handoff and Main commit after losing its reply',async()=>{
  await sodium.ready;
- const {advanceSyntheticContinuation}=await import('../src/cloud/continuation-machine.ts');
+ const {advanceSyntheticContinuation,showSyntheticContinuationHandoff}=await import('../src/cloud/continuation-machine.ts');
  const {canonicalContinuationReceipt}=await import('../managed-cloud/shared/enrollment-continuation.ts');
  const {rosterDigest}=await import('../managed-cloud/shared/roster.ts');
  const {WITNESS_DOMAIN}=await import('../managed-cloud/shared/roster-witness.ts');
@@ -96,20 +96,30 @@ test('synthetic continuation reuses one exact handoff and Main commit after losi
   root:await genesisRoot('t','v'),checkpointDigest:await digest('synthetic-checkpoint')}),w,WITNESS_DOMAIN);
  const payloadDigest=await digest(JSON.stringify(['AgentKeychain-enrollment-continuation-package-v1',keyPackage.canonical,keyPackage.signature]));
  let publish=0,polls=0,launches=0,displayed=0,commits=0,posts=0;
- const nonces:string[]=[];
+ let published:{locator:string;stage:import('../managed-cloud/shared/continuation-handoff-wire.ts').ContinuationHandoffStage}|undefined;
+ const pollNonces=new Set<string>();
+ const nonces:string[]=[],prepareWrites:string[]=[];let localCode='',localUrl='';
  type Flow=Parameters<typeof advanceSyntheticContinuation>[3];
  const flow:Flow={authOriginAppendix,oldGrantCanonical,roster,keyPackage,
-  prepareNetwork:async(url,init)=>{expect(url).toBe(authOrigin+'/v1/auth/continuation-handoff/prepare');publish++;return Response.json({locator:JSON.parse(String(init.body)).locator});},
+  prepareNetwork:async(url,init)=>{expect(url).toBe(authOrigin+'/v1/auth/continuation-handoff/prepare');publish++;prepareWrites.push(String(init.body));published=JSON.parse(String(init.body));if(publish===1)throw new Error('test_prepare_reply_lost');return Response.json({locator:published!.locator});},
   authorize:async intentDigest=>({authAppendix,commitAppendix,rolloutAppendix,capability:signed(JSON.stringify({version:1,domain:'AgentKeychain-continuation-rollout-capability-v1',
    mode:'synthetic-only',manifestDigest,keyId:'rollout',intentDigest,authAppendixDigest:await sd(authAppendix),commitAppendixDigest:await sd(commitAppendix),witnessKeyId:'custody',
    issuedAt:now,expiresAt:now+60}),rollout)}),
-  open:async browserUrl=>{expect(browserUrl.startsWith(authOrigin+'/continuation/approve#handoff=')).toBe(true);launches++;},
-  displayPairCode:code=>{expect(code).toMatch(/^[0-9]{8}$/);displayed++;},
-  poll:async (origin,handoff)=>{
-   expect(origin).toBe(authOrigin);
-   if(++polls===1)return {status:'pending'};
-   return {status:'approved',approval:signed(canonicalContinuationReceipt({version:1,domain:'AgentKeychain-enrollment-continuation-approval-v1',
-    intentDigest:await digest(handoff.stage.target.canonical),authorityKeyId:'auth',approvedAt:now,expiresAt:now+60}),auth)};
+  open:async browserUrl=>{expect(browserUrl.startsWith(authOrigin+'/continuation/approve#handoff=')).toBe(true);launches++;localUrl=browserUrl;throw new Error('test_interrupted_before_browser');},
+  displayPairCode:code=>{expect(code).toMatch(/^[0-9]{8}$/);displayed++;localCode=code;},
+  pollNetwork:async (url,init)=>{
+   expect(url).toBe(authOrigin+'/v1/auth/continuation-handoff/poll');
+   expect(init).toMatchObject({redirect:'error',credentials:'omit',cache:'no-store',method:'POST',headers:{'content-type':'application/json'}});
+   const b=JSON.parse(String(init.body));
+   expect(Object.keys(b).sort()).toEqual(['intentDigest','locator','nonce','signature','stageDigest','timestamp']);
+   expect(b.locator).toBe(published!.locator);expect(b.intentDigest).toBe(await digest(published!.stage.target.canonical));expect(b.stageDigest).toBe(await handoffStageDigest(published!.stage));
+   expect(pollNonces.has(b.nonce)).toBe(false);pollNonces.add(b.nonce);
+   expect(await verify(grant.signingKey,b.signature,handoffDevicePollProof(b.locator,b.intentDigest,b.stageDigest,b.nonce,b.timestamp))).toBe(true);
+   if(++polls===1)return Response.json({status:'pending'},{status:202});
+   if(polls===2)return Response.json({oversized:'a'.repeat(5000)});
+   const receipt=canonicalContinuationReceipt({version:1,domain:'AgentKeychain-enrollment-continuation-approval-v1',
+    intentDigest:b.intentDigest,authorityKeyId:'auth',approvedAt:now,expiresAt:now+60});
+   return Response.json({status:'approved',approval:signed(receipt,polls===3?main:auth)});
   },
   custodyHead:async ({nonce,approval})=>({witness,freshHead:signed(JSON.stringify({domain:'AgentKeychain-enrollment-continuation-current-head-v1',
    keyId:'custody',nonce,requestId:'r',witnessDigest:await sd(witness),approvalDigest:await sd(approval),payloadDigest,issuedAt:now,expiresAt:now+50}),w)}),
@@ -133,14 +143,23 @@ test('synthetic continuation reuses one exact handoff and Main commit after losi
   store.put('state','pending',{requestId:'r',deviceId:'d'});store.put('state','pending-approved',{requestId:'r',deviceId:'d',vaultId:'v'});
   store.put('state','pending-self-roster',roster);store.put('state','pending-package',keyPackage);
   const step=()=>advanceSyntheticContinuation(secure,store,policy,flow);
+  const manual=()=>showSyntheticContinuationHandoff(store,policy,flow,(url,code)=>{expect(url).toBe(localUrl);expect(code).toBe(localCode);});
+  await expect(step()).rejects.toThrow('cloud_continuation_handoff_unavailable');
+  await expect(manual()).rejects.toThrow('cloud_continuation_not_provisioned');
+  await expect(step()).rejects.toThrow('test_interrupted_before_browser');
+  await manual();
+  expect(new Set(prepareWrites).size).toBe(1);
+  expect([publish,launches,displayed,polls,commits,posts]).toEqual([2,1,1,0,0,0]);
   expect(await step()).toBe('waiting-for-approval');
-  expect(await step()).toBe('waiting-for-approval');
+  expect(commits).toBe(0);
+  await expect(step()).rejects.toThrow('cloud_continuation_approval_unavailable'); // oversized response
+  await expect(step()).rejects.toThrow('cloud_continuation_approval_unavailable'); // wrong receipt signer
   expect(commits).toBe(0);
   await expect(step()).rejects.toThrow('test_main_response_lost');
   expect(store.get('state','enrollment')).toBeNull();
   expect(await step()).toBe('active');
   expect(nonces).toHaveLength(2);expect(new Set(nonces).size).toBe(1);
-  expect([publish,launches,displayed,polls,commits,posts]).toEqual([1,1,1,2,2,1]);
+  expect([publish,launches,displayed,polls,commits,posts]).toEqual([2,1,1,4,2,1]);
   expect(store.get('state','enrollment')).toMatchObject({deviceId:'d',vdk:b64(keys.vdk)});
   expect(store.get('state','pending-continuation-browser-handoff')).toBeNull();
  }finally{destroyCloudKeys(keys);store.destroy();db.close();}

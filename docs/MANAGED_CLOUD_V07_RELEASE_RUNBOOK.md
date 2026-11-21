@@ -153,3 +153,13 @@ transports must be injected for this fixture path. Normal login/profile
 creation still use their existing path; do not provision the shipping command
 or deploy an origin from these adapters. Shared locking with all normal
 and recovery writers remains required before a real pilot.
+
+The local synthetic dispatcher accepts `continue-enrollment --show-handoff`
+only on deliberate request with an injected local presenter and the same
+valid staging permit. It revalidates the signed origin, exact still-pending
+device, locator, encrypted pairing code and expiry without polling, signing,
+printing protocol data, publishing, or opening a browser. After a lost
+publish response, ordinary retry submits the stored identical signed bytes;
+after publishing but missing the first browser launch, explicit show displays
+the same link and code locally. An expired or already decided handoff cannot
+be redisplayed or silently replaced. The shipping entrypoint remains off.

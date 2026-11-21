@@ -1,4 +1,4 @@
-import {advanceSyntheticContinuation,assertSyntheticContinuationFlow,type SyntheticContinuationFlow} from '../cloud/continuation-machine.ts';
+import {advanceSyntheticContinuation,assertSyntheticContinuationFlow,showSyntheticContinuationHandoff,type SyntheticContinuationFlow} from '../cloud/continuation-machine.ts';
 import {verifyContinuationHandoffOrigin} from '../cloud/config.ts';
 import {verifySyntheticContinuationRollout} from '../cloud/continuation-rollout.ts';
 import {finalizeGenesisContinuation} from '../cloud/enrollment-intent.ts';
@@ -47,6 +47,8 @@ interface SyntheticContinuationGraph {
  policy:ManagedEndpointPolicy; secure:SecureStore;
  signed:Parameters<typeof verifySyntheticContinuationRollout>[1];
  flow?:SyntheticContinuationFlow;
+ // eslint-disable-next-line no-unused-vars -- private local display only
+ showHandoff?:(url:string,code:string)=>void;
  open:()=>Database;
  // eslint-disable-next-line no-unused-vars -- private runtime transport contract
  obtain:(nonce:string)=>Promise<SignedManagedOperation>;
@@ -55,7 +57,9 @@ export async function runCloud(argv:string[],platform:string=process.platform,fi
  assertManagedPlatform(platform);
  const command=argv[0]??'status';
  if(command==='continue-enrollment'){
-  if(argv.length!==1||process.env.AKC_KEYCHAIN_TEST_MODE!=='1'||!fixture)throw new Error('cloud_continuation_not_provisioned');
+  const show=argv.length===2&&argv[1]==='--show-handoff';
+  if((argv.length!==1&&!show)||process.env.AKC_KEYCHAIN_TEST_MODE!=='1'||!fixture||
+    (show&&(!fixture.flow||!fixture.showHandoff)))throw new Error('cloud_continuation_not_provisioned');
   const {policy,secure}=fixture;
   if(fixture.flow){assertSyntheticContinuationFlow(fixture.flow);await verifyContinuationHandoffOrigin(policy,fixture.flow.authOriginAppendix);}
   const permit=await verifySyntheticContinuationRollout(policy,fixture.signed);
@@ -64,7 +68,9 @@ export async function runCloud(argv:string[],platform:string=process.platform,fi
   try{
    db=fixture.open();const store=new CloudStore(db,csk);
    try{
-    if(fixture.flow){
+    if(show){
+     await showSyntheticContinuationHandoff(store,policy,fixture.flow!,fixture.showHandoff!);
+    }else if(fixture.flow){
      const state=await advanceSyntheticContinuation(secure,store,policy,fixture.flow);
      process.stdout.write(JSON.stringify({state})+'\n');
     }else if(!await finalizeGenesisContinuation(secure,store,policy,fixture.obtain,permit))throw new Error('cloud_continuation_not_staged');

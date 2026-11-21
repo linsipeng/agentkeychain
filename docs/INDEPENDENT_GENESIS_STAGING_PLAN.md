@@ -168,3 +168,41 @@ rejects hosted origins; real Auth ingress, trusted transport and a separately
 reviewed installed-client staging policy are prerequisites. Cross-account
 acceptance additionally needs a reviewed authenticated transport across the
 account boundary. Do not change hostnames to evade a synthetic guard.
+
+### Same-account disposable continuation preview: one verified edge
+
+The local profile bundles `custody-trust-worker/continuation-readiness.ts` as a
+separate Worker entry, not part of the release build. Auth binds `CUSTODY_READY`
+to only `CustodyContinuationReadinessTransport`; both its named and default
+HTTP ingress return 404. Only Custody owns `CUSTODIAN`, the ordered public
+`CONTINUATION_READINESS_PINS` (authority, witness, checkpoint and recovery
+authority set derived from the operator-reviewed signed release policy), and
+the Custody-owned witness secret. Local testing generates its Ed25519 witness
+key ephemerally; never copy those keys or their stores to a hosted target. A
+hosted design should co-locate the two scoped proof entrypoints behind one
+Custody-operated worker/key store rather than duplicate the witness secret
+between independent operators or through Main/Auth. No Auth-to-Custody HTTP
+endpoint and no arbitrary signer binding are needed.
+
+| Surface | Same-account staging contract | Current limit |
+| --- | --- | --- |
+| Auth HTTPS | `GET /continuation/approve`, `GET /continuation/approve/browser.js`, `POST /v1/auth/continuation-handoff/{prepare,browser,claim,poll}`, `POST /v1/auth/continuation-approval/{begin,complete}`, `POST /v1/auth/continuation-receipt` | Requires owned HTTPS origin, exact WebAuthn RP ID and an independent Auth credential/session bootstrap. Experimental handlers are not an enabled deploy target. |
+| Auth → Custody | Private `readiness` only; Auth sends exact signed old device scope plus fresh nonce and verifies returned Custody proof against its witness pin | Tested as actual local Worker→Worker RPC with distinct stores and keys; public HTTP stays 404. |
+| Installed CLI → Main HTTPS | Existing device package commit semantics plus reviewed exact routes for current-head request, authenticated commit readback and post-commit activation proof | Main proof transport currently tests synthetic `/commit-proof` and `/post-commit-proof` wire identities over private RPC, not a declared public contract. Bind actual route/method/body to device proof before deployment. |
+| Main → Custody | Purpose-scoped fresh proof and post-commit authority, no roster seeding or generic signing binding in a deployed graph | Combined fixture still owns synthetic witness seeding. Extract these entries as narrowly as readiness before cloud acceptance. |
+
+Apply isolated Auth/Main/Custody schemas to new disposable databases only after
+review; require distinct role keys, separate secret injection and release pins
+(including the signed rollout appendix plus scoped time-bound capability). The
+installed CLI capability currently refuses real hosted origins. A hosted
+capability/binary policy and public Auth/Main ingress review are therefore
+required even when an account is available. Do not simply rename the fixture
+hosts or use a production deployment credential.
+
+An existing Cloudflare account can be a functional test host only if its owner
+explicitly names the approved account/zone, disposable resources, operators
+and the allowed create/teardown actions. Same-account private service bindings
+do not provide operator-level independence from the account superadmin; a
+release claim of operator independence needs separately controlled trust
+administration and a separately reviewed authenticated boundary. No existing
+account, access scope or asset ownership was verified by this local preview.
