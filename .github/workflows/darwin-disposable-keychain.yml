@@ -14,6 +14,7 @@ on:
       - 'scripts/build-continuation-pilot-darwin-check.ts'
       - 'src/cloud/continuation-pilot-darwin-check.ts'
       - 'tests/native/pilot_darwin_signed_wire.ts'
+      - 'tests/native/pilot_darwin_compiled_fixture*.ts'
 
 permissions:
   contents: read
@@ -125,12 +126,13 @@ jobs:
           [[ "$AKC_SIGNED_WIRE_BUN" == /* ]] && test -x "$AKC_SIGNED_WIRE_BUN"
           "$AKC_SIGNED_WIRE_BUN" install --frozen-lockfile --ignore-scripts
 
-      - name: Verify signed disposable native wire end to end
-        timeout-minutes: 4
+      - name: Verify signed disposable native wire and compiled fixture CLI
+        timeout-minutes: 6
         shell: bash
         env:
           AKC_EXPECTED_DARWIN_ARCH: ${{ matrix.arch }}
           AKC_SIGNED_WIRE_REHEARSAL: private-fixture-only-v1
+          AKC_SIGNED_WIRE_COMPILED_CLI: check-native-fixture-v1
           AKC_SIGNED_WIRE_BUN: ${{ steps.signed_wire_bun.outputs.bun-path }}
         run: |
           set -euo pipefail

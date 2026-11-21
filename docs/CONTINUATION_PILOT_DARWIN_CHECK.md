@@ -187,3 +187,33 @@ test preserves its primary failure label separately from configuration
 status; an unavailable or changed final digest never counts as passing.
 An unchanged outer digest alone says nothing about whether provisioning or
 the companion ran, or whether the signed-wire acceptance passed.
+
+### Optional separate compiled fixture CLI, not the installed pilot CLI
+
+A further disposable signed-wire rehearsal can opt into
+`AKC_SIGNED_WIRE_COMPILED_CLI=check-native-fixture-v1`. Only the same-repository disposable PR workflow sets it. Review the earlier standalone signed-wire result first, then
+use a separate fresh hosted job on each native architecture. The optional
+orchestration compiles a new test-only binary and injects only private-run
+public trust inputs: the signed pilot install artifact, exact helper
+appendix, target, private directory and helper file identity. There is no
+normal source trust, selectable helper path, or package/release/CLI change.
+
+The fixture executable accepts only `check-native` and ≤8192 bytes of
+signed location on stdin (the caller bounds process duration). It
+revalidates the embedded installation, signed location and signed helper
+SHA, private owner-only directory, no-follow held descriptor and named
+metadata, exact single helper Mach-O architecture and ad-hoc code signature.
+It launches only the fixed verified helper path under a scrubbed
+environment. It rechecks the same digest and still-current signed scope
+before launch and after a successful result. It returns exactly the
+native versioned non-active status. A missing fixture marker, wrong
+command, wrong location signer and a correctly signed wrong helper-hash
+appendix all deny. No user credential, Keychain item, actual activation
+command, network traffic or filesystem trust outside the fixture is used.
+
+This proves a compiled boundary in a sole-writer runner, not distributed
+installation trust. A real installed dispatch remains disabled: require
+stable publisher/team signing (or a reviewed equivalent) and an owned
+launch scope proving the executable checked is the executable that runs.
+Still separately required: persistent native Keychain state/rotation,
+audited SQLite isolation and the hosted end-to-end activation gate.

@@ -4,6 +4,8 @@
 import {constants,closeSync,fstatSync,lstatSync,mkdirSync,mkdtempSync,openSync,readFileSync,realpathSync,rmSync,writeFileSync} from 'node:fs';
 import {createHash,generateKeyPairSync,randomBytes,sign} from 'node:crypto';
 import {join} from 'node:path';
+import {URL,fileURLToPath} from 'node:url';
+import type {CompiledFixtureTrust} from './pilot_darwin_compiled_fixture_trust.ts';
 import {userInfo} from 'node:os';
 import {canonicalManifest} from '../../src/cloud/config.ts';
 import {INSTALLED_PILOT_CONTRACT,verifyInstalledContinuationPilot} from '../../src/cloud/continuation-pilot-build.ts';
@@ -23,7 +25,7 @@ type ArchitecturePhase = 'matrix-architecture'|'bun-process-arch'|'uname-os'|'un
  'bun-image-stat'|'bun-image-filetype'|'bun-image-inode'|'bun-image-mode'|'bun-lipo-tool'|'bun-lipo-arch'|'fixture-lipo-tool'|'fixture-lipo-arch'|'helper-lipo-tool'|'helper-lipo-arch';
 let phase: 'runner'|ArchitecturePhase|'before-fixture'|'fixture-toolchain'|'fixture-compile'|'fixture-provision'|
  'fixture-metadata'|'manifest-sign'|'manifest-gate'|'companion-build'|'companion-codesign'|'digest'|'positive'|
- 'invalid-wire'|'missing-wrong-inode'|'unchanged-original'|'complete'='runner';
+ 'invalid-wire'|'missing-wrong-inode'|'unchanged-original'|'compiled-cli-build'|'compiled-cli-acceptance'|'complete'='runner';
 let configuration:'not-attempted'|'home-invalid'|'initial-unavailable'|'pending'|'final-unavailable'|'changed'|'unchanged'='not-attempted';
 let imageRelation:'unchecked'|'same-spelling'|'different-spelling'='unchecked';
 const strictAbsoluteImage=(value:unknown):value is string=>typeof value==='string'&&value.startsWith('/')&&value.length<=4095&&
@@ -297,6 +299,48 @@ async function main(){
    await invoke(json({...rollout.sign(json({...body,fileInode:siblingInode}))}),false);
    phase='unchanged-original';
    await invoke(expected.nativeInput,true);
+   // A separate compile is optional. Existing standalone wire acceptance,
+   // shipped binaries and release CI never enable this new fixture path.
+   const compiledMode=process.env.AKC_SIGNED_WIRE_COMPILED_CLI;
+   if(compiledMode!==undefined){
+    must(compiledMode==='check-native-fixture-v1'&&(target==='darwin-arm64'||target==='darwin-x64'));
+    const candidateDir=lstatSync(install,{bigint:true});
+    const trust:CompiledFixtureTrust={artifact,rootPublicKey:root.pin.publicKey,helperAppendix,fixtureRoot:dir,target,
+     directory:{device:String(candidateDir.dev),inode:String(candidateDir.ino)},
+     file:{device:String(stat.dev),inode:String(stat.ino),size:String(stat.size),mode:String(stat.mode),uid:String(stat.uid)}};
+    const trustPath=fileURLToPath(new URL('./pilot_darwin_compiled_fixture_trust.ts',import.meta.url));
+    const entrypoint=fileURLToPath(new URL('./pilot_darwin_compiled_fixture.ts',import.meta.url));
+    const compileFixture=async(outfile:string,grant:CompiledFixtureTrust)=>{
+     phase='compiled-cli-build';
+     const built=await Bun.build({entrypoints:[entrypoint],compile:{outfile},plugins:[{
+      name:'frozen-disposable-native-fixture-trust',setup(compiler){
+       compiler.onLoad({filter:/pilot_darwin_compiled_fixture_trust\.ts$/},({path})=>{
+        must(path===trustPath);
+        return {loader:'ts',contents:'export function compiledFixtureTrust(){return '+JSON.stringify(grant)+';}'};
+       });
+      },
+     }]});
+     must(built.success);
+     phase='compiled-cli-acceptance';
+    };
+    const fixtureCLI=join(dir,'compiled-darwin-fixture-cli');
+    await compileFixture(fixtureCLI,trust);
+    const fixtureEnv={AKC_COMPILED_DARWIN_FIXTURE:'check-native-fixture-v1'};
+    const checkCLI=(binary:string,command:string,wire:string,enabling:Record<string,string>,success:boolean)=>{
+     const result=launch([binary,command],enabling,wire);
+     if(success)must(result.exitCode===0&&result.stderr.length===0&&
+      result.stdout.toString()===JSON.stringify({version:1,state:DARWIN_NATIVE_CHECK})+'\n');
+     else must(result.exitCode===1&&result.stdout.length===0&&result.stderr.toString()==='darwin_compiled_fixture_denied\n');
+    };
+    checkCLI(fixtureCLI,'check-native',expected.nativeInput,fixtureEnv,true);
+    checkCLI(fixtureCLI,'check-native',expected.nativeInput,{},false);
+    checkCLI(fixtureCLI,'check-installation',expected.nativeInput,fixtureEnv,false);
+    checkCLI(fixtureCLI,'check-native',json({...root.sign(location.canonical)}),fixtureEnv,false);
+    const badCLI=join(dir,'compiled-darwin-wrong-helper-fixture-cli');
+    const wrong=rollout.sign(json({...common,domain:DARWIN_NATIVE_HELPER_DOMAIN,helperSha256:'0'.repeat(64),target}));
+    await compileFixture(badCLI,{...trust,helperAppendix:wrong});
+    checkCLI(badCLI,'check-native',expected.nativeInput,fixtureEnv,false);
+   }
    completed=true;
    phase='complete';
   }finally{
