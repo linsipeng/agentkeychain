@@ -834,6 +834,11 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                     elif reopen:
                         phase = "named-reopen-unlocked-only-after-prompt"
                         require_collection_locked(conn, owner, named, False)
+                        def mark_sidecar(label):
+                            global phase
+                            phase = "named-reopen-after-unlock-" + label
+
+                        held.pin_empty_unlocked_sidecar(mark_sidecar)
                         unchanged_named_file(held, fixture.marker, fixture.snapshot, "named-reopen-after-unlock-file")
                         read_fixture_item(conn, owner, encrypted_session, named, fixture)
                         final_file = unchanged_named_file(held, fixture.marker, fixture.snapshot, "named-reopen-after-read-file")

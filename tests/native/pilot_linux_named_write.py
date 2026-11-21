@@ -10,6 +10,7 @@ import stat
 LABEL = "AKCPilotPrimary"
 COLLECTION = "/org/freedesktop/secrets/collection/" + LABEL
 LEAF = LABEL + ".keyring"
+EMPTY_PROVIDER_SIDECAR = "user.keystore"
 GNOME_BINARY = b"GnomeKeyring\n\r\0\n"
 
 
@@ -84,6 +85,7 @@ class HeldKeyrings:
         self.path = Path(data_home) / "keyrings"
         self.path.mkdir(mode=0o700)
         self.dirfd = os.open(self.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self._sidecar = None
         try:
             self.identity = self._row()
             require(not os.listdir(self.dirfd))
@@ -98,12 +100,58 @@ class HeldKeyrings:
                 stat.S_ISDIR(visible.st_mode) and (row.st_dev, row.st_ino) == (visible.st_dev, visible.st_ino))
         return row.st_dev, row.st_ino
 
+    @staticmethod
+    def _sidecar_identity(row):
+        return (row.st_dev, row.st_ino, row.st_mode, row.st_uid, row.st_nlink,
+                row.st_size, row.st_mtime_ns, row.st_ctime_ns)
+
+    def _read_empty_sidecar(self, fd, mark):
+        mark("sidecar-directory-identity")
+        require(self._row() == self.identity)
+        leaves = os.listdir(self.dirfd)
+        mark("sidecar-inventory")
+        require(len(leaves) == 2 and set(leaves) == {LEAF, EMPTY_PROVIDER_SIDECAR})
+        row = os.fstat(fd)
+        mark("sidecar-scoped-metadata")
+        require(stat.S_ISREG(row.st_mode) and row.st_uid == os.getuid() and
+                stat.S_IMODE(row.st_mode) == 0o600 and row.st_nlink == 1)
+        mark("sidecar-nonempty")
+        require(row.st_size == 0 and os.pread(fd, 1, 0) == b"")
+        seen = self._sidecar_identity(row)
+        mark("sidecar-stable-identity")
+        require(seen == self._sidecar_identity(os.fstat(fd)) ==
+                self._sidecar_identity(os.stat(EMPTY_PROVIDER_SIDECAR, dir_fd=self.dirfd, follow_symlinks=False)))
+        return seen
+
+    def pin_empty_unlocked_sidecar(self, mark):
+        # Only the exact reopened fixture unlock calls this. GNOME's pinned
+        # PKCS#11 provider opens the auxiliary store with O_RDONLY | O_CREAT.
+        # Opening alone can make an empty file, never a persisted credential.
+        require(self._sidecar is None)
+        mark("sidecar-open")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        fd = os.open(EMPTY_PROVIDER_SIDECAR, flags, dir_fd=self.dirfd)
+        try:
+            seen = self._read_empty_sidecar(fd, mark)
+        except BaseException:
+            os.close(fd)
+            raise
+        self._sidecar = fd, seen
+
+    def _check_pinned_sidecar(self, mark):
+        fd, expected = self._sidecar
+        seen = self._read_empty_sidecar(fd, mark)
+        mark("sidecar-pinned-identity")
+        require(seen == expected)
+
     def read_exact(self, absent_marker=None, mark=lambda _: None):
         mark("directory-identity")
         require(self._row() == self.identity)
         mark("leaf-inventory")
         leaves = os.listdir(self.dirfd)
-        if leaves != [LEAF]:
+        if self._sidecar is not None:
+            self._check_pinned_sidecar(mark)
+        elif leaves != [LEAF]:
             if "default" in leaves:
                 mark("unexpected-default-alias")
             elif "login.keyring" in leaves:
@@ -159,9 +207,16 @@ class HeldKeyrings:
             require(self._row() == self.identity and
                     (row.st_dev, row.st_ino, row.st_size, row.st_mtime_ns) ==
                     (visible.st_dev, visible.st_ino, visible.st_size, visible.st_mtime_ns))
+            if self._sidecar is not None:
+                self._check_pinned_sidecar(mark)
             return row.st_dev, row.st_ino, row.st_size, row.st_mtime_ns, hashlib.sha256(chunks).digest()
         finally:
             os.close(fd)
 
     def close(self):
-        os.close(self.dirfd)
+        try:
+            if self._sidecar is not None:
+                os.close(self._sidecar[0])
+                self._sidecar = None
+        finally:
+            os.close(self.dirfd)
