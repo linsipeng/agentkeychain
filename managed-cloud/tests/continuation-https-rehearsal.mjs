@@ -2,13 +2,15 @@
  * Run with Node 24: node --experimental-strip-types managed-cloud/tests/continuation-https-rehearsal.mjs [--browser]
  * --browser requires a sandbox-capable Chromium and certutil. No authenticator is invoked. */
 import assert from 'node:assert/strict';
-import {execFileSync,execFile} from 'node:child_process';
+import {execFileSync,execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
 import {mkdtempSync,readFileSync,rmSync,writeFileSync,mkdirSync} from 'node:fs';
 import {request,createServer} from 'node:https';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {once} from 'node:events';
+import {randomUUID} from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
 import {fileURLToPath} from 'node:url';
 import {build} from 'esbuild';
 import {continuationApprovalPage} from '../auth-trust-worker/experimental/continuation-page.ts';
@@ -28,7 +30,10 @@ try{
  const bundle=(await build({entryPoints:[fileURLToPath(new URL('../web/src/continuation-approval-browser.ts',import.meta.url))],bundle:true,format:'esm',write:false})).outputFiles[0].text;
  let origins,handle;
  const received=[];
- const token='fixture-noncredential';
+ const token='fixture-noncredential',probeId=randomUUID();
+ let completeProbe;
+ const probeComplete=new Promise(resolve=>{completeProbe=resolve;});
+
  server=createServer({key:readFileSync(file('server.key')),cert:readFileSync(file('server.pem'))},async(req,res)=>{
   try{
    const origin=origins.find(o=>new URL(o).host===req.headers.host);
@@ -44,7 +49,36 @@ try{
    }
    if(req.method==='GET'&&u.pathname==='/probe.js'&&origin===origins[0]){
     res.writeHead(200,{'content-type':'application/javascript'});
-    res.end(`(async()=>{const r=await fetch('/cookie');let blocked=false;try{await fetch(${JSON.stringify(origins[1]+'/cookie')});}catch{blocked=true;}if(r.ok&&blocked&&isSecureContext&&typeof PublicKeyCredential==='function'&&typeof navigator.credentials?.get==='function'&&!document.cookie.includes('akc_rehearsal'))document.querySelector('#proof').textContent='secure-context-csp-cookie-webauthn-available';})();`);return;
+    res.end(`(async()=>{
+      const crossOrigin=${JSON.stringify(origins[1])};
+      const evidence={cookie:false,csp:false,fetchBlocked:false,secure:isSecureContext,
+       webauthn:typeof PublicKeyCredential==='function'&&typeof navigator.credentials?.get==='function',
+       httpOnly:!document.cookie.includes('akc_rehearsal')};
+      try{
+       evidence.cookie=(await fetch('/cookie',{cache:'no-store'})).ok;
+       const violation=new Promise(resolve=>{
+        document.addEventListener('securitypolicyviolation',event=>{
+         if(event.effectiveDirective==='connect-src'&&event.disposition==='enforce') {
+          try{if(new URL(event.blockedURI).origin===crossOrigin)resolve(true);}catch{}
+         }
+        });
+        setTimeout(()=>resolve(false),3000);
+       });
+       try{await fetch(crossOrigin+'/cookie');}catch{evidence.fetchBlocked=true;}
+       evidence.csp=await violation;
+      }catch{}
+      document.querySelector('#proof').textContent=JSON.stringify(evidence);
+      await fetch('/probe-complete/${probeId}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(evidence)});
+    })();`);return;
+   }
+   if(req.method==='POST'&&u.pathname==='/probe-complete/'+probeId&&origin===origins[0]&&
+      req.headers.cookie==='__Host-akc_rehearsal='+token){
+    let body='';
+    for await(const chunk of req){body+=chunk;if(body.length>512){res.writeHead(413).end();return;}}
+    const evidence=JSON.parse(body);
+    res.writeHead(204).end();
+    completeProbe(evidence);
+    return;
    }
    if(req.method==='GET'&&u.pathname==='/cookie'){
     res.writeHead(origin===origins[0]&&req.headers.cookie==='__Host-akc_rehearsal='+token?200:403).end();return;
@@ -84,13 +118,36 @@ try{
   run('certutil',['-N','-d','sql:'+db,'--empty-password'],env);
   run('certutil',['-A','-d','sql:'+db,'-n','akc-disposable-root','-t','C,,','-i',file('ca.pem')],env);
   const flags=['--headless','--no-first-run','--disable-background-networking','--no-proxy-server',
-   '--host-resolver-rules='+names.map(host=>'MAP '+host+' 127.0.0.1').join(', '),'--dump-dom','--timeout=10000'];
-  const render=async (path, profile)=>promisify(execFile)(process.env.CHROMIUM??'chromium',[...flags,'--user-data-dir='+file(profile),origins[0]+path],{env,timeout:20_000,maxBuffer:1024*1024});
+   '--host-resolver-rules='+names.map(host=>'MAP '+host+' 127.0.0.1').join(', ')];
+  const render=async (path, profile)=>promisify(execFile)(process.env.CHROMIUM??'chromium',[...flags,'--dump-dom','--timeout=10000','--user-data-dir='+file(profile),origins[0]+path],{env,timeout:20_000,maxBuffer:1024*1024});
   const doc=await render('/continuation/approve#handoff='+'a'.repeat(43),'continuation-profile');
   assert.match(doc.stdout,/<div id="manual" hidden="">/);
   assert.doesNotMatch(doc.stdout,/<div id="handoff" hidden/);
-  const browserProbe=await render('/probe','probe-profile');
-  assert.match(browserProbe.stdout,/>secure-context-csp-cookie-webauthn-available</);
+  // Unlike --dump-dom, retain the real browser until its async network/CSP
+  // assertions report back to this isolated HTTPS server, or time out.
+  const child=spawn(process.env.CHROMIUM??'chromium',[...flags,'--user-data-dir='+file('probe-profile'),origins[0]+'/probe'],
+   {env,stdio:['ignore','ignore','pipe']});
+  let stderr='';
+  child.stderr.on('data',chunk=>{stderr=(stderr+chunk).slice(-4096);});
+  const exited=new Promise((resolve,reject)=>{
+   child.once('error',reject);
+   child.once('close',(code,signal)=>resolve({code,signal}));
+  });
+  const timer=new AbortController();
+  try{
+   const evidence=await Promise.race([
+    probeComplete,
+    exited.then(({code,signal})=>{throw new Error(`browser exited before HTTPS probe completed: ${code??signal}\n${stderr}`);}),
+    delay(12_000,undefined,{signal:timer.signal}).then(()=>{throw new Error(`browser HTTPS probe timed out; requests: ${JSON.stringify(received.slice(-12))}\n${stderr}`);}),
+   ]);
+   assert.deepEqual(evidence,{cookie:true,csp:true,fetchBlocked:true,secure:true,webauthn:true,httpOnly:true});
+  }finally{
+   timer.abort();
+   const running=()=>child.exitCode===null&&child.signalCode===null;
+   if(running())child.kill('SIGTERM');
+   const kill=setTimeout(()=>{if(running())child.kill('SIGKILL');},2000);
+   try{await exited.catch(()=>{});}finally{clearTimeout(kill);}
+  }
   assert.ok(received.some(r=>r.origin===origins[0]&&r.path==='/cookie'&&r.cookie));
   assert.ok(!received.some(r=>r.origin===origins[1]&&r.path==='/cookie'));
   console.log('PASS sandboxed browser: signed TLS transport, bundle, CSP, host-only cookie and WebAuthn API reachability; no authenticator invoked');

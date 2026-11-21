@@ -156,3 +156,27 @@ and revalidation (including safe SQLite sidecars), pilot initialization and
 session acquisition. The check assumes the local UID/kernel are trusted;
 it is not isolation from an adversarial process already running as the same
 UID. Normal and standalone CLI dispatch remain closed.
+
+### Why the current Bun Linux runtime stays closed
+
+The OS can create a new 0600 fixture child through the verified directory FD
+with `O_CREAT|O_EXCL|O_NOFOLLOW` and reject an existing hardlink or symlink.
+The application's Bun 1.4.5 SQLite runtime cannot safely take over that child:
+`SQLITE_OPEN_NOFOLLOW` rejects `/proc/self/fd/<dirfd>/profile.sqlite` as
+`SQLITE_CANTOPEN_SYMLINK` (1550), because the FD bridge itself is a symbolic
+link. There is no supported SQLite-by-FD constructor here. Do not remove the
+flag, reopen a different path, enable normal Vault resolution, or store a CSK,
+VDK, device key or session in a filesystem workaround. The regression uses
+only an empty private file in a test temporary directory.
+
+**Next prerequisite:** choose a disposable Linux account with its own audited
+Secret Service collection and normal-vault access absent. Provision that
+collection through a dedicated native pilot adapter: pin the actual service
+peer/collection identity and signed installation namespace, enforce exact
+allowed account slots and never fall back to a default collection or ambient
+normal CLI. Separately use a reviewed native SQLite VFS/adapter grounded in a
+verified directory FD (for database, lock and sidecars), prove symlink and
+hardlink refusal and interruption/restart under that disposable account, then
+bind it to the same signed pilot location and exact original-device session.
+In-memory enrollment fixtures remain test-only and cannot clear either gate.
+No persistent pilot profile, fallback seal, or OS secret access is enabled.

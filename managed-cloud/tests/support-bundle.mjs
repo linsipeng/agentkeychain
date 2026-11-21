@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import {readFile,readdir,mkdir,writeFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
+import {execFileSync} from 'node:child_process';
 import {createHash,randomBytes,generateKeyPairSync,createPrivateKey,sign as nodeSign} from 'node:crypto';
 import {build} from 'esbuild';
 import {Miniflare,convertV4MiniflareOptions,Log,LogLevel} from 'miniflare';
@@ -11,10 +12,13 @@ import {manifests,plan,releaseManifest} from '../provisioning/render.mjs';
 await build({entryPoints:['shared/recovery-crypto.ts','shared/recovery.ts','shared/roster.ts','shared/checkpoints.ts','shared/device-protocol.ts'],outdir:'dist/support-shared',bundle:true,format:'esm',platform:'node',target:'es2022'});
 const {seal,open,encode64}=await import('../dist/support-shared/recovery-crypto.js');
 const {packageContext,releaseContext}=await import('../dist/support-shared/recovery.js');
-const {canonicalRoster,ROSTER_DOMAIN}=await import('../dist/support-shared/roster.js');
+const {canonicalRoster,ROSTER_DOMAIN,rosterDigest}=await import('../dist/support-shared/roster.js');
 const {checkpoint,genesisRoot}=await import('../dist/support-shared/checkpoints.js');
 const {canonicalGrant}=await import('../dist/support-shared/device-protocol.js');
 await build({entryPoints:['tests/genesis-transport-fixture.ts'],outfile:'dist/test-genesis-transport.mjs',bundle:true,format:'esm',platform:'neutral',mainFields:['module','main'],external:['cloudflare:workers','node:buffer','node:net'],target:'es2022'});
+execFileSync(process.execPath,['build-continuation-pilot.mjs']);
+await build({entryPoints:['tests/virtual-authenticator.ts'],outfile:'dist/support-shared/pilot-passkey.js',bundle:true,format:'esm',platform:'node',target:'es2022'});
+const {virtualAuthenticator}=await import('../dist/support-shared/pilot-passkey.js');
 const sha=s=>createHash('sha256').update(s).digest('hex'),raw=()=>randomBytes(32).toString('base64url');
 function ring(algorithm){const pair=generateKeyPairSync(algorithm),publicKey=pair.publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('base64'),keyId=sha(publicKey);return {activeId:keyId,keys:[{keyId,publicKey,privateKey:pair.privateKey.export({format:'der',type:'pkcs8'}).toString('base64')}]};}
 const apiRings={CHECKPOINT_KEYRING:ring('ed25519'),ACCOUNT_KEYRING:ring('ed25519'),WRAP_KEYRING:ring('x25519'),RELEASE_KEYRING:ring('ed25519')},custodyRings={WITNESS_KEYRING:ring('ed25519'),TRUST_KEYRING:ring('ed25519'),WRAP_KEYRING:ring('x25519'),RELEASE_KEYRING:ring('ed25519')};
@@ -23,6 +27,8 @@ const genesisAuthority=ring('ed25519');
 const ringSign=(r,message)=>nodeSign(null,Buffer.from(message),createPrivateKey({format:'der',type:'pkcs8',key:Buffer.from(r.keys[0].privateKey,'base64')})).toString('base64');
 const independentName='synthetic-independent-custodian',invalidName='synthetic-admission-unconfigured',issuerName='synthetic-independent-auth';
 
+const pilotAuth='compiled-pilot-genesis-auth',pilotSigner='synthetic-private-pilot-signers',pilotCustody='compiled-pilot-custody-readiness';
+const pilotOrigin='https://auth-pilot-acceptance.fixture.invalid',pilotInvite=ring('ed25519'),pilotContinuation=ring('ed25519');
 const apiPeer=Object.values(apiRings).flatMap(r=>r.keys.map(k=>k.publicKey)),custodyPeer=Object.values(custodyRings).flatMap(r=>r.keys.map(k=>k.publicKey));
 const policy=releaseManifest({releaseId:'synthetic-support',checkpointKeys:[pub(apiRings.CHECKPOINT_KEYRING)],witnessKeys:[pub(custodyRings.WITNESS_KEYRING)],recoveryAuthorities:[pub(custodyRings.TRUST_KEYRING)],recoveryServices:{api:pub(apiRings.RELEASE_KEYRING),custodian:pub(custodyRings.RELEASE_KEYRING)}},plan.apiDomain,plan.webDomain,{api:apiPeer,custodian:custodyPeer});
 const configs=manifests({main:'11111111-1111-4111-8111-111111111111',custodian:'22222222-2222-4222-8222-222222222222',auth:'33333333-3333-4333-8333-333333333333',emailFrom:'verify@agentkeychain.soupsam.com'});
@@ -69,6 +75,36 @@ for(const [i,p] of invalidPolicies.entries()){
  workers.push({...base,name,bindings:{...base.bindings,RELEASE_POLICY:JSON.stringify(p)}});
  workers.push({name:name+'-probe',modules:true,compatibilityDate:plan.compatibilityDate,serviceBindings:{TARGET:{name,entrypoint:'RecoveryTrustPolicy'}},script:`import {WorkerEntrypoint} from 'cloudflare:workers';export default class extends WorkerEntrypoint{async manifest(){return this.env.TARGET.manifest();}}`});
 }
+// Auth has only its own D1, private distinct signer ports and read-only
+// Custody RPC. The already compiled recovery worker remains the admission owner.
+const pilotClock=String(Math.floor(Date.now()/1000)+600);
+workers.push({name:pilotSigner,modules:true,compatibilityDate:plan.compatibilityDate,
+ bindings:{GENESIS:JSON.stringify(genesisAuthority.keys[0]),CONTINUATION:JSON.stringify(pilotContinuation.keys[0])},script:`
+ import {WorkerEntrypoint} from 'cloudflare:workers';
+ class SyntheticRole extends WorkerEntrypoint { async key(){const {keyId,publicKey}=this.role();return {keyId,publicKey};}
+  async sign(message){
+   if(typeof message!=='string'||!message.startsWith(this.domain))throw new Error('unexpected_signing_role');
+   const bytes=Uint8Array.from(atob(this.role().privateKey),c=>c.charCodeAt(0));
+   const privateKey=await crypto.subtle.importKey('pkcs8',bytes,'Ed25519',false,['sign']);
+   return btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign('Ed25519',privateKey,new TextEncoder().encode(message)))));
+  }
+ }
+ export class Genesis extends SyntheticRole { domain='AgentKeychain-managed-genesis-approval-v1\\0';role(){return JSON.parse(this.env.GENESIS);} }
+ export class Continuation extends SyntheticRole { domain='{"version":1,"domain":"AgentKeychain-enrollment-continuation-approval-v1"';role(){return JSON.parse(this.env.CONTINUATION);} }
+ export default {fetch(){return new Response(null,{status:404});}};
+ `});
+workers.push({name:pilotCustody,modules:true,compatibilityDate:plan.compatibilityDate,compatibilityFlags:plan.compatibilityFlags,
+ scriptPath:resolve('dist/custody-trust-worker/pilot-continuation.js'),modulesRoot:resolve('dist'),
+ d1Databases:{CUSTODIAN:independentName},outboundService:()=>new Response(null,{status:502})});
+workers.push({name:pilotAuth,routes:[pilotOrigin+'/*'],modules:true,compatibilityDate:plan.compatibilityDate,compatibilityFlags:plan.compatibilityFlags,
+ scriptPath:resolve('dist/auth-trust-worker/pilot-continuation.js'),modulesRoot:resolve('dist'),d1Databases:{AUTH:'isolated-compiled-pilot-auth'},
+ bindings:{PILOT_AUTH_MODE:'continuation-v1',PILOT_AUTH_ORIGIN:pilotOrigin,PILOT_AUTH_EXPIRES_AT:pilotClock,
+  PILOT_AUTH_PINS:JSON.stringify({genesis:pub(genesisAuthority),approval:pub(pilotContinuation),checkpointKeys:policy.checkpointKeys,
+   recoveryAuthorities:policy.recoveryAuthorities,witnesses:policy.witnessKeys}),PILOT_HANDOFF_HMAC:randomBytes(32).toString('base64'),
+  PILOT_GENESIS_REGISTRATION_MODE:'invitation-v1',PILOT_GENESIS_INVITE_PIN:JSON.stringify(pub(pilotInvite)),PILOT_GENESIS_CONSENT_MODE:'consent-v1'},
+ serviceBindings:{PILOT_APPROVAL_SIGNER:{name:pilotSigner,entrypoint:'Continuation'},PILOT_GENESIS_APPROVAL_SIGNER:{name:pilotSigner,entrypoint:'Genesis'},
+  PILOT_CUSTODY_READINESS:{name:pilotCustody,entrypoint:'PilotCustodyReadiness'}},outboundService:()=>new Response(null,{status:502})});
+
 const mf=new Miniflare(convertV4MiniflareOptions({host:'127.0.0.1',port:0,inspectorPort:0,log:new Log(LogLevel.NONE),workers}));
 try{
  await mf.ready;
@@ -148,6 +184,62 @@ try{
  const independentDb=await mf.getD1Database('CUSTODIAN',independentName);
  assert.equal(await independentDb.prepare('SELECT count(*) n FROM genesis_admissions').first('n'),1);
  assert.equal(await independentDb.prepare('SELECT count(*) n FROM roster_witness').first('n'),1);
+ // Reach the real compiled pilot Auth HTTP route, with no direct pin seed.
+ const pilotDb=await mf.getD1Database('AUTH',pilotAuth);
+ for(const file of ['auth-trust-worker/experimental/genesis-registration.sql','auth-trust-worker/pilot-migrations/0001-exact-genesis-registration.sql']){
+  const sql=await readFile(file,'utf8');
+  await pilotDb.batch(unstable_splitSqlQuery(sql).map(line=>pilotDb.prepare(line)));
+ }
+ const pAccount='pilot-account',pTenant='pilot-tenant',pVault='pilot-vault',pDevice='pilot-device',pRequest=raw();
+ const pNow=Math.floor(Date.now()/1000),bound={accountId:pAccount,tenantId:pTenant,vaultId:pVault,deviceId:pDevice,requestId:pRequest,keyEpoch:1};
+ const pDeviceKey=ring('ed25519'),pWrapping=pub(ring('x25519')).publicKey, pSigning=pub(pDeviceKey).publicKey;
+ const pGrant=canonicalGrant({version:1,...bound,signingKey:pSigning,wrappingKey:pWrapping,issuerDeviceId:null,expiresAt:pNow+120});
+ const pRosterCanonical=canonicalRoster({version:1,accountId:pAccount,tenantId:pTenant,vaultId:pVault,revision:1,previousDigest:null,keyEpoch:1,
+  active:[{deviceId:pDevice,signingKey:pSigning,wrappingKey:pWrapping}],revoked:[],issuer:{kind:'device',id:pDevice},issuedAt:pNow,expiresAt:pNow+120,
+  checkpointKeys:policy.checkpointKeys,recoveryAuthorities:policy.recoveryAuthorities,recovery:null});
+ const pRoster={canonical:pRosterCanonical,signature:ringSign(pDeviceKey,ROSTER_DOMAIN+pRosterCanonical)};
+ const pCheckpoint=await checkpoint({key:async()=>pub(apiRings.CHECKPOINT_KEYRING),sign:async m=>ringSign(apiRings.CHECKPOINT_KEYRING,m)},
+  pTenant,pVault,0,await genesisRoot(pTenant,pVault),null,null);
+ const rpId=new URL(pilotOrigin).hostname;
+ const inviteCanonical=JSON.stringify({version:1,domain:'AgentKeychain-pilot-genesis-registration-invite-v1',keyId:pub(pilotInvite).keyId,
+  origin:pilotOrigin,rpId,id:raw(),...bound,grantDigest:sha(pGrant),rosterDigest:await rosterDigest(pRoster),issuedAt:pNow,expiresAt:pNow+100});
+ const invite={canonical:inviteCanonical,signature:ringSign(pilotInvite,inviteCanonical)},payload={invite,oldGrantCanonical:pGrant,roster:pRoster};
+ const postPilot=(path,b,session={})=>mf.dispatchFetch(pilotOrigin+'/v1/auth/pilot-genesis/'+path,{method:'POST',
+  headers:{origin:pilotOrigin,'sec-fetch-site':'same-origin','content-type':'application/json',...session},body:JSON.stringify(b)});
+ const pBegin=await postPilot('registration/begin',payload);assert.equal(pBegin.status,200);
+ const pCookie=pBegin.headers.get('set-cookie').split(';')[0];
+ const opened=await pBegin.json(),browser={cookie:pCookie,'x-csrf-token':opened.csrf},passkey=await virtualAuthenticator();
+ assert.equal(await pilotDb.prepare('SELECT count(*) n FROM auth_genesis_pins').first('n'),0);
+ assert.equal((await postPilot('registration/complete',{...payload,response:await passkey.register(opened.options.challenge,{origin:pilotOrigin,rpId})},browser)).status,204);
+ assert.equal(await pilotDb.prepare('SELECT count(*) n FROM auth_genesis_pins').first('n'),1);
+ assert.equal(await pilotDb.prepare('SELECT count(*) n FROM auth_genesis_decisions').first('n'),0);
+ const firstDevice={grant:pGrant,roster:pRoster,checkpoint:pCheckpoint};
+ await assert.rejects(async()=>independent.admit({...firstDevice,proof:invite}),/genesis_admission_rejected/);
+ const consent=await postPilot('consent/begin',payload,browser);assert.equal(consent.status,200);
+ const reviewed=await consent.json();assert.deepEqual(reviewed.display,{purpose:'approve-first-device-genesis',accountId:pAccount,vaultId:pVault,deviceId:pDevice});
+ assert.equal(reviewed.options.userVerification,'required');
+ assert.equal((await postPilot('consent/readback',{...payload,id:reviewed.id},browser)).status,401);
+ const noUv=await passkey.assert(reviewed.options.challenge,{origin:pilotOrigin,rpId,uv:false,counter:1});
+ assert.equal((await postPilot('consent/complete',{...payload,id:reviewed.id,response:noUv},browser)).status,401);
+ assert.equal(await pilotDb.prepare('SELECT count(*) n FROM auth_genesis_decisions').first('n'),0);
+ const assertion=await passkey.assert(reviewed.options.challenge,{origin:pilotOrigin,rpId,counter:1});
+ const done=await postPilot('consent/complete',{...payload,id:reviewed.id,response:assertion},browser);assert.equal(done.status,200);
+ // Drop Auth result; the separate narrow readback must return its exact commit.
+ await done.body.cancel();
+ const restored=await postPilot('consent/readback',{...payload,id:reviewed.id},browser);assert.equal(restored.status,200);
+ const signedProof=await restored.json(),storedProof=await pilotDb.prepare('SELECT canonical,signature FROM auth_genesis_decisions').first();
+ assert.deepEqual(signedProof,storedProof);
+ assert.equal((await postPilot('consent/readback',{...payload,id:reviewed.id},{...browser,cookie:'__Host-akc_pilot_genesis_registration='+raw()})).status,401);
+ const differentlySigned={...signedProof,signature:ringSign(pilotContinuation,'AgentKeychain-managed-genesis-approval-v1\0'+signedProof.canonical)};
+ await assert.rejects(async()=>independent.admit({...firstDevice,proof:differentlySigned}),/genesis_admission_rejected/);
+ await assert.rejects(async()=>independent.admit({...firstDevice,grant:pGrant.replace(pRequest,'substituted-request'),proof:signedProof}),/genesis_admission_rejected/);
+ assert.equal(await independentDb.prepare('SELECT count(*) n FROM genesis_admissions WHERE tenant_id=? AND vault_id=?').bind(pTenant,pVault).first('n'),0);
+ await independent.admitAndDrop({...firstDevice,proof:signedProof});
+ const pReceipt=await independent.admit({...firstDevice,proof:signedProof});
+ assert.deepEqual(await independent.head(pTenant,pVault),pReceipt);
+ assert.equal(await independentDb.prepare('SELECT count(*) n FROM genesis_admissions WHERE tenant_id=? AND vault_id=?').bind(pTenant,pVault).first('n'),1);
+ assert.equal(await independentDb.prepare('SELECT count(*) n FROM roster_witness WHERE tenant_id=? AND vault_id=?').bind(pTenant,pVault).first('n'),1);
+ console.log('PASS compiled pilot Auth registration, consent and exact readback → independent Custody admission and retry');
  // Seed drift-free legacy data using the actual prior-mode worker's own
  // persisted local fixture result; independent startup must still read it.
  const legacyReceipt=await legacy.witness({rosters:[roster],checkpoints:[cp]});
