@@ -290,7 +290,7 @@ try{
    assert.ok(hit,path);assert.equal(hit.status,status);
    if(path!=='registration/begin')assert.equal(hit.cookie,true);
   }
-  console.log('PASS sandboxed browser: exact compiled pilot page registered, reviewed and approved one synthetic device; no vault activation');
+  console.log('PASS sandboxed browser: exact pilot approval → independent Custody → staged Main link → Auth consumption readback; standard device session denied');
 
   console.log('PASS sandboxed browser: signed TLS transport, bundle, CSP, host-only cookie and WebAuthn registration and a verified assertion with a disposable virtual authenticator');
  }

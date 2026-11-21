@@ -7,6 +7,8 @@ import {fileURLToPath} from 'node:url';
 import {build} from 'esbuild';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 import {unstable_splitSqlQuery} from 'wrangler';
+import {stagePilotGenesisMainBinding} from '../api-worker/genesis-main-binding-stage.ts';
+import {PILOT_MAIN_MAPPING_ALLOWLIST,resolvePilotMainExistingMapping} from '../api-worker/pilot-main-existing-mapping.ts';
 import {MAIN_BIND_GENESIS,mainGenesisBindingDeviceProof} from '../shared/genesis-main-binding.ts';
 import {PILOT_INVITE_READBACK,PILOT_INVITE_READBACK_REQUEST,pilotInviteConsumptionDeviceProof,
  readPilotAuthInvitationConsumption} from '../auth-trust-worker/experimental/pilot-invite-consumption-readback.ts';
@@ -15,7 +17,7 @@ import {verify} from '../shared/contracts.ts';
 import {verifyGenesisApproval} from '../shared/genesis-approval.ts';
 import {checkpoint as signCheckpoint,genesisRoot} from '../shared/checkpoints.ts';
 import {verifyWitness,WITNESS_DOMAIN} from '../shared/roster-witness.ts';
-import {canonicalGrant,requestProof} from '../shared/device-protocol.ts';
+import {canonicalGrant} from '../shared/device-protocol.ts';
 import {canonicalRoster,ROSTER_DOMAIN,rosterDigest} from '../shared/roster.ts';
 
 export const pilotBrowserHost='auth-pilot-browser.fixture.invalid';
@@ -34,8 +36,8 @@ export async function createCompiledPilotBrowserFixture(fixtureFile){
  await build({absWorkingDir:relative('.'),entryPoints:['api-worker/index.ts','recovery-worker/index.ts'],
   outbase:'.',outdir:'dist/compiled-browser',bundle:true,format:'esm',platform:'neutral',mainFields:['module','main'],
   external:['cloudflare:workers','cloudflare:email','node:buffer','node:net'],target:'es2022'});
- const [genesis,approval,invite,device,wrap,checkpoint,witness,recoveryApi,recoveryCustody,mainLinkSigner,consumptionSigner]=
-  [key(),key(),key(),key(),key('x25519'),key(),key(),key(),key(),key(),key()];
+ const [genesis,approval,invite,device,wrap,checkpoint,witness,recoveryApi,recoveryCustody,mainLinkSigner,consumptionSigner,mappingOperator]=
+  [key(),key(),key(),key(),key('x25519'),key(),key(),key(),key(),key(),key(),key()];
  const now=Math.floor(Date.now()/1000),expiresAt=now+180,database='compiled-browser-auth',
   mainDatabase='compiled-browser-main',custodyDatabase='compiled-browser-custody',base={
   modules:true,compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat'],
@@ -92,7 +94,7 @@ export async function createCompiledPilotBrowserFixture(fixtureFile){
     TRUSTED_AUTH_SOURCE:{name:'browser-test-ingress',entrypoint:'Source'}}},
   {...base,name:'browser-test-ingress',script:`import {WorkerEntrypoint} from 'cloudflare:workers';
    export class Source extends WorkerEntrypoint {async resolve(req){const url=new URL(req.url);
-    if(url.origin!==${JSON.stringify(mainOrigin)}||url.pathname!=='/v1/devices/roster-put')throw new Error('outside_browser_test_ingress');
+    if(url.origin!==${JSON.stringify(mainOrigin)}||url.pathname!=='/v1/devices/challenge')throw new Error('outside_browser_test_ingress');
     return 'browser-device-fixture';}}
    export default {fetch(){return new Response(null,{status:404});}};`},
   {...base,name:'browser-private-probe',serviceBindings:{ADMISSION:{name:custodyDatabase,entrypoint:'GenesisAdmission'},
@@ -121,11 +123,23 @@ export async function createCompiledPilotBrowserFixture(fixtureFile){
    for(const name of (await readdir(directory)).filter(n=>n.endsWith('.sql')).sort())
     await store.batch(unstable_splitSqlQuery(await readFile(directory+'/'+name,'utf8')).map(sql=>store.prepare(sql)));
   }
+  const stageSchema=await readFile(relative('api-worker/experimental/genesis-main-binding-stage/0001-stage.sql'),'utf8');
+  await main.batch(unstable_splitSqlQuery(stageSchema).map(sql=>main.prepare(sql)));
   for(const filename of ['auth-trust-worker/experimental/genesis-registration.sql','auth-trust-worker/pilot-migrations/0001-exact-genesis-registration.sql'])
    await db.batch(unstable_splitSqlQuery(await readFile(relative(filename),'utf8')).map(sql=>db.prepare(sql)));
-  const bound={accountId:'browser-test-account',tenantId:'browser-test-tenant',vaultId:'browser-test-vault',deviceId:'browser-test-device',requestId:random(),keyEpoch:1};
+  const bound={accountId:'browser-test-account',tenantId:'browser-test-tenant',vaultId:'browser-test-vault',deviceId:random(),requestId:random(),keyEpoch:1};
   const {accountId,tenantId,vaultId,deviceId,keyEpoch}=bound,signingKey=device.pin.publicKey,wrappingKey=wrap.pin.publicKey;
   const oldGrantCanonical=canonicalGrant({version:1,...bound,signingKey,wrappingKey,issuerDeviceId:null,expiresAt});
+  // Pre-existing, independently test-owned Main account and bound device
+  // context, created before the Auth invite. No credential or active device.
+  await main.batch([
+   main.prepare('INSERT INTO accounts VALUES(?)').bind(accountId),main.prepare('INSERT INTO tenants VALUES(?)').bind(tenantId),
+   main.prepare('INSERT INTO memberships VALUES(?,?,1)').bind(tenantId,accountId),
+   main.prepare('INSERT INTO vaults VALUES(?,?,0)').bind(tenantId,vaultId),
+   main.prepare(`INSERT INTO device_requests(id,code_digest,verification_digest,phrase,device_id,signing_key,wrapping_key,platform,
+    expires_at,state,account_id,tenant_id,vault_id,key_epoch) VALUES(?,?,?,'synthetic-bound',?,?,?,'linux',?,'bound',?,?,?,?)`)
+    .bind(bound.requestId,hash(random()),hash(random()),deviceId,signingKey,wrappingKey,expiresAt,accountId,tenantId,vaultId,keyEpoch),
+  ]);
   const rosterCanonical=canonicalRoster({version:1,accountId,tenantId,vaultId,revision:1,previousDigest:null,keyEpoch,active:[{deviceId,signingKey,wrappingKey}],
    revoked:[],issuer:{kind:'device',id:deviceId},issuedAt:now,expiresAt,checkpointKeys:policy.checkpointKeys,recoveryAuthorities:[],recovery:null});
   const roster={canonical:rosterCanonical,signature:device.sign(ROSTER_DOMAIN+rosterCanonical)};
@@ -149,49 +163,7 @@ export async function createCompiledPilotBrowserFixture(fixtureFile){
    assert.deepEqual(proof,await db.prepare('SELECT canonical,signature FROM auth_genesis_decisions').first());
    assert.equal(await db.prepare('SELECT count(*) n FROM auth_genesis_decisions').first('n'),1);
    assert.equal(await db.prepare('SELECT count(*) n FROM auth_genesis_pins').first('n'),1);
-  },admitAndPublish:async proof=>{
-   // Auth-local, injected fixture role; no new request route exists.
-   const scoped={grantCanonical:oldGrantCanonical,installationDigest:hash(random()),profileDigest:hash(random()),
-    installationExpiresAt:expiresAt,authOrigin:pilotBrowserOrigin,rpId:pilotBrowserHost};
-   const linkPolicy={authority:genesis.pin,checkpointKeys:policy.checkpointKeys,recoveryAuthorities:policy.recoveryAuthorities,
-    inviteAuthority:invite.pin,mainLinkAuthority:mainLinkSigner.pin};
-   const envelopeHash=x=>hash(JSON.stringify([x.canonical,x.signature]));
-   const requestedAtForLink=Math.floor(Date.now()/1000),nonceForLink=random();
-   let signedObservations=0;
-   const role={mode:'invite-consumption-v1',authority:consumptionSigner.pin,
-    reservedRolePins:[approval.pin,witness.pin,recoveryApi.pin,recoveryCustody.pin],signer:{key:async()=>consumptionSigner.pin,
-    sign:async text=>{signedObservations++;return consumptionSigner.sign(text);}}};
-   const requestRead=registrationInvite=>{
-    const mainLinkCanonical=JSON.stringify({version:1,domain:PILOT_MAIN_INVITE_LINK,keyId:mainLinkSigner.pin.keyId,...bound,
-     grantDigest:hash(oldGrantCanonical),inviteDigest:envelopeHash(registrationInvite),authApprovalDigest:envelopeHash(proof),
-     installationDigest:scoped.installationDigest,profileDigest:scoped.profileDigest,issuedAt:requestedAtForLink,
-     expiresAt:Math.min(requestedAtForLink+25,JSON.parse(initialInvite.canonical).expiresAt,JSON.parse(proof.canonical).expiresAt)});
-    const mainLink={canonical:mainLinkCanonical,signature:mainLinkSigner.sign(mainLinkCanonical)};
-    return JSON.stringify({version:1,domain:PILOT_INVITE_READBACK_REQUEST,nonce:nonceForLink,requestedAt:requestedAtForLink,
-     invite:registrationInvite,authApproval:proof,roster,mainLink,
-     deviceSignature:device.sign(pilotInviteConsumptionDeviceProof(nonceForLink,requestedAtForLink,envelopeHash(mainLink)))});
-   };
-   const rawRead=requestRead(initialInvite),consumptionDenied=/pilot_auth_invite_consumption_unavailable/;
-   await assert.rejects(readPilotAuthInvitationConsumption(db,rawRead,scoped,linkPolicy),consumptionDenied);
-   const changedInviteCanonical=JSON.stringify({...JSON.parse(initialInvite.canonical),id:random()});
-   const changedInvite={canonical:changedInviteCanonical,signature:invite.sign(changedInviteCanonical)};
-   // Valid signatures & Admin mapping on those same grant/approval bytes
-   // cannot turn another invite identity into the consumed invite.
-   await assert.rejects(readPilotAuthInvitationConsumption(db,requestRead(changedInvite),scoped,linkPolicy,role),consumptionDenied);
-   await assert.rejects(readPilotAuthInvitationConsumption(db,rawRead,scoped,linkPolicy,{...role,authority:genesis.pin}),consumptionDenied);
-   await assert.rejects(readPilotAuthInvitationConsumption(db,rawRead,scoped,linkPolicy,{...role,authority:witness.pin}),consumptionDenied);
-   assert.equal(signedObservations,0);
-   const consumption=await readPilotAuthInvitationConsumption(db,rawRead,scoped,linkPolicy,role);
-   const readbackFields=JSON.parse(consumption.canonical);
-   assert.deepEqual(Object.keys(readbackFields),['version','domain','keyId','nonce','requestDigest','inviteDigest','authApprovalDigest',
-    'mainLinkDigest','installationDigest','profileDigest','issuedAt','expiresAt']);
-   assert.equal(readbackFields.domain,PILOT_INVITE_READBACK);
-   assert.equal(readbackFields.nonce,nonceForLink);
-   assert.equal(readbackFields.requestDigest,hash(rawRead));
-   assert.equal(readbackFields.inviteDigest,envelopeHash(initialInvite));
-   assert.equal(readbackFields.authApprovalDigest,envelopeHash(proof));
-   assert.equal(await verify(consumptionSigner.pin.publicKey,consumption.signature,consumption.canonical),true);
-   assert.equal(signedObservations,1);
+  },admitAndStage:async proof=>{
    // Consume the exact browser-returned envelope. The graph has no legacy genesis binding.
    const probe=await mf.getWorker('browser-private-probe'),root=await genesisRoot(tenantId,vaultId);
    assert.equal(await probe.ingress(),404);
@@ -226,25 +198,76 @@ export async function createCompiledPilotBrowserFixture(fixtureFile){
    assert.equal(await count(custody,'roster_witness'),1);
    assert.equal(await custody.prepare('SELECT attempt_digest FROM genesis_admissions').first('attempt_digest'),
     hash(JSON.stringify(['AgentKeychain-genesis-admission-attempt-v1',proof,oldGrantCanonical,roster,cp])));
-   // Only the already-enrolled synthetic device/session are setup data. Main itself commits and acknowledges the roster.
-   const session=random(),sessionDigest=hash(session);
-   await main.batch([
-    main.prepare('INSERT INTO accounts VALUES(?)').bind(accountId),main.prepare('INSERT INTO tenants VALUES(?)').bind(tenantId),
-    main.prepare('INSERT INTO memberships VALUES(?,?,1)').bind(tenantId,accountId),
-    main.prepare('INSERT INTO vaults VALUES(?,?,0)').bind(tenantId,vaultId),
-    main.prepare('INSERT INTO devices VALUES(?,?,?,?,1)').bind(tenantId,deviceId,accountId,signingKey),
-    main.prepare('INSERT INTO device_keys VALUES(?,?,?)').bind(tenantId,deviceId,wrappingKey),
-    main.prepare('INSERT INTO vault_devices VALUES(?,?,?,1)').bind(tenantId,vaultId,deviceId),
-    main.prepare('INSERT INTO device_sessions(digest,tenant_id,vault_id,device_id,account_id,expires_at,active) VALUES(?,?,?,?,?,unixepoch()+180,1)').bind(sessionDigest,tenantId,vaultId,deviceId,accountId),
-   ]);
-   const url=new URL(mainOrigin+'/v1/devices/roster-put'),body=JSON.stringify(roster),timestamp=Math.floor(Date.now()/1000),nonce=random();
-   const response=await mf.dispatchFetch(url,{method:'POST',body,headers:{'content-type':'application/json',authorization:'Bearer '+session,
-    'x-device-timestamp':String(timestamp),'x-device-nonce':nonce,'x-device-proof':device.sign(requestProof('POST',url,hash(body),timestamp,nonce,sessionDigest))}});
-   assert.equal(response.status,200);
-   assert.deepEqual(await response.json(),{accepted:true,witness:admission});
-   assert.deepEqual(await main.prepare('SELECT canonical,signature FROM signed_rosters').first(),roster);
-   assert.deepEqual(await main.prepare('SELECT state,digest,receipt FROM roster_witness_sagas').first(),
-    {state:'acknowledged',digest:rosterHash,receipt:JSON.stringify(admission)});
+   const stagedPolicy={authority:genesis.pin,witness:witness.pin,checkpointKeys:policy.checkpointKeys,
+    recoveryAuthorities:policy.recoveryAuthorities};
+   // Actual Main owner code, with a bridge whose only Custody capability is
+   // the private compiled readback RPC (no caller-supplied policy).
+   const ports={MAIN:main,PILOT_CUSTODY_GENESIS_BIND:{read:async raw=>JSON.parse(await probe.binding(raw))}};
+   const installedScope={installationDigest:hash(random()),profileDigest:hash(random()),authOrigin:pilotBrowserOrigin,
+    rpId:pilotBrowserHost,installationExpiresAt:expiresAt};
+   const issuedAt=Math.floor(Date.now()/1000),mappingExpiresAt=Math.min(expiresAt,JSON.parse(initialInvite.canonical).expiresAt);
+   const allowlist=JSON.stringify({version:1,domain:PILOT_MAIN_MAPPING_ALLOWLIST,keyId:mappingOperator.pin.keyId,
+    attemptDigest,grantDigest:hash(oldGrantCanonical),custodyReceiptDigest:hash(JSON.stringify(admission)),...installedScope,
+    issuedAt,expiresAt:mappingExpiresAt});
+   const config={mode:'existing-mapping-v1',operator:mappingOperator.pin,installation:installedScope,
+    reservedRolePins:[genesis.pin,approval.pin,invite.pin,device.pin,checkpoint.pin,witness.pin,mainLinkSigner.pin,consumptionSigner.pin,
+     recoveryApi.pin,recoveryCustody.pin],allowlist:{canonical:allowlist,signature:mappingOperator.sign(allowlist)}};
+   await assert.rejects(resolvePilotMainExistingMapping(main,config),/pilot_main_existing_mapping_unavailable/);
+   assert.equal(await count(main,'pilot_genesis_main_binding_stage'),0);
+   assert.deepEqual(await stagePilotGenesisMainBinding(ports,stagedPolicy,request),{state:'binding-staged-not-session',attemptDigest});
+   assert.deepEqual(await stagePilotGenesisMainBinding(ports,stagedPolicy,request),{state:'binding-staged-not-session',attemptDigest});
+   assert.equal(await count(main,'pilot_genesis_main_binding_stage'),1);
+   const scoped=await resolvePilotMainExistingMapping(main,config);
+   assert.deepEqual(scoped,{...installedScope,grantCanonical:oldGrantCanonical,installationExpiresAt:mappingExpiresAt});
+   // Auth-local, dedicated signer. The trusted internal mapping comes only
+   // from the real Main row resolution immediately above, not a browser claim.
+   const linkPolicy={authority:genesis.pin,checkpointKeys:policy.checkpointKeys,recoveryAuthorities:policy.recoveryAuthorities,
+    inviteAuthority:invite.pin,mainLinkAuthority:mainLinkSigner.pin};
+   const envelopeHash=x=>hash(JSON.stringify([x.canonical,x.signature]));
+   const requestedAtForLink=Math.floor(Date.now()/1000),nonceForLink=random();
+   let signedObservations=0;
+   const role={mode:'invite-consumption-v1',authority:consumptionSigner.pin,
+    reservedRolePins:[approval.pin,witness.pin,recoveryApi.pin,recoveryCustody.pin],signer:{key:async()=>consumptionSigner.pin,
+    sign:async text=>{signedObservations++;return consumptionSigner.sign(text);}}};
+   const requestRead=registrationInvite=>{
+    const mainLinkCanonical=JSON.stringify({version:1,domain:PILOT_MAIN_INVITE_LINK,keyId:mainLinkSigner.pin.keyId,...bound,
+     grantDigest:hash(oldGrantCanonical),inviteDigest:envelopeHash(registrationInvite),authApprovalDigest:envelopeHash(proof),
+     installationDigest:scoped.installationDigest,profileDigest:scoped.profileDigest,issuedAt:requestedAtForLink,
+     expiresAt:Math.min(scoped.installationExpiresAt,requestedAtForLink+25,JSON.parse(initialInvite.canonical).expiresAt,JSON.parse(proof.canonical).expiresAt)});
+    const mainLink={canonical:mainLinkCanonical,signature:mainLinkSigner.sign(mainLinkCanonical)};
+    return JSON.stringify({version:1,domain:PILOT_INVITE_READBACK_REQUEST,nonce:nonceForLink,requestedAt:requestedAtForLink,
+     invite:registrationInvite,authApproval:proof,roster,mainLink,
+     deviceSignature:device.sign(pilotInviteConsumptionDeviceProof(nonceForLink,requestedAtForLink,envelopeHash(mainLink)))});
+   };
+   const rawRead=requestRead(initialInvite),consumptionDenied=/pilot_auth_invite_consumption_unavailable/;
+   await assert.rejects(readPilotAuthInvitationConsumption(db,rawRead,scoped,linkPolicy),consumptionDenied);
+   const changedInviteCanonical=JSON.stringify({...JSON.parse(initialInvite.canonical),id:random()});
+   const changedInvite={canonical:changedInviteCanonical,signature:invite.sign(changedInviteCanonical)};
+   // Valid signatures & Admin mapping on those same grant/approval bytes
+   // cannot turn another invite identity into the consumed invite.
+   await assert.rejects(readPilotAuthInvitationConsumption(db,requestRead(changedInvite),scoped,linkPolicy,role),consumptionDenied);
+   await assert.rejects(readPilotAuthInvitationConsumption(db,rawRead,scoped,linkPolicy,{...role,authority:genesis.pin}),consumptionDenied);
+   await assert.rejects(readPilotAuthInvitationConsumption(db,rawRead,scoped,linkPolicy,{...role,authority:witness.pin}),consumptionDenied);
+   assert.equal(signedObservations,0);
+   const consumption=await readPilotAuthInvitationConsumption(db,rawRead,scoped,linkPolicy,role);
+   const readbackFields=JSON.parse(consumption.canonical);
+   assert.deepEqual(Object.keys(readbackFields),['version','domain','keyId','nonce','requestDigest','inviteDigest','authApprovalDigest',
+    'mainLinkDigest','installationDigest','profileDigest','issuedAt','expiresAt']);
+   assert.equal(readbackFields.domain,PILOT_INVITE_READBACK);
+   assert.equal(readbackFields.nonce,nonceForLink);
+   assert.equal(readbackFields.requestDigest,hash(rawRead));
+   assert.equal(readbackFields.inviteDigest,envelopeHash(initialInvite));
+   assert.equal(readbackFields.authApprovalDigest,envelopeHash(proof));
+   assert.equal(await verify(consumptionSigner.pin.publicKey,consumption.signature,consumption.canonical),true);
+   assert.equal(signedObservations,1);
+
+   const response=await mf.dispatchFetch(mainOrigin+'/v1/devices/challenge',{method:'POST',
+    body:JSON.stringify({deviceId}),headers:{'content-type':'application/json'}});
+   assert.equal(response.status,404);
+   assert.deepEqual(await response.json(),{error:{code:'not_found'}});
+   assert.equal(await main.prepare('SELECT state FROM device_requests WHERE id=?').bind(bound.requestId).first('state'),'bound');
+   for(const table of ['devices','device_keys','vault_devices','device_sessions','device_challenges','enrollment_grants','signed_rosters'])
+    assert.equal(await count(main,table),0);
    assert.equal(await count(custody,'genesis_admissions'),1);
    assert.equal(await count(custody,'roster_witness'),1);
   }};
@@ -304,7 +327,7 @@ export async function verifyCompiledPilotBrowser(cdp,pilot,fixtureFile,delay){
  await until("!document.getElementById('receipt').hidden",'verified consent and signed receipt');
  const proof=JSON.parse(await evaluate("document.getElementById('proof').value"));
  await pilot.assertReceipt(proof);
- await pilot.admitAndPublish(proof);
+ await pilot.admitAndStage(proof);
  assert.equal(await evaluate("document.cookie.includes('akc_')"),false);
  await cdp('Target.closeTarget',{targetId});
 }
