@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/pilot-sqlite-fixture.yml'
       - 'tests/native/pilot_sqlite*.c'
+      - 'tests/native/pilot_broker_unix_peer.c'
       - 'tests/native/PILOT_SQLITE_DIRFD_ACCEPTANCE.md'
 
 permissions:
@@ -65,6 +66,7 @@ jobs:
           PY
           cc "${base[@]}" tests/native/pilot_sqlite_dirfd_gate.c -o "$fixture/path-gate"
           cc "${base[@]}" tests/native/pilot_sqlite_writer_lease.c -o "$fixture/lease"
+          cc "${base[@]}" tests/native/pilot_broker_unix_peer.c -o "$fixture/broker-peer"
           cc -O2 -DSQLITE_OMIT_WAL=1 -DSQLITE_OMIT_LOAD_EXTENSION=1 -DSQLITE_TEMP_STORE=3 \
             -c "$fixture/sqlite3.c" -o "$fixture/sqlite3.o"
           for test in pilot_sqlite_engine_readonly pilot_sqlite_rollback_writer pilot_sqlite_broker_receipt; do
@@ -85,3 +87,11 @@ jobs:
           "$AKC_SQLITE_FIXTURE_DIR/pilot_sqlite_engine_readonly"
           "$AKC_SQLITE_FIXTURE_DIR/pilot_sqlite_rollback_writer"
           "$AKC_SQLITE_FIXTURE_DIR/pilot_sqlite_broker_receipt"
+
+      - name: Verify kernel peer identity on a private Unix socket
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          "$AKC_SQLITE_FIXTURE_DIR/broker-peer"

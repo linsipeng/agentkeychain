@@ -1,5 +1,9 @@
 /** Synthetic two-process protocol rehearsal, NOT native/installed peer authorization. */
 import assert from 'node:assert/strict';
+import {Buffer} from 'node:buffer';
+import console from 'node:console';
+import process from 'node:process';
+import {TextDecoder} from 'node:util';
 import {createHash,createPrivateKey,createPublicKey,generateKeyPairSync,randomBytes,sign,verify} from 'node:crypto';
 import {createReadStream} from 'node:fs';
 import {spawn} from 'node:child_process';

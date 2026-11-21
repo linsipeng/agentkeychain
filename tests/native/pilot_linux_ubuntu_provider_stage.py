@@ -4,6 +4,7 @@ import io
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tarfile
@@ -21,6 +22,48 @@ phase = "runner"
 def need(value):
     if not value:
         raise ValueError("stage denied")
+
+
+# Both files are shipped by Ubuntu Noble's ubuntu-keyring package. A missing
+# aggregate file may use the exact archive-only file; a suspicious aggregate
+# is never ignored. Trust only the 2018 archive key, not other bundled keys.
+ARCHIVE_KEY = "F6ECB3762474EDA9D21B7022871920D1991BC93C"
+ARCHIVE_KEY_PATHS = (
+    Path("/usr/share/keyrings/ubuntu-archive-keyring.gpg"),
+    Path("/etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg"),
+)
+
+
+def archive_key():
+    global phase
+    for source, path in zip(("aggregate", "archive-2018"), ARCHIVE_KEY_PATHS):
+        label = "archive-key-" + source
+        try:
+            for parent in reversed(path.parents):
+                phase = label + "-parent-stat"
+                row = parent.lstat()
+                phase = label + "-parent-type"
+                need(stat.S_ISDIR(row.st_mode))
+                phase = label + "-parent-owner"
+                need(row.st_uid == 0)
+                phase = label + "-parent-mode"
+                need(not row.st_mode & 0o022)
+            phase = label + "-stat"
+            row = path.lstat()
+        except FileNotFoundError:
+            continue
+        phase = label + "-file-type"
+        need(stat.S_ISREG(row.st_mode))
+        phase = label + "-file-owner"
+        need(row.st_uid == 0)
+        phase = label + "-file-mode"
+        need(not row.st_mode & 0o022 and row.st_mode & 0o444 == 0o444)
+        phase = label + "-file-size"
+        need(0 < row.st_size <= 1024 * 1024)
+        print("ubuntu_provider_archive_key_source=" + source)
+        return path
+    phase = "archive-key-missing"
+    raise ValueError("archive key missing")
 
 
 def run():
@@ -64,11 +107,10 @@ Acquire::https::Verify-Host "true";
 Acquire::Retries "0";
 APT::Get::AllowUnauthenticated "false";
 """)
-        phase = "archive-key"
-        key = Path("/usr/share/keyrings/ubuntu-archive-keyring.gpg")
-        need(key.is_file() and key.stat().st_uid == 0 and not key.stat().st_mode & 0o022)
+        key = archive_key()
+        phase = "archive-sources"
         (work / "sources.list").write_text("\n".join(
-            f"deb [arch=amd64 signed-by={key}] https://archive.ubuntu.com/ubuntu/ {suite} main"
+            f"deb [arch=amd64 signed-by={key},{ARCHIVE_KEY}] https://archive.ubuntu.com/ubuntu/ {suite} main"
             for suite in ("noble", "noble-updates")
         ) + "\n")
         env = {"HOME": str(work), "PATH": "/usr/bin:/bin", "LC_ALL": "C", "APT_CONFIG": str(config)}
