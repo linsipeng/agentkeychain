@@ -1,4 +1,4 @@
-name: Disposable Ubuntu provider archive
+name: Disposable Ubuntu provider archive and peer
 
 on:
   pull_request:
@@ -7,12 +7,13 @@ on:
     paths:
       - '.github/workflows/pilot-linux-provider-archive.yml'
       - 'tests/native/pilot_linux_ubuntu_provider_stage.py'
+      - 'tests/native/pilot_linux_private_secret_bus.py'
 
 permissions:
   contents: read
 
 jobs:
-  verify-archive-only:
+  verify-private-peer:
     if: >-
       ${{ github.repository == 'linsipeng/agentkeychain' &&
           github.event.pull_request.number == 10 &&
@@ -27,7 +28,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Verify exact packages without installing or executing them
+      - name: Verify exact packages and isolated provider identity without installing them
         timeout-minutes: 4
         shell: bash
         run: |
@@ -35,5 +36,5 @@ jobs:
           umask 077
           test "$GITHUB_ACTIONS" = true && test "$RUNNER_ENVIRONMENT" = github-hosted
           /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
-            AKC_UBUNTU_PROVIDER_STAGE=archive-only-v1 /usr/bin/timeout 220s /usr/bin/python3 -I \
+            AKC_UBUNTU_PROVIDER_STAGE=private-peer-v1 /usr/bin/timeout 220s /usr/bin/python3 -I \
             tests/native/pilot_linux_ubuntu_provider_stage.py

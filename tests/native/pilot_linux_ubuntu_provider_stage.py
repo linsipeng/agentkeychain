@@ -16,6 +16,38 @@ PINS = (
     ("libgcr-base-3-1", "3.41.2-1build3", "gcr"),
 )
 
+PEER_ARCHIVES = {
+    "gnome-keyring": "86629a081c91dd8004655f5f48d8a5bfb75dde8c4e69ef7401b15568c2eacafb",
+    "libgck-1-0": "bceace92f5cbbf55ab2c963a426f73335c887f0c1c45c7b0b7d7610b36d9afde",
+    "libgcr-base-3-1": "b702e0ef02517caf5a3e35b9b663dfc22935315dc2e7dc507e78435963ff2e24",
+}
+LIBRARIES = {
+    "libgck-1-0": ("libgck-1.so.0.0.0", "libgck-1.so.0"),
+    "libgcr-base-3-1": ("libgcr-base-3.so.1.0.0", "libgcr-base-3.so.1"),
+}
+EXPECTED_PROVIDER_NEEDED = [
+    "libgcr-base-3.so.1", "libgck-1.so.0", "libgio-2.0.so.0", "libgobject-2.0.so.0",
+    "libglib-2.0.so.0", "libgcrypt.so.20", "libsystemd.so.0", "libc.so.6",
+]
+
+
+def extract_member(cmd, archive_path, member_path, candidate):
+    # Read exact regular member into a fresh private path. Do not materialize archive
+    # symlinks/scripts/hooks/config files, and do not preserve archive modes/ownership.
+    archive = cmd("dpkg-deb", "--fsys-tarfile", str(archive_path))
+    need(len(archive) <= 16 * 1024 * 1024)
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as payload:
+        matches = [entry for entry in payload if entry.name == member_path]
+        need(len(matches) == 1 and matches[0].isfile() and 0 < matches[0].size <= 4 * 1024 * 1024)
+        file = payload.extractfile(matches[0])
+        need(file is not None)
+        data = file.read()
+        need(len(data) == matches[0].size and data.startswith(b"\x7fELF"))
+        with candidate.open("xb") as dest:
+            dest.write(data)
+    candidate.chmod(0o400)
+    return candidate.lstat()
+
 
 phase = "runner"
 
@@ -76,10 +108,15 @@ def run():
     need("ID=ubuntu" in os_release.splitlines() and "VERSION_CODENAME=noble" in os_release.splitlines())
     need(len(sys.argv) == 1 and os.environ.get("GITHUB_ACTIONS") == "true"
          and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") == "archive-only-v1")
+         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("archive-only-v1", "private-peer-v1"))
+    verify_peer = os.environ["AKC_UBUNTU_PROVIDER_STAGE"] == "private-peer-v1"
     os.umask(0o077)
     with tempfile.TemporaryDirectory(prefix="akc-noble-stage-", dir="/tmp") as location:
         work = Path(location)
+        library_dir = work / "private-libraries"
+        library_dir.mkdir(mode=0o700)
+        staged_libraries = {}
+        candidate = work / "gnome-keyring-daemon"
         for dest in ("lists/partial", "archives/partial", "empty"):
             (work / dest).mkdir(parents=True)
         for dest in ("status", "local.conf"):
@@ -140,6 +177,8 @@ APT::Get::AllowUnauthenticated "false";
             filename = f"{name}_{version}_amd64.deb"
             need(re.fullmatch(r"[a-f0-9]{64}", digest) and
                  record.get("Filename") == f"pool/main/{source[0]}/{source}/{filename}")
+            if verify_peer:
+                need(digest == PEER_ARCHIVES[name])
             size = int(record["Size"])
             need(0 < size <= 4 * 1024 * 1024)
             # Fetch exact bytes using the fixed official archive URL from the validated index path.
@@ -149,32 +188,51 @@ APT::Get::AllowUnauthenticated "false";
                 "--max-time", "30", "--max-filesize", str(size), "--output", str(output),
                 "https://archive.ubuntu.com/ubuntu/" + record["Filename"])
             need(output.stat().st_size == size and hashlib.sha256(output.read_bytes()).hexdigest() == digest)
-            # Select one regular member from authenticated bytes; do not unpack arbitrary paths,
-            # create links, preserve credentials/modes, install schemas/hooks, or execute it.
             if name == "gnome-keyring":
                 phase = "member"
-                candidate = work / "gnome-keyring-daemon"
-                member_path = "./usr/bin/gnome-keyring-daemon"
-                archive = cmd("dpkg-deb", "--fsys-tarfile", str(output))
-                need(len(archive) <= 16 * 1024 * 1024)
-                with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as payload:
-                    matches = [entry for entry in payload if entry.name == member_path]
-                    need(len(matches) == 1 and matches[0].isfile() and 0 < matches[0].size <= 4 * 1024 * 1024)
-                    file = payload.extractfile(matches[0])
-                    need(file is not None)
-                    data = file.read()
-                    need(len(data) == matches[0].size and data.startswith(b"\x7fELF"))
-                    with candidate.open("xb") as dest:
-                        dest.write(data)
-                candidate.chmod(0o400)
+                provider = extract_member(cmd, output, "./usr/bin/gnome-keyring-daemon", candidate)
                 phase = "elf"
                 dynamic = cmd("readelf", "--dynamic", str(candidate)).decode("ascii")
                 needed = re.findall(r"Shared library: \[([a-zA-Z0-9._+-]+)\]", dynamic)
                 need(bool(needed))
+                if verify_peer:
+                    need(needed == EXPECTED_PROVIDER_NEEDED and not re.search(r"\((?:RPATH|RUNPATH)\)", dynamic))
+                    phase = "provider-elf-interpreter"
+                    headers = cmd("readelf", "--file-header", "--program-headers", str(candidate)).decode("ascii")
+                    need(re.search(r"(?m)^\s*Class:\s*ELF64\s*$", headers) and
+                         re.search(r"(?m)^\s*Type:\s*DYN\b", headers) and
+                         re.search(r"(?m)^\s*Machine:\s*Advanced Micro Devices X86-64\s*$", headers) and
+                         re.findall(r"Requesting program interpreter: ([^\]]+)\]", headers) ==
+                         ["/lib64/ld-linux-x86-64.so.2"])
                 for library in needed:
                     print("ubuntu_provider_needed_library " + library)
+            elif verify_peer:
+                phase = "member-" + name
+                member, soname = LIBRARIES[name]
+                path = library_dir / soname
+                staged_libraries[path] = extract_member(cmd, output, "./usr/lib/x86_64-linux-gnu/" + member, path)
+                dynamic = cmd("readelf", "--dynamic", str(path)).decode("ascii")
+                need(re.findall(r"Library soname: \[([a-zA-Z0-9._+-]+)\]", dynamic) == [soname] and
+                     not re.search(r"\((?:RPATH|RUNPATH)\)", dynamic))
             print("ubuntu_provider_archive_verified " + name + " " + version + " sha256=" + digest)
-        print("ubuntu_provider_stage_archive_only_not_executed")
+        if not verify_peer:
+            print("ubuntu_provider_stage_archive_only_not_executed")
+            return
+
+        phase = "private-peer-prerequisites"
+        # Execute only in the separate, explicitly requested hosted peer lane.
+        # Python -I excludes script siblings; load only this fixed reviewed file.
+        import runpy
+        lane = runpy.run_path(str(Path(__file__).with_name("pilot_linux_private_secret_bus.py")))
+        need(len(staged_libraries) == 2)
+        candidate.chmod(0o500)
+        try:
+            lane["verify_private_provider"](candidate, provider, library_dir, staged_libraries)
+        except Exception:
+            phase = "private-peer-" + lane["verify_private_provider"].__globals__["phase"]
+            raise ValueError("private provider peer denied") from None
+        print("linux_private_secret_bus_peer_identity_verified_not_storage")
+
 
 
 if __name__ == "__main__":
