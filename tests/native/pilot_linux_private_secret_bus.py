@@ -114,11 +114,12 @@ def prompter_timeout_class(conn, process):
     return "prompter-owner-timeout-not-connected-to-private-bus"
 
 
-def wait_owner(conn, name, process, image, snapshot):
+def wait_owner(conn, name, process, image, snapshot, *, startup_timeout=6):
     global phase
-    # GCR initializes GTK before requesting its bus name. Allow bounded
-    # startup jitter but never start another prompter or accept a late owner.
-    expires = time.monotonic() + 6
+    # GCR 3.41.2 ui/gcr-prompter-tool.c calls gtk_init() before logging
+    # setup and g_bus_own_name(). A slow GTK startup may have empty stderr.
+    # Never start another prompter or accept an owner after this deadline.
+    expires = time.monotonic() + startup_timeout
     while time.monotonic() < expires:
         phase = "prompter-process"
         exit_code = process.poll()
@@ -535,7 +536,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
     os.umask(0o077)
     signal.signal(signal.SIGALRM, interrupted)
     signal.signal(signal.SIGTERM, interrupted)
-    signal.alarm(20)
+    signal.alarm(28 if prompt is not None else 20)
     children = []
     diagnostics = []
     conn = None
@@ -664,7 +665,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                         image, snapshot, display_env, windows = prompt
                         prompter = start([str(image)], {**env, **display_env, "DBUS_SESSION_BUS_ADDRESS": "unix:path=" + str(endpoint),
                                                          "LD_LIBRARY_PATH": str(library_dir)}, "gcr")
-                        prompt_owner = wait_owner(conn, PROMPTER, prompter, image, snapshot)
+                        prompt_owner = wait_owner(conn, PROMPTER, prompter, image, snapshot, startup_timeout=10)
                         phase = "prompter-role-collision"
                         need(prompt_owner not in (owner, conn.get_unique_name()))
                         phase = "prompter-library-identity"

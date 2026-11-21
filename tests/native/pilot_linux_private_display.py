@@ -141,6 +141,19 @@ def verify_private_display():
         pass
 
 
+def x11_input_event(frame):
+    """Classify only fixed core wire event categories, never payload."""
+    code = frame[0]
+    if code & 0x80:
+        return "send-event"
+    if code == 34:
+        # X11 core protocol sets request at offset four (octet immediately
+        # after the sequence number), not the second byte.
+        return {0: "mapping-modifier", 1: "mapping-keyboard", 2: "mapping-pointer"}.get(frame[4], "mapping-unknown")
+    return {9: "focus-in", 10: "focus-out", 11: "keymap-notify", 28: "property-notify",
+            35: "extension-event"}.get(code, "other-event")
+
+
 def screen_windows(display, mark, input_scope=None):
     # Read only normal X11/XRes metadata over a strictly pinned socket, without
     # trusting client-controlled _NET_WM_PID or screenshot/title matches.
@@ -190,20 +203,26 @@ def screen_windows(display, mark, input_scope=None):
             # It can interleave between a query and its reply. No other event
             # or send-event form is accepted, and the burst is bounded.
             if label.startswith("input-"):
-                if label.startswith("input-dialog-") or label == "input-xtest-extension":
-                    for _ in range(4):
-                        if header[0] != 34:
-                            break
-                        mark(label + "-mapping-notify")
-                        header = read(32)
-                # Never skip a mapping change once the keyboard map is being
-                # established/used: subsequent synthesized input must abort.
+                # Core server MappingNotify goes to every client. Keyboard
+                # and modifier changes may drain only before the map snapshot;
+                # pointer-only changes cannot invalidate the key map.
+                before_map = (label.startswith("input-dialog-") or
+                              label in ("input-xtest-extension", "input-focus-setup"))
+                for _ in range(4):
+                    if header[0] in (0, 1):
+                        break
+                    event = x11_input_event(header)
+                    mark(label + "-event-" + event)
+                    if event != "mapping-pointer":
+                        need(before_map and event in ("mapping-modifier", "mapping-keyboard"))
+                    header = read(32)
                 if header[0] == 0:
                     # Core error code 3=BadWindow, 5=BadAtom, 8=BadMatch.
                     mark(label + "-error-" + {3: "window", 5: "atom", 8: "match"}.get(header[1], "other"))
                     need(False)
-                mark(label + "-unexpected-event")
-                need(header[0] == 1)
+                if header[0] != 1:
+                    mark(label + "-event-limit-" + x11_input_event(header))
+                    need(False)
                 mark(label + "-sequence")
                 need(struct.unpack_from("<H", header, 2)[0] == sequence)
                 mark(label + "-body-bound")
@@ -362,6 +381,19 @@ def enter_fixture_password(reply, request, mark, setup, root, window, password, 
     query = b"XTEST"
     extension, _ = reply("input-xtest-extension", 98, struct.pack("<H2x", len(query)) + padded(query))
     need(extension[8] == 1 and extension[9] >= 128)
+    def exact_focus(stage):
+        header, body = reply("input-focus-" + stage, 43)
+        mark("input-focus-" + stage + "-reply-shape")
+        need(not body)
+        focus, = struct.unpack_from("<I", header, 8)
+        if focus != window:
+            check_child(focus)
+
+    # Fix focus before fetching the keyboard map so any initial server
+    # MappingNotify from GTK/Xvfb startup cannot stale the snapshot we use.
+    request(42, struct.pack("<II", window, 0))
+    exact_focus("setup")
+
     first, last = setup[26:28]
     need(8 <= first < last and last - first <= 247)
     count = last - first + 1
@@ -376,27 +408,15 @@ def enter_fixture_password(reply, request, mark, setup, root, window, password, 
         need(len(candidates) == 1)
         keys[symbol] = candidates[0]
 
-    def exact_focus():
-        header, body = reply("input-focus", 43)
-        mark("input-focus-reply-shape")
-        need(not body)
-        focus, = struct.unpack_from("<I", header, 8)
-        if focus != window:
-            check_child(focus)
-
-    # Assign focus only to the already authenticated mapped GCR window; the
-    # fixture runs without a window manager. GCR source initially focuses
-    # the new-password entry; the next visible entry is confirmation.
-    request(42, struct.pack("<II", window, 0))
-    exact_focus()
     keymap, keymap_body = reply("input-no-held-keys", 44)
     # QueryKeymap reply is 40 bytes: eight framing bytes and 32 key bytes.
     mark("input-no-held-keys-reply-shape")
     need(len(keymap_body) == 8)
     mark("input-held-keys-present")
     need(not any(keymap[8:32] + keymap_body))
-    for group in (password, (0xff09,), password, (0xff0d,)):
-        exact_focus()
+    for stage, group in (("before-password", password), ("after-password", (0xff09,)),
+                         ("after-tab", password), ("after-confirmation", (0xff0d,))):
+        exact_focus(stage)
         for symbol in group:
             for event in (2, 3):  # core KeyPress/KeyRelease; standard XTEST only.
                 request(extension[9], struct.pack("<BB2xII20x", event, keys[symbol], 0, root), minor=2)
