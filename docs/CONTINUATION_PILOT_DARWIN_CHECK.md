@@ -150,3 +150,15 @@ configuration digests are compared in a finally block even if an ordinary
 fixture/test operation fails. If a provisioned fixture does not remain
 unlocked in the separate process, report failure; do not add an unlock or
 reopen fallback. No automatic workflow or user invocation is added here.
+
+The architecture gate emits separate fixed stages for the matrix input,
+Bun's process architecture, Darwin uname OS/architecture, in-process
+Rosetta status, and the Mach-O tool/architecture result for each binary.
+Neither failure stage prints actual paths or tool output. Bun 1.4.5's
+[official release](https://github.com/oven-sh/bun/releases/tag/bun-v1.4.5)
+publishes separate Intel and Arm macOS downloads; the fixture requires
+the expected single slice rather than assuming both downloads are
+universal. The [Apple Rosetta probe](https://developer.apple.com/documentation/apple-silicon/about-the-rosetta-translation-environment)
+runs in the actual Bash-launched Bun process through a test-only system
+FFI call, not in a child process from which translation status could not
+be inferred.

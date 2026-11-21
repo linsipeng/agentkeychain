@@ -17,7 +17,9 @@ function authority(){
  const k=generateKeyPairSync('ed25519'),publicKey=k.publicKey.export({type:'spki',format:'der'}).subarray(-32).toString('base64');
  return {pin:{keyId:sha(publicKey),publicKey},sign:(canonical:string)=>({canonical,signature:sign(null,Buffer.from(canonical),k.privateKey).toString('base64')})};
 }
-let phase: 'runner'|'architecture'|'fixture'|'build'|'digest'|'positive'|'invalid-wire'|'missing-wrong-inode'|'unchanged-original'|'configuration'='runner';
+type ArchitecturePhase = 'matrix-architecture'|'bun-process-arch'|'uname-os'|'uname-arch'|'bun-native-query'|'bun-native-translated'|
+ 'bun-image-path'|'bun-lipo-tool'|'bun-lipo-arch'|'fixture-lipo-tool'|'fixture-lipo-arch'|'helper-lipo-tool'|'helper-lipo-arch';
+let phase: 'runner'|ArchitecturePhase|'fixture'|'build'|'digest'|'positive'|'invalid-wire'|'missing-wrong-inode'|'unchanged-original'|'configuration'='runner';
 const wireHash=(value:{canonical:string;signature:string})=>sha(JSON.stringify([value.canonical,value.signature]));
 async function main(){
  must(process.platform==='darwin'&&!!process.getuid?.()&&process.getuid()===process.geteuid?.()&&
@@ -37,13 +39,56 @@ async function main(){
   const r=launch(argv,extra,stdin);must(r.exitCode===0&&r.stderr.length===0);return r.stdout.toString();
  }
  try{
-  phase='architecture';
+  phase='matrix-architecture';
   const expectedArch=process.env.AKC_EXPECTED_DARWIN_ARCH;
   must(expectedArch==='arm64'||expectedArch==='x86_64');
+  phase='bun-process-arch';
   must(process.arch===(expectedArch==='arm64'?'arm64':'x64'));
-  must(capture(['/usr/bin/uname','-s'])==='Darwin\n'&&capture(['/usr/bin/uname','-m'])===expectedArch+'\n');
-  const nativeArch=(path:string)=>must(capture(['/usr/bin/xcrun','lipo','-archs',path]).trim()===expectedArch);
-  nativeArch(realpathSync.native(process.execPath));
+  // Bound argv; discard stderr even from successful probes. Never print a
+  // tool's output or binary path; parse only fixed, expected stdout tokens.
+  const uname=(flag:'-s'|'-m',expected:string)=>{
+   const r=launch(['/usr/bin/uname',flag]);
+   must(r.exitCode===0&&r.stdout.toString().trim()===expected);
+  };
+  phase='uname-os';
+  uname('-s','Darwin');
+  phase='uname-arch';
+  uname('-m',expectedArch);
+  phase='bun-native-query';
+  // Apple's documented sysctl must run in the actual Bun process; probing a
+  // child binary would only say whether that child was translated.
+  const {dlopen,FFIType,ptr,read}=await import('bun:ffi');
+  const sys=dlopen('/usr/lib/libSystem.B.dylib',{
+   sysctlbyname:{args:[FFIType.ptr,FFIType.ptr,FFIType.ptr,FFIType.ptr,FFIType.u64],returns:FFIType.i32},
+   __error:{args:[],returns:FFIType.ptr},
+  });
+  try{
+   const name=Buffer.from('sysctl.proc_translated\0','utf8'),translated=new Int32Array(1),size=new BigUint64Array([4n]);
+   const result=sys.symbols.sysctlbyname(ptr(name),ptr(translated),ptr(size),null,0n);
+   if(result===0){
+    must(size[0]===4n);
+    phase='bun-native-translated';
+    must(translated[0]===0);
+   }else{
+    const address=sys.symbols.__error();
+    // POSIX ENOENT matches Apple's documented nontranslated case; only
+    // allow absence on the known Intel matrix, not on Apple Silicon.
+    must(result===-1&&address!==null&&read.i32(address)===2&&expectedArch==='x86_64');
+   }
+  }finally{sys.close();}
+  const nativeArch=(path:string,role:'bun'|'fixture'|'helper')=>{
+   const previous=phase;
+   phase=`${role}-lipo-tool`;
+   const output=launch(['/usr/bin/xcrun','lipo','-archs',path]);
+   must(output.exitCode===0);
+   phase=`${role}-lipo-arch`;
+   // The official version uses distinct per-architecture assets. Do not
+   // infer a universal distribution from an opaque acceptance failure.
+   must(output.stdout.toString().trim()===expectedArch);
+   phase=previous;
+  };
+  phase='bun-image-path';
+  nativeArch(realpathSync.native(process.execPath),'bun');
   const baseline=capture(['/bin/bash','tests/native/pilot_darwin_keychain_config_digest.sh']);
   must(/^[a-f0-9]{64}\n$/.test(baseline));
   try{
@@ -55,7 +100,7 @@ async function main(){
    const compiled=Bun.spawnSync(['/usr/bin/xcrun','--sdk','macosx','swiftc','tests/native/pilot_darwin_keychain.swift','-o',fixture],
     {env,cwd:process.cwd(),stdout:'ignore',stderr:'ignore',timeout:100_000});
    must(compiled.exitCode===0);
-   nativeArch(fixture);
+   nativeArch(fixture,'fixture');
    const raw:unknown=JSON.parse(capture([fixture,'--provision-readonly-wire-fixture'],{AKC_DISPOSABLE_DARWIN_FIXTURE:'private-readonly-wire-fixture-v1'}));
    exactFields(raw,['directory','directoryDevice','directoryInode','fileDevice','fileInode','siblingInode']);
    const {directory,directoryDevice,directoryInode,fileDevice,fileInode,siblingInode}=raw;
@@ -87,7 +132,7 @@ async function main(){
    const build=Bun.spawnSync([process.execPath,'scripts/build-continuation-pilot-darwin-check.ts','--artifact',material,
     '--root-public-key',pin,'--outfile',helper],{env:{...env,...nativeEnv},cwd:process.cwd(),stdout:'pipe',stderr:'pipe',timeout:155_000});
    must(build.exitCode===0&&build.stdout.length===0&&build.stderr.length===0);
-   nativeArch(helper);
+   nativeArch(helper,'helper');
    must(launch(['/usr/bin/codesign','--force','--sign','-','--timestamp=none',helper]).exitCode===0);
    // Ad-hoc signing proves local code integrity, not publisher identity.
    // Use complete fd-based hash with no final symlink; retain and recheck file
@@ -127,7 +172,7 @@ async function main(){
      must(current.dev===stat.dev&&current.ino===stat.ino&&current.uid===stat.uid&&current.mode===stat.mode&&
       current.size===stat.size&&current.nlink===1n&&named.dev===current.dev&&named.ino===current.ino&&sha(readFileSync(fd))===inspected);
      must(launch(['/usr/bin/codesign','--verify','--strict',helper]).exitCode===0);
-     nativeArch(helper);
+     nativeArch(helper,'helper');
      const after=lstatSync(helper,{bigint:true});must(after.dev===current.dev&&after.ino===current.ino&&after.mode===current.mode&&after.nlink===1n);
     }finally{closeSync(fd);}
    };
