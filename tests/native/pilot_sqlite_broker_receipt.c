@@ -171,14 +171,22 @@ int main(void) {
     inspect(db,2);CHECK(r.deletions==0);close_exact(&r,&v,db);
 
 #endif
-    db=open_exact(&r,&v,true);inspect(db,2);close_exact(&r,&v,db);
+    db=open_exact(&r,&v,true);
+#ifdef AKC_NATIVE_INSPECT_ONLY
+    inspect(db,1);
+#else
+    inspect(db,2);
+#endif
+    close_exact(&r,&v,db);
     CHECK(gate_access(&r.scope,rollback_name)==0);
     CHECK(acquire(&r.scope,top,r.lock_inode,&r.lease)==lease_held);
     CHECK(fstatat(dir,main_name,&after,AT_SYMLINK_NOFOLLOW)==0&&after.st_ino==original.st_ino);
     CHECK(unlinkat(dir,main_name,0)==0&&unlinkat(dir,lease_name,0)==0);
     close_checked(r.lease);close_checked(dir);CHECK(unlinkat(top,"pilot",AT_REMOVEDIR)==0);
     close_checked(top);CHECK(rmdir(temp)==0);
-#ifdef AKC_COMBINED_BRIDGE
+#if defined(AKC_NATIVE_INSPECT_ONLY)
+    puts("PASS authenticated canonical native inspect returns exact read-only durable snapshot; signed mutation denied (fixture only)");
+#elif defined(AKC_COMBINED_BRIDGE)
     puts("PASS native peer + signed fixed handoff + descriptor-relative durable receipt replay (synthetic only)");
 #else
     puts("PASS pinned SQLite snapshot+receipt atomic rollback, lost reply and exact replay (synthetic fixture only)");

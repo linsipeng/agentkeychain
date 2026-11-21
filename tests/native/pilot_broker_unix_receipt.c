@@ -53,9 +53,44 @@ static void hex(const unsigned char *in,size_t n,char *out) {
     const char alphabet[]="0123456789abcdef";
     for(size_t i=0;i<n;i++){out[i*2]=alphabet[in[i]>>4];out[i*2+1]=alphabet[in[i]&15];}out[n*2]=0;
 }
+#ifdef AKC_NATIVE_INSPECT_ONLY
+#define INSPECT_WIRE "{\"version\":1,\"op\":\"inspect\",\"profileDigest\":\"" PROFILE "\"}"
+#define SEED_WIRE "{\"version\":1,\"op\":\"seed-pending\",\"profileDigest\":\"" PROFILE "\",\"record\":" SEED_FRAME "}"
+#define WIRE_SNAPSHOT "{\"version\":1,\"kind\":\"snapshot\",\"receipt\":" SEED_RECEIPT ",\"record\":" SEED_FRAME "}"
+
+static size_t format_response(struct envelope *e,const char *wire){
+    unsigned char digest[32];unsigned n=0;
+    CHECK(EVP_Digest(e->request,e->request_len,digest,&n,EVP_sha256(),NULL)==1&&n==sizeof digest);
+    char correlation[65];hex(digest,sizeof digest,correlation);
+    const int count=snprintf((char *)e->response,sizeof e->response,
+        "{\"domain\":\"akc-fixture-native-inspect-response-v1\",\"requestDigest\":\"%s\",\"wire\":%s}",correlation,wire);
+    CHECK(count>0&&(size_t)count<sizeof e->response);return (size_t)count;
+}
+static void inspect_committed_wire(struct run r,char wire[768]){
+    sqlite3_vfs v;sqlite3 *db=open_exact(&r,&v,true);
+    CHECK(sqlite3_db_readonly(db,"main")==1);
+    inspect(db,1);
+    sqlite3_stmt *q=NULL;
+    CHECK(sqlite3_prepare_v2(db,"SELECT receipt.canonical,snapshot.frame FROM snapshot JOIN receipt "
+        "ON snapshot.operation=receipt.operation AND snapshot.generation=receipt.generation WHERE snapshot.id=1",-1,&q,NULL)==SQLITE_OK);
+    CHECK(sqlite3_step(q)==SQLITE_ROW&&sqlite3_column_type(q,0)==SQLITE_TEXT&&sqlite3_column_type(q,1)==SQLITE_TEXT);
+    const int n=snprintf(wire,768,"{\"version\":1,\"kind\":\"snapshot\",\"receipt\":%s,\"record\":%s}",
+        sqlite3_column_text(q,0),sqlite3_column_text(q,1));
+    CHECK(n>0&&n<768&&sqlite3_step(q)==SQLITE_DONE&&sqlite3_finalize(q)==SQLITE_OK);
+    CHECK(!strcmp(wire,WIRE_SNAPSHOT));
+    close_exact(&r,&v,db);CHECK(gate_access(&r.scope,rollback_name)==0);
+}
+#endif
 static struct envelope exact_envelope(const unsigned char *nonce,int attempt) {
     struct envelope e;
     char id[NONCE_BYTES*2+1];hex(nonce,NONCE_BYTES,id);
+#ifdef AKC_NATIVE_INSPECT_ONLY
+    const int len=snprintf((char *)e.request,sizeof e.request,
+        "{\"domain\":\"akc-fixture-native-inspect-request-v1\",\"run\":\"%s\",\"wire\":%s}",id,
+        attempt==1?INSPECT_WIRE:SEED_WIRE);
+    CHECK(len>0&&(size_t)len<sizeof e.request);e.request_len=(size_t)len;
+    e.response_len=format_response(&e,WIRE_SNAPSHOT);return e;
+#else
     const int len=snprintf((char *)e.request,sizeof e.request,
         "{\"domain\":\"akc-fixture-handoff-request-v1\",\"run\":\"%s\",\"attempt\":%d,\"operation\":\"%s\",\"frame\":%s}",
         id,attempt,ADVANCE,ADVANCE_FRAME);
@@ -67,6 +102,7 @@ static struct envelope exact_envelope(const unsigned char *nonce,int attempt) {
         "{\"domain\":\"akc-fixture-handoff-response-v1\",\"run\":\"%s\",\"requestDigest\":\"%s\",\"receipt\":%s}",
         id,correlation,ADVANCE_RECEIPT);
     CHECK(count>0&&(size_t)count<sizeof e.response);e.response_len=(size_t)count;return e;
+#endif
 }
 static void receive(int fd,const unsigned char *expected,size_t len,const unsigned char public[32]) {
     unsigned char bytes[1024],sig[SIGNATURE_SIZE],extra;
@@ -80,6 +116,10 @@ static void transmit(int fd,unsigned char *expected,size_t len,EVP_PKEY *key) {
 static bool combined_bridge(struct run r) {
     /* Keep standalone test code compiled without unused functions. */
     (void)kill_at;(void)conflict;
+#ifdef AKC_NATIVE_INSPECT_ONLY
+    // Local readback is still exercised where the runner lacks AF_UNIX.
+    char initial_wire[768];inspect_committed_wire(r,initial_wire);
+#endif
     CHECK(getgid()==getegid()&&signal(SIGPIPE,SIG_IGN)!=SIG_ERR);
     const int listen_fd=socket(AF_UNIX,SOCK_STREAM,0);
     if(listen_fd<0&&(errno==EPERM||errno==EACCES||errno==EAFNOSUPPORT)){
@@ -135,7 +175,11 @@ static bool combined_bridge(struct run r) {
             const int client_fd=socket(AF_UNIX,SOCK_STREAM,0);CHECK(client_fd>=0);cloexec(client_fd);
             CHECK(connect(client_fd,(const struct sockaddr *)&addr,sizeof addr)==0&&exact_peer(client_fd,parent,uid,gid));
             io_timeout(client_fd);transmit(client_fd,e.request,e.request_len,client);
-            receive(client_fd,e.response,e.response_len,server_public);
+#ifdef AKC_NATIVE_INSPECT_ONLY
+            if(attempt==2){unsigned char denied_byte;CHECK(read(client_fd,&denied_byte,1)==0);}
+            else
+#endif
+                receive(client_fd,e.response,e.response_len,server_public);
             EVP_PKEY_free(client);close_checked(client_fd);_exit(0);
         }
         close_checked(bootstrap[1]);
@@ -143,10 +187,22 @@ static bool combined_bridge(struct run r) {
         const int fd=accept_ready(listen_fd);
         CHECK(exact_peer(fd,child,uid,gid));io_timeout(fd);
         receive(fd,e.request,e.request_len,client_public);
+#ifdef AKC_NATIVE_INSPECT_ONLY
+        // Both requests are signed by the correct child. The valid write
+        // operation still closes with no response and never opens its DB.
+        const struct envelope allowed=exact_envelope(nonce,1);
+        if(allowed.request_len!=e.request_len||memcmp(allowed.request,e.request,e.request_len)){
+            CHECK(attempt==2);close_checked(fd);finish(child);continue;
+        }
+        CHECK(attempt==1);
+        char committed_wire[768];inspect_committed_wire(r,committed_wire);
+        e.response_len=format_response(&e,committed_wire);
+#else
         sqlite3_vfs v;sqlite3 *db=open_exact(&r,&v,false);inspect(db,attempt);
         CHECK(advance(db,ADVANCE,ADVANCE_FRAME,ADVANCE_RECEIPT)==(attempt==1?written:replayed));
         inspect(db,2);close_exact(&r,&v,db);
         CHECK(gate_access(&r.scope,rollback_name)==0);
+#endif
         transmit(fd,e.response,e.response_len,server);
         close_checked(fd);finish(child);
     }
