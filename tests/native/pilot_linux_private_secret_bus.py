@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import re
+import secrets
 import signal
 import socket
 import stat
@@ -24,7 +25,53 @@ BUS_CONFIG = """<busconfig>
 <allow user="{}"/><allow own="org.freedesktop.secrets"/>
 <allow send_destination="org.freedesktop.DBus"/>
 <allow receive_sender="org.freedesktop.DBus"/>
+{}
 </policy></busconfig>"""
+
+# The admin policy may match the well-known name owned by the unique recipient;
+# the actual call never resolves by well-known name or uses activation.
+SESSION_POLICY = """
+<allow send_destination="org.freedesktop.secrets" send_interface="org.freedesktop.Secret.Service"
+       send_member="OpenSession" send_path="/org/freedesktop/secrets" send_type="method_call"/>
+<allow receive_sender="org.freedesktop.secrets" receive_type="method_return" receive_requested_reply="true"/>
+<allow receive_sender="org.freedesktop.secrets" receive_type="error" receive_requested_reply="true"/>
+"""
+ALGORITHM = "dh-ietf1024-sha256-aes128-cbc-pkcs7"
+# RFC 2409 Section 6.2, 1024-bit MODP group. Protocol compatibility test only;
+# not a general encryption recommendation.
+MODP = int(
+    "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E08"
+    "8A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B"
+    "302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42"
+    "E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B"
+    "1FE649286651ECE65381FFFFFFFFFFFFFFFF", 16
+)
+SUBGROUP = (MODP - 1) // 2
+
+
+def validate_session_reply(reply):
+    result = reply.get_child_value(0).get_variant()
+    need(result.get_type_string() == "ay")
+    size = result.n_children()
+    need(0 < size <= 128)
+    peer = int.from_bytes(bytes(result.unpack()), "big")
+    need(2 <= peer <= MODP - 2 and pow(peer, SUBGROUP, MODP) == 1)
+    path = reply.get_child_value(1).get_string()
+    need(re.fullmatch(r"/org/freedesktop/secrets/session/s[1-9][0-9]{0,9}", path))
+    return peer
+
+
+def verify_encrypted_negotiation(bus, unique_owner):
+    private = 2 + secrets.randbelow(SUBGROUP - 2)
+    public = pow(2, private, MODP)
+    wire = public.to_bytes((public.bit_length() + 7) // 8, "big")
+    reply = bus.call_sync(unique_owner, "/org/freedesktop/secrets", "org.freedesktop.Secret.Service",
+                         "OpenSession", GLib.Variant("(sv)", (ALGORITHM, GLib.Variant("ay", wire))),
+                         GLib.VariantType.new("(vo)"), Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+    peer = validate_session_reply(reply)
+    need(2 <= pow(peer, private, MODP) <= MODP - 2)
+    # Only negotiation is tested. No key is serialized, no secret is
+    # transferred, and disconnect cleans up this connection-bound session.
 
 
 def need(condition):
@@ -68,7 +115,7 @@ def interrupted(_signum, _frame):
     raise RuntimeError("interrupted")
 
 
-def verify_private_provider(provider_path, staged_provider, library_dir, staged_libraries):
+def verify_private_provider(provider_path, staged_provider, library_dir, staged_libraries, encrypted=False):
     global phase
     need(sys.platform == "linux" and os.getuid() == os.geteuid() != 0)
     os.umask(0o077)
@@ -95,7 +142,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
             endpoint = root / "broker"
             phase = "broker"
             conf = root / "bus.xml"
-            conf.write_text(BUS_CONFIG.format(endpoint, os.getuid()), encoding="ascii")
+            conf.write_text(BUS_CONFIG.format(endpoint, os.getuid(), SESSION_POLICY if encrypted else ""), encoding="ascii")
             def start(argv, environment):
                 child = subprocess.Popen(argv, env=environment, cwd=root, stdin=subprocess.DEVNULL,
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -162,6 +209,24 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                 phase = "provider-owner-final"
                 owned_image(broker, BROKER)
                 need(call(conn, "GetNameOwner", SERVICE, "(s)") == owner)
+                if encrypted:
+                    phase = "encrypted-session"
+                    verify_encrypted_negotiation(conn, owner)
+                    phase = "encrypted-session-capability-denial"
+                    try:
+                        conn.call_sync(owner, "/org/freedesktop/secrets", "org.freedesktop.DBus.Peer",
+                                       "Ping", GLib.Variant("()", ()), GLib.VariantType.new("()"),
+                                       Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+                    except GLib.Error as error:
+                        need(Gio.DBusError.get_remote_error(error) == DBUS + ".Error.AccessDenied")
+                    else:
+                        raise RuntimeError("unexpected provider capability")
+                    phase = "encrypted-session-owner"
+                    owned_image(provider, provider_path, staged_provider)
+                    owned_image(broker, BROKER)
+                    need(call(conn, "GetNameOwner", SERVICE, "(s)") == owner)
+                    credentials = call(conn, "GetConnectionCredentials", owner, "(a{sv})")
+                    need(credentials.get("UnixUserID") == os.getuid() and credentials.get("ProcessID") == provider.pid)
             finally:
                 signal.alarm(0)
                 try:

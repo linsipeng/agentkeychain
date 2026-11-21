@@ -1,4 +1,4 @@
-name: Disposable Ubuntu provider archive and peer
+name: Disposable Ubuntu provider negotiation
 
 on:
   pull_request:
@@ -28,7 +28,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Verify exact packages and isolated provider identity without installing them
+      - name: Verify pinned private provider and negotiate without secret transfer
         timeout-minutes: 4
         shell: bash
         run: |
@@ -36,5 +36,5 @@ jobs:
           umask 077
           test "$GITHUB_ACTIONS" = true && test "$RUNNER_ENVIRONMENT" = github-hosted
           /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
-            AKC_UBUNTU_PROVIDER_STAGE=private-peer-v1 /usr/bin/timeout 220s /usr/bin/python3 -I \
+            AKC_UBUNTU_PROVIDER_STAGE=encrypted-session-v1 /usr/bin/timeout 220s /usr/bin/python3 -I \
             tests/native/pilot_linux_ubuntu_provider_stage.py
