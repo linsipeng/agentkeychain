@@ -12,7 +12,7 @@ import { approvalRepository } from './approval-repository.ts';
 import { validateSigned } from '../shared/contracts.ts';
 import { ApiError, boundedBody, digest, errorResponse, verify } from '../shared/contracts.ts';
 import { base64, exactFields, identifier } from '../../src/cloud/protocol.ts';
-import { canonicalGrant, challengeProof, enrollmentProof, enrollmentReconcileProof, enrollmentRetireProof } from '../shared/device-protocol.ts';
+import { canonicalGrant, challengeProof, enrollmentProof, enrollmentReconcileProof, enrollmentReplaceProof, enrollmentRetireProof } from '../shared/device-protocol.ts';
 import { deviceRepository } from './device-repository.ts';
 import { browserRepository, type SessionRow } from './browser-repository.ts';
 import { random } from './webauthn.ts';
@@ -55,7 +55,7 @@ export async function deviceFetch(request: Request, env: BrowserBindings) {
     let auditFailure = false;
     try {
         const url = new URL(request.url), route = url.pathname.slice('/v1/devices/'.length);
-        if (!['roster-put','roster-fetch','roster-pending','export-request','export-consume','resume', 'enrollment-reconcile', 'enrollment-retire', 'trust-bundle', 'trust-bundle-get', 'enrollment-grant', 'pairing-detail', 'pairing-confirm', 'recovery-target', 'recovery-target-challenge', 'recovery-refresh', 'recovery-target-commit','recovery-target-readback', 'recovery-confirm', 'recovery-target-evidence', 'recovery-target-trust', 'recovery-target-status', 'recovery-target-delivery', 'recovery-target-release', 'recovery-target-finish', 'recovery-cancel-confirmation', 'authorize', 'status', 'challenge', 'token', 'enroll', 'key-packages', 'approvals', 'recovery-keys', 'recovery-package', 'recovery-cancel', 'recovery-notifications'].includes(route))
+        if (!['roster-put','roster-fetch','roster-pending','export-request','export-consume','resume', 'enrollment-reconcile', 'enrollment-retire', 'enrollment-replace', 'trust-bundle', 'trust-bundle-get', 'enrollment-grant', 'pairing-detail', 'pairing-confirm', 'recovery-target', 'recovery-target-challenge', 'recovery-refresh', 'recovery-target-commit','recovery-target-readback', 'recovery-confirm', 'recovery-target-evidence', 'recovery-target-trust', 'recovery-target-status', 'recovery-target-delivery', 'recovery-target-release', 'recovery-target-finish', 'recovery-cancel-confirmation', 'authorize', 'status', 'challenge', 'token', 'enroll', 'key-packages', 'approvals', 'recovery-keys', 'recovery-package', 'recovery-cancel', 'recovery-notifications'].includes(route))
             throw new ApiError('not_found');
         if (url.search)
             throw new ApiError('invalid_request');
@@ -86,7 +86,7 @@ export async function deviceFetch(request: Request, env: BrowserBindings) {
         if (!await browserRepository(env.MAIN).rate('source', await digest('device-source\0' + sources[0]), 120))
             return Response.json({ error: { code: 'rate_limited' } }, { status: 429, headers: { 'cache-control': 'no-store' } });
         auditFailure = true;
-        if (route !== 'enrollment-reconcile' && route !== 'enrollment-retire')
+        if (route !== 'enrollment-reconcile' && route !== 'enrollment-retire' && route !== 'enrollment-replace')
             await repo.cleanup();
         let b: Record<string, unknown>;
         try { b = raw ? JSON.parse(raw) as Record<string, unknown> : {}; }
@@ -161,6 +161,35 @@ export async function deviceFetch(request: Request, env: BrowserBindings) {
                 result = { state: 'retired_unapproved', requestId: b.requestId, deviceId: b.deviceId };
             }
             else result = { state: r.classification, requestId: b.requestId, deviceId: b.deviceId };
+        }
+        else if (route === 'enrollment-replace') {
+            exactFields(b, ['requestId', 'deviceId', 'timestamp', 'signature', 'codeDigest', 'verificationDigest']);
+            identifier(b.requestId); identifier(b.deviceId); base64(b.signature, 64, 64);
+            if (!Number.isSafeInteger(b.timestamp) || Math.abs(Math.floor(Date.now() / 1000) - (b.timestamp as number)) > 120)
+                throw new ApiError('unauthorized');
+            if (typeof b.codeDigest !== 'string' || !/^[a-f0-9]{64}$/.test(b.codeDigest) ||
+                typeof b.verificationDigest !== 'string' || !/^[a-f0-9]{64}$/.test(b.verificationDigest) || b.codeDigest === b.verificationDigest)
+                throw new ApiError('invalid_request');
+            const r = await env.MAIN.prepare('SELECT signing_key,wrapping_key FROM device_requests WHERE id=? AND device_id=?')
+                .bind(b.requestId, b.deviceId).first<{ signing_key: string; wrapping_key: string }>();
+            if (!r || !await verify(r.signing_key,b.signature as string,enrollmentReplaceProof(b.requestId,b.deviceId,r.signing_key,r.wrapping_key,b.timestamp as number,b.codeDigest,b.verificationDigest)))
+                throw new ApiError('unauthorized');
+            const id = random(), deviceId = random(), phrase = Array.from(crypto.getRandomValues(new Uint16Array(3)), v => wordlist[v & 2047]).join(' ');
+            const [,, readback] = await env.MAIN.batch<{requestId:string;deviceId:string;codeDigest:string;verificationDigest:string;phrase:string;expiresAt:number}>([
+                env.MAIN.prepare(`INSERT INTO device_requests(id,code_digest,verification_digest,phrase,device_id,signing_key,wrapping_key,platform,expires_at)
+                    SELECT ?,?,?,?,?,r.signing_key,r.wrapping_key,r.platform,unixepoch()+600
+                    FROM enrollment_retirements e JOIN device_requests r ON r.id=e.request_id AND r.state='denied'
+                    WHERE e.request_id=? AND r.device_id=? AND NOT EXISTS(SELECT 1 FROM enrollment_successors WHERE predecessor_id=e.request_id)`)
+                    .bind(id,b.codeDigest,b.verificationDigest,phrase,deviceId,b.requestId,b.deviceId),
+                env.MAIN.prepare('INSERT INTO enrollment_successors(predecessor_id,successor_id) SELECT ?,id FROM device_requests WHERE id=? AND changes()=1').bind(b.requestId,id),
+                env.MAIN.prepare(`SELECT r.id requestId,r.device_id deviceId,r.code_digest codeDigest,r.verification_digest verificationDigest,r.phrase,r.expires_at expiresAt
+                    FROM enrollment_successors s JOIN device_requests r ON r.id=s.successor_id WHERE s.predecessor_id=?`).bind(b.requestId),
+            ]);
+            const linked = readback?.results[0];
+            if (!linked) throw new ApiError('not_found');
+            if (linked.codeDigest !== b.codeDigest || linked.verificationDigest !== b.verificationDigest)
+                throw new ApiError('idempotency_conflict');
+            result = { requestId:linked.requestId,deviceId:linked.deviceId,phrase:linked.phrase,expiresAt:linked.expiresAt,interval:5 };
         }
         else if (route === 'trust-bundle' || route === 'trust-bundle-get' || route === 'enrollment-grant') {
             exactFields(b, route === 'trust-bundle' ? ['requestId','sealed'] : []);

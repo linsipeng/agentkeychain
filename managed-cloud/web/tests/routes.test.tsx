@@ -45,7 +45,7 @@ beforeEach(() => {
             return Response.json({ error: {} }, { status: 503 });
         if (route === 'session')
             return session ? Response.json({ authenticated: true }) : Response.json({error:{}},{status:401});
-        if (route === 'bootstrap')
+        if (route === 'bootstrap/v2')
             return Response.json({ authenticated: false });
         if (route === 'logout') {
             session = false;

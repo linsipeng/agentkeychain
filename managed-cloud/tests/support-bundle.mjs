@@ -59,7 +59,7 @@ try{
  const {createHmac}=await import('node:crypto');const identity=createHmac('sha256',Buffer.from(apiKeys.AUTH_LOOKUP_KEY,'base64url')).update('email\0'+email).digest('base64url');
  await db.prepare('INSERT INTO invitations(digest,email_lookup,encrypted_email,expires_at) VALUES(?,?,?,unixepoch()+600)').bind(sha(invitation),identity,'synthetic-unused-display').run();
  const fetch=(path,init={})=>mf.dispatchFetch(origin+'/v1/auth/'+path,{...init,cf:{colo:'SJC'},headers:{'cf-connecting-ip':'192.0.2.1',...init.headers}});
- let headers;async function bootstrap(){const r=await fetch('bootstrap');assert.equal(r.status,200);const cookie=r.headers.getSetCookie().map(v=>v.split(';')[0]).join('; ');headers={origin,cookie,'x-csrf-token':/__Host-akc_csrf=([^;]+)/.exec(cookie)[1],'content-type':'application/json','cf-connecting-ip':'192.0.2.1'};}
+ let headers;async function bootstrap(){const r=await fetch('bootstrap');assert.equal(r.status,200);const cookie=r.headers.getSetCookie().map(v=>v.split(';')[0]).join('; ');headers={origin,cookie,'x-csrf-token':/__Host-akc_(?:boot_|recovery_)?csrf=([^;]+)/.exec(cookie)[1],'content-type':'application/json','cf-connecting-ip':'192.0.2.1'};}
  const post=(route,body)=>fetch(route,{method:'POST',headers,body:JSON.stringify(body)});
  const mailbox=await mf.getWorker('synthetic-mailbox');
  await bootstrap();let requested=await post('email/request',{email,purpose:'invitation',context:invitation});assert.equal(requested.status,200);assert.deepEqual(await requested.json(),{accepted:true,retryAfter:60});
@@ -101,7 +101,7 @@ try{
  assert.equal((await post('email/request',{email,purpose:'recovery',context:eligibleRef})).status,200);
  const eligible=await mailbox.submit(email,'recovery/verify',{requestRef:eligibleRef},headers);assert.equal(eligible.status,200);assert.deepEqual(await eligible.clone().json(),{accepted:true});
  assert.equal((await db.prepare('SELECT account_id FROM recovery_sessions WHERE case_id=?').bind(eligibleTarget.id).first()).account_id,'a');
- const cookie=eligible.headers.getSetCookie().map(v=>v.split(';')[0]).join('; ');headers={...headers,cookie,'x-csrf-token':/__Host-akc_csrf=([^;]+)/.exec(cookie)[1]};
+ const cookie=eligible.headers.getSetCookie().map(v=>v.split(';')[0]).join('; ');headers={...headers,cookie,'x-csrf-token':/__Host-akc_(?:boot_|recovery_)?csrf=([^;]+)/.exec(cookie)[1]};
  const started=await post('recovery/start',{});assert.equal(started.status,200);assert.equal((await started.json()).state,'prepared');
  assert.equal((await db.prepare('SELECT count(*) n FROM recovery_authorizations WHERE case_id=?').bind(eligibleTarget.id).first()).n,1);
  const evidence={mode:'device',confirmerId:'d',signature:await sign(JSON.stringify(['AgentKeychain-recovery-confirm-v1',canonical])),proof:null};

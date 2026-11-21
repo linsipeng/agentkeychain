@@ -1,3 +1,4 @@
+import type {CloudFetch} from '../src/cloud/http.ts';
 import {URL} from 'node:url';
 import {test,expect} from 'bun:test';
 import {Database} from 'bun:sqlite';
@@ -81,7 +82,7 @@ test('first device keeps the same request, keys and roster when publish fails an
   const {enrollmentReconcileProof}=await import('../managed-cloud/shared/device-protocol.ts');
   for(const [state,expected] of [
    ['expired_approved','cloud_enrollment_expired_approved_requires_reapproval'],
-   ['expired_unapproved','cloud_enrollment_expired_unapproved_requires_retirement'],
+
    ['unknown','cloud_enrollment_expired_requires_reconcile'],
    ['mismatched','cloud_enrollment_expired_requires_reconcile'],
    ['missing','cloud_enrollment_expired_requires_reconcile'],
@@ -99,6 +100,42 @@ test('first device keeps the same request, keys and roster when publish fails an
    expect(paths).toEqual(['/v1/devices/enrollment-reconcile']);expect(opened).toEqual([]);
   }
   expect(store.get('state','pending')).toEqual({...authorization,deadline:0});
+  expect(store.get('state','pending-keys')).toEqual(savedKeys);
+  const {enrollmentReplaceProof,enrollmentRetireProof}=await import('../managed-cloud/shared/device-protocol.ts');
+  const {digest}=await import('../managed-cloud/shared/contracts.ts');
+  let retired=false,successorCalls=0;const proposals:string[]=[];
+  const nextRequest='r'.repeat(43),nextDevice='d'.repeat(43),expiresAt=Math.floor(Date.now()/1000)+500;
+  const restarting={policy,secure,network:async (url:Parameters<CloudFetch>[0],init:Parameters<CloudFetch>[1])=>{
+   const body=JSON.parse(String(init.body));
+   switch(new URL(url).pathname){
+    case '/v1/devices/enrollment-reconcile':return Response.json({state:retired?'retired_unapproved':'expired_unapproved',requestId:'req',deviceId:'d'});
+    case '/v1/devices/enrollment-retire':
+     expect(sodium.crypto_sign_verify_detached(Buffer.from(body.signature,'base64'),enrollmentRetireProof('req','d',b64(keys.signingPublic),b64(keys.wrappingPublic),body.timestamp),keys.signingPublic)).toBe(true);
+     retired=true;return Response.json({state:'retired_unapproved',requestId:'req',deviceId:'d'});
+    case '/v1/devices/enrollment-replace':{
+     const intent=store.get<{deviceCode:string;verificationCode:string}>('state','pending-successor')!;
+     expect(body.deviceCode).toBeUndefined();expect(body.verificationCode).toBeUndefined();
+     expect(body.codeDigest).toBe(await digest(intent.deviceCode));expect(body.verificationDigest).toBe(await digest(intent.verificationCode));
+     expect(sodium.crypto_sign_verify_detached(Buffer.from(body.signature,'base64'),enrollmentReplaceProof('req','d',b64(keys.signingPublic),b64(keys.wrappingPublic),body.timestamp,body.codeDigest,body.verificationDigest),keys.signingPublic)).toBe(true);
+     proposals.push(body.codeDigest+body.verificationDigest);
+     if(++successorCalls===1)throw new Error('synthetic lost response');
+     return Response.json({requestId:nextRequest,deviceId:nextDevice,expiresAt,phrase:'red green blue',interval:5});
+    }
+    case '/v1/devices/resume':
+     expect(body.requestId).toBe(nextRequest);expect(body.deviceId).toBe(nextDevice);
+     return Response.json({state:'pending'});
+    default:throw new Error('unexpected network');
+   }
+  }};
+  const stopBeforeBrowser={...ui,open:async(url:string)=>{opened.push(url);throw new Error('synthetic stop at browser boundary');}};
+  await expect(loginCloud(db,stopBeforeBrowser,restarting)).rejects.toThrow('cloud_network_unavailable');
+  expect(store.get('state','pending')).toEqual({...authorization,deadline:0});expect(opened).toEqual([]);
+  const intent=store.get<{deviceCode:string;verificationCode:string}>('state','pending-successor')!;
+  await expect(loginCloud(db,stopBeforeBrowser,restarting)).rejects.toThrow('synthetic stop at browser boundary');
+  expect(proposals).toHaveLength(2);expect(proposals[1]).toBe(proposals[0]);
+  expect(store.get('state','pending-successor')).toBeNull();
+  expect(store.get('state','pending')).toMatchObject({requestId:nextRequest,deviceId:nextDevice,deviceCode:intent.deviceCode});
+  expect(opened).toEqual(['https://local.invalid/app/devices/add?code='+intent.verificationCode]);
   expect(store.get('state','pending-keys')).toEqual(savedKeys);
  }finally{store.destroy();db.close();}
 });

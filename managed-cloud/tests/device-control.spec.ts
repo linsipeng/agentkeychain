@@ -21,7 +21,7 @@ test('proof binds normalized query, timestamp and session identifier', () => {
 import { deviceFetch } from '../api-worker/device-http.ts';
 import { deviceRepository } from '../api-worker/device-repository.ts';
 import { digest, verify } from '../shared/contracts.ts';
-import { enrollmentProof, enrollmentReconcileProof, enrollmentRetireProof, actionDigest, challengeProof } from '../shared/device-protocol.ts';
+import { enrollmentProof, enrollmentReconcileProof, enrollmentReplaceProof, enrollmentRetireProof, actionDigest, challengeProof } from '../shared/device-protocol.ts';
 import { authenticate } from '../api-worker/auth.ts';
 import type { SessionRow } from '../api-worker/browser-repository.ts';
 const origin = 'https://local.invalid';
@@ -428,6 +428,34 @@ test('signed retirement is terminal, idempotent and does not allocate a successo
  expect(await db().prepare('SELECT state FROM device_requests WHERE id=?').bind(target.requestId).first('state')).toBe('denied');
  await deviceRepository(db()).cleanup();
  expect(await db().prepare('SELECT state FROM device_requests WHERE id=?').bind(target.requestId).first('state')).toBe('denied');
+});
+
+test('retired enrollment allocates exactly one fresh successor across response loss and concurrency',async()=>{
+ const accountSession=await account(),approved=await enroll(accountSession),keys=await identity(),timestamp=Math.floor(Date.now()/1000);
+ const requestId=crypto.randomUUID(),deviceId=crypto.randomUUID();
+ await db().prepare("INSERT INTO device_requests(id,code_digest,verification_digest,phrase,device_id,signing_key,wrapping_key,platform,expires_at) VALUES(?,?,?,'synthetic fixture',?,?,?,'linux',unixepoch()-1)")
+  .bind(requestId,await digest('old-code'),await digest('old-verification'),deviceId,keys.signingKey,keys.wrappingKey).run();
+ const body=async (ids:{requestId:string;deviceId:string}={requestId,deviceId},who=keys,code='next-code')=>{
+  const codeDigest=await digest(code),verificationDigest=await digest('next-verification');
+  return {requestId:ids.requestId,deviceId:ids.deviceId,timestamp,codeDigest,verificationDigest,
+   signature:await who.sign(enrollmentReplaceProof(ids.requestId,ids.deviceId,who.signingKey,who.wrappingKey,timestamp,codeDigest,verificationDigest))};
+ };
+ expect((await api('enrollment-replace',await body())).status).toBe(404);
+ expect((await api('enrollment-replace',await body(approved,approved))).status).toBe(404);
+ expect((await api('enrollment-retire',{requestId,deviceId,timestamp,signature:await keys.sign(enrollmentRetireProof(requestId,deviceId,keys.signingKey,keys.wrappingKey,timestamp))})).status).toBe(200);
+ const proposal=await body();
+ const responses=await Promise.all([api('enrollment-replace',proposal),api('enrollment-replace',proposal)]);
+ expect(responses.map(r=>r.status)).toEqual([200,200]);
+ const receipt=await responses[1]!.json() as {requestId:string;deviceId:string;phrase:string;expiresAt:number;interval:number};
+ expect(receipt.requestId).not.toBe(requestId);expect(receipt.deviceId).not.toBe(deviceId);
+ expect(await (await api('enrollment-replace',proposal)).json()).toEqual(receipt);
+ expect((await api('enrollment-replace',await body({requestId,deviceId},keys,'other-code'))).status).toBe(409);
+ const row=await db().prepare('SELECT signing_key,wrapping_key,state,account_id FROM device_requests WHERE id=?').bind(receipt.requestId).first();
+ expect(row).toEqual({signing_key:keys.signingKey,wrapping_key:keys.wrappingKey,state:'pending',account_id:null});
+ expect(await db().prepare('SELECT count(*) n FROM enrollment_successors').first('n')).toBe(1);
+ expect(await db().prepare('SELECT count(*) n FROM device_requests').first('n')).toBe(3);
+ expect(await db().prepare('SELECT count(*) n FROM enrollment_grants').first('n')).toBe(1);
+ expect(await db().prepare('SELECT count(*) n FROM device_sessions').first('n')).toBe(0);
 });
 
 import {rosterRepository} from '../api-worker/roster-repository.ts';

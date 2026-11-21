@@ -93,7 +93,7 @@ try {
     let cookies, csrf;
     const remember = r => {
         cookies = r.headers.getSetCookie().map(c => c.split(';')[0]).join('; ');
-        csrf = /__Host-akc_csrf=([^;]+)/.exec(cookies)[1];
+        csrf = /__Host-akc_(?:boot_|recovery_)?csrf=([^;]+)/.exec(cookies)[1];
     };
     const bootstrap = async () => { const r = await worker.fetch(origin + '/v1/auth/bootstrap'); assert.equal(r.status, 200); remember(r); };
     const post = (route, body) => worker.fetch(origin + '/v1/auth/' + route, { method: 'POST', headers: { origin, cookie: cookies, 'x-csrf-token': csrf, 'content-type': 'application/json' }, body: JSON.stringify(body) });

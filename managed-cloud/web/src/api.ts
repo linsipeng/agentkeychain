@@ -2,6 +2,8 @@ import { assertSafeView } from './safe-view';
 import { QueryClient } from '@tanstack/react-query';
 export const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 0, gcTime: 0, refetchOnWindowFocus: true }, mutations: { retry: false } } });
 const routes = new Set(['email/request', 'bootstrap', 'session', 'authentication/options', 'authentication/verify', 'invitation/detail', 'invitation/verify', 'registration/options', 'registration/verify', 'logout', 'web/query', 'web/pairing', 'web/options', 'web/verify', 'web/execute', 'recovery/verify', 'recovery/start', 'recovery/status', 'recovery/cancel']);
+const bootstrapRoutes = new Set(['email/request', 'invitation/detail', 'invitation/verify', 'registration/options', 'registration/verify', 'authentication/options', 'authentication/verify', 'recovery/verify']);
+const restrictedRoutes = new Set(['recovery/start', 'recovery/status', 'recovery/cancel']);
 export class ApiError extends Error {
     constructor(public status: number) { super('Request failed'); }
 }
@@ -27,8 +29,9 @@ export async function api<T = Record<string, unknown>>(route: string, body?: unk
     } | undefined;
     if (route === 'web/query' && activityReceipt && ['home', 'activity', 'event'].includes(input?.view ?? ''))
         body = { ...input, receipt: activityReceipt };
-    const csrf = document.cookie.split(';').map(x => x.trim()).find(x => x.startsWith('__Host-akc_csrf='))?.slice(16) ?? '';
-    const r = await fetch('/v1/auth/' + route, { method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', headers: body === undefined ? {} : { 'content-type': 'application/json', 'x-csrf-token': csrf }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    const csrfName = bootstrapRoutes.has(route) ? '__Host-akc_boot_csrf=' : restrictedRoutes.has(route) ? '__Host-akc_recovery_csrf=' : '__Host-akc_csrf=';
+    const csrf = document.cookie.split(';').map(x => x.trim()).find(x => x.startsWith(csrfName))?.slice(csrfName.length) ?? '';
+    const r = await fetch('/v1/auth/' + (route === 'bootstrap' ? 'bootstrap/v2' : route), { method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', headers: body === undefined ? {} : { 'content-type': 'application/json', 'x-csrf-token': csrf }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     if (!r.ok) {
         if (r.status === 401 && generation === sessionGeneration) {
             if (route === 'session')

@@ -63,5 +63,7 @@ export const enrollmentReconcileProof = (requestId: string, deviceId: string, si
     JSON.stringify(['AgentKeychain-enrollment-reconcile-v1', requestId, deviceId, signingKey, wrappingKey, timestamp]);
 export const enrollmentRetireProof = (requestId: string, deviceId: string, signingKey: string, wrappingKey: string, timestamp: number) =>
     JSON.stringify(['AgentKeychain-enrollment-retire-v1', requestId, deviceId, signingKey, wrappingKey, timestamp]);
+export const enrollmentReplaceProof = (requestId: string, deviceId: string, signingKey: string, wrappingKey: string, timestamp: number, codeDigest: string, verificationDigest: string) =>
+    JSON.stringify(['AgentKeychain-enrollment-replace-v1', requestId, deviceId, signingKey, wrappingKey, timestamp, codeDigest, verificationDigest]);
 export const actionDigest = (action: string, canonical: string) => digest(JSON.stringify(['AgentKeychain-device-action-v1', action, canonical]));
 export const challengeProof = (id: string, challengeDigest: string, deviceId: string, vaultId: string, expiresAt: number) => JSON.stringify(['AgentKeychain-device-challenge-v1', id, challengeDigest, deviceId, vaultId, expiresAt]);

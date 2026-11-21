@@ -467,7 +467,7 @@ test('public email recovery completes through target-only HTTP delivery without 
     await prepare(substituted,signing);
     const {requestRef}=await prepare(input,targetSigning);
     const auth=createBrowserAuth(db(),config);let cookies='',csrf='';
-    const remember=(r:Response)=>{cookies=r.headers.getSetCookie().map(x=>x.split(';')[0]).join('; ');csrf=/__Host-akc_csrf=([^;]+)/.exec(cookies)![1]!;};
+    const remember=(r:Response)=>{cookies=r.headers.getSetCookie().map(x=>x.split(';')[0]).join('; ');csrf=/__Host-akc_(?:boot_|recovery_)?csrf=([^;]+)/.exec(cookies)![1]!;};
     const call=(route:string,body:unknown)=>auth(new Request(origin+'/v1/auth/'+route,{method:'POST',headers:{origin,cookie:cookies,'x-csrf-token':csrf,'content-type':'application/json'},body:JSON.stringify(body)}));
     await db().batch([db().prepare("INSERT INTO accounts VALUES('other')"),db().prepare("INSERT INTO tenants VALUES('other-tenant')"),db().prepare("INSERT INTO memberships VALUES('other-tenant','other',1)"),db().prepare("INSERT INTO vaults VALUES('other-tenant','other-vault',0)"),db().prepare("INSERT INTO account_emails VALUES('other','synthetic-unread-email',?,1)").bind(await emailLookup(config,'other@example.invalid'))]);
     remember(await auth(new Request(origin+'/v1/auth/bootstrap')));

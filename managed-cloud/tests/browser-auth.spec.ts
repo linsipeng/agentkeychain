@@ -23,7 +23,7 @@ function remember(response: Response) {
     const values = response.headers.getSetCookie();
     if (values.length) {
         cookies = values.map(v => v.split(';')[0]).join('; ');
-        csrf = /__Host-akc_csrf=([^;]+)/.exec(cookies)![1]!;
+        csrf = /__Host-akc_(?:boot_|recovery_)?csrf=([^;]+)/.exec(cookies)![1]!;
     }
 }
 async function call(path: string, body: unknown = {}, headers: Record<string, string> = {}) {
@@ -44,8 +44,8 @@ test('bootstrap and safe methods never write; cookies have exact policy', async 
     expect(await count('browser_sessions')).toBe(0);
     const response = await handle(new Request(origin + '/v1/auth/bootstrap'));
     const values = response.headers.getSetCookie();
-    expect(values[0]).toMatch(/^__Host-akc_session=.+; Secure; HttpOnly; SameSite=Lax; Path=\/; Max-Age=300$/);
-    expect(values[1]).toMatch(/^__Host-akc_csrf=.+; Secure; SameSite=Strict; Path=\/; Max-Age=300$/);
+    expect(values[0]).toMatch(/^__Host-akc_boot_session=.+; Secure; HttpOnly; SameSite=Lax; Path=\/; Max-Age=300$/);
+    expect(values[1]).toMatch(/^__Host-akc_boot_csrf=.+; Secure; SameSite=Strict; Path=\/; Max-Age=300$/);
     expect(await count('auth_rate_windows')).toBe(0);
 });
 test('safe and invalid routes do not invoke trusted-source RPC', async () => {
@@ -320,7 +320,7 @@ test('cross-account credential, user handle and session cannot authenticate anot
     const actionDigest = await digest('action');
     const step = await (await call('step-up/options', { actionDigest })).json() as Options;
     cookies = second;
-    csrf = /__Host-akc_csrf=([^;]+)/.exec(second)![1]!;
+    csrf = /__Host-akc_(?:boot_|recovery_)?csrf=([^;]+)/.exec(second)![1]!;
     expect((await call('step-up/verify', { challengeId: step.challengeId, actionDigest, response: await a.authenticator.assert(step.options.challenge) })).status).toBe(401);
 });
 test('five failed attempts permanently exhaust challenge', async () => {
@@ -624,7 +624,7 @@ test.each(['missing-source', 'non-string', 'empty', 'space', 'uppercase', 'overs
     const response = outputModes.includes(mode) ? await (async () => {
         expect(bootstrap.status).toBe(200);
         const cookieHeader = bootstrap.headers.getSetCookie().map(v => v.split(';')[0]).join('; ');
-        const csrfValue = /__Host-akc_csrf=([^;]+)/.exec(cookieHeader)![1]!;
+        const csrfValue = /__Host-akc_(?:boot_|recovery_)?csrf=([^;]+)/.exec(cookieHeader)![1]!;
         return browserFetch(new Request(origin + '/v1/auth/invitation/verify', { method: 'POST', headers: { origin, 'content-type': 'application/json', cookie: cookieHeader, 'x-csrf-token': csrfValue }, body: JSON.stringify({ invitation: 'synthetic-invite', email: 'synthetic@example.invalid', proof: 'synthetic-proof' }) }), bindings);
     })() : bootstrap;
     expect(response.status).toBe(503);
@@ -639,7 +639,7 @@ test.each(['membership', 'email', 'passkey', 'bootstrap-used', 'bootstrap-expire
     const { authenticator } = await register();
     await bootstrap();
     const options = await loginOptions(), repo = browserRepository(env.MAIN);
-    const sessionDigest = await digest(/__Host-akc_session=([^;]+)/.exec(cookies)![1]!);
+    const sessionDigest = await digest(/__Host-akc_boot_session=([^;]+)/.exec(cookies)![1]!);
     const challenge = (await repo.attempt(options.challengeId, sessionDigest, 'authentication'))!;
     const stored = (await repo.key(authenticator.id, challenge.identity_hash))!;
     const tenant = (await repo.membership(stored.account_id))!.tenant_id;
@@ -700,7 +700,7 @@ test('wrong-purpose lookup HMAC cannot sign an anonymous bootstrap', async () =>
     const { encode } = await import('../api-worker/webauthn.ts');
     const payload = encode(new TextEncoder().encode(JSON.stringify({ n: random(), e: Math.floor(Date.now() / 1000) + 300, c: await digest(csrf) })));
     const signature = encode(new Uint8Array(await crypto.subtle.sign('HMAC', config.lookupKey, new TextEncoder().encode('bootstrap\0' + payload))));
-    cookies = `__Host-akc_session=p.${payload}.${signature}; __Host-akc_csrf=${csrf}`;
+    cookies = `__Host-akc_boot_session=p.${payload}.${signature}; __Host-akc_boot_csrf=${csrf}`;
     expect((await call('authentication/options', { email })).status).toBe(401);
     expect(await count('webauthn_challenges')).toBe(0);
 });
@@ -809,7 +809,7 @@ test('recovery bootstrap has identical public response for real, unknown and fai
         expect(r.status).toBe(200);
         expect(await r.json()).toEqual({ accepted: true });
         remember(r);
-        expect(cookies).toContain('__Host-akc_session=r.');
+        expect(cookies).toContain('__Host-akc_recovery_session=r.');
         for (const route of ['devices/list','approvals/list','activity/list','authentication/options','step-up/options','registration/options','session/refresh','recovery/release','recovery/finish','invitation/detail']) expect((await call(route, {})).status).toBe(['recovery/release','recovery/finish'].includes(route)?404:401);
         expect((await current()).status).toBe(401);
     }
@@ -843,7 +843,7 @@ test.each(['wrong','expired','used','authenticated'])('invitation detail fails g
 test('expired restricted cookie and invalid origin/CSRF never reach recovery', async () => {
     const token='r.'+random(), anti=random();
     await env.MAIN.prepare('INSERT INTO recovery_sessions(digest,csrf_digest,bootstrap_digest,proof_digest,case_id,request_digest,expires_at) VALUES(?,?,?,?,?,?,unixepoch()-1)').bind(await digest(token),await digest(anti),random(),random(),random(),random()).run();
-    expect((await call('recovery/status',{id:random()},{cookie:`__Host-akc_session=${token}; __Host-akc_csrf=${anti}`,'x-csrf-token':anti})).status).toBe(401);
+    expect((await call('recovery/status',{id:random()},{cookie:`__Host-akc_recovery_session=${token}; __Host-akc_recovery_csrf=${anti}`,'x-csrf-token':anti})).status).toBe(401);
     for(const headers of [{origin:'https://foreign.invalid'},{'x-csrf-token':'wrong'}] as Record<string,string>[]) expect((await call('recovery/verify',{email,proof:random(),target:recoveryTarget()},headers)).status).toBe(401);
     expect(await count('recovery_sessions')).toBe(1);
 });
@@ -955,4 +955,40 @@ test('equal short code values in different recovery contexts do not collide in t
  config.verifyEmail=async()=>true;handle=createBrowserAuth(env.MAIN,config);
  for(let i=0;i<2;i++){await bootstrap();const {requestRef}=await signedRecoveryTarget();expect((await call('recovery/verify',{email:'absent@example.invalid',proof:'123456',requestRef})).status).toBe(200);}
  expect(await count('recovery_sessions')).toBe(2);
+});
+
+test('a late provisional bootstrap response cannot overwrite the authenticated browser cookie pair', async () => {
+    const delayed = await handle(new Request(origin + '/v1/auth/bootstrap/v2'));
+    await register();
+    const authenticatedCookies = cookies, authenticatedCsrf = csrf;
+    remember(delayed);
+    const bootstrapCookies = cookies, bootstrapCsrf = csrf;
+    const jar = new Map<string, string>();
+    for (const pair of [authenticatedCookies, bootstrapCookies].flatMap(values => values.split('; ')))
+        jar.set(pair.split('=')[0]!, pair);
+    cookies = [...jar.values()].join('; ');
+    csrf = authenticatedCsrf;
+    expect(await (await current()).json()).toMatchObject({ authenticated: true });
+    expect((await call('web/query', { view: 'home' })).status).toBe(200);
+    expect((await call('web/query', { view: 'home' }, { 'x-csrf-token': bootstrapCsrf })).status).toBe(401);
+    expect((await call('authentication/options', { email }, { 'x-csrf-token': bootstrapCsrf })).status).toBe(200);
+    expect((await call('authentication/options', { email })).status).toBe(401);
+});
+test('restricted recovery cookie does not replace or authorize the authenticated session', async () => {
+    await register();
+    const authenticated = cookies, authenticatedCsrf = csrf;
+    await bootstrap();
+    const provisional = cookies, provisionalCsrf = csrf;
+    config.verifyEmail = async () => true;
+    const verified = await call('recovery/verify', { email, proof: random(), requestRef: (await signedRecoveryTarget()).requestRef });
+    expect(verified.status).toBe(200);
+    remember(verified);
+    const restricted = cookies, restrictedCsrf = csrf;
+    expect(restricted).not.toContain('__Host-akc_session=');
+    expect((await current()).status).toBe(401);
+    const combined = [authenticated, provisional, restricted].join('; ');
+    expect((await call('web/query', {view:'home'}, {cookie: combined, 'x-csrf-token': authenticatedCsrf})).status).toBe(200);
+    expect((await call('web/query', {view:'home'}, {cookie: combined, 'x-csrf-token': restrictedCsrf})).status).toBe(401);
+    expect((await call('recovery/status', {id: random()}, {cookie: combined, 'x-csrf-token': provisionalCsrf})).status).toBe(401);
+    expect((await handle(new Request(origin + '/v1/auth/session', {headers:{cookie:combined}}))).status).toBe(200);
 });
