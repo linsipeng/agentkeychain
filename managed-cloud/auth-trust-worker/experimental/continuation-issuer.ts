@@ -71,6 +71,7 @@ export function continuationIssuer(db:D1Database,identity:WebAuthnPolicy,policy:
   return {scope,prior,now:checkedAt,head,payloadDigest,readyUntil,expires:Math.min(target.expiresAt,checkedAt+120),intentDigest:await digest(input.target.canonical)};
  }
  return {
+  async assertStageForHandoff(input:StageInput){try{await validate(input);}catch{throw unavailable();}},
   async begin(input:StageInput,browser?:StagedBrowser){
    try{
     const {scope,prior,expires,intentDigest}=await validate(input);

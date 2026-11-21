@@ -12,6 +12,10 @@ declare global {
             TRANSPORT_CUSTODY:import('./continuation-transport.fixture.ts').CustodyContinuationTransport;
             TRANSPORT_CUSTODY_READY:import('./continuation-transport.fixture.ts').CustodyContinuationReadinessTransport;
             TRANSPORT_PINS:string;
+            TRANSPORT_AUTH:import('./auth-continuation-preview.fixture.ts').AuthContinuationPreview;
+            TRANSPORT_AUTH_DB:D1Database;
+            TRANSPORT_AUTH_SCHEMA:D1Migration[];
+            TRANSPORT_GENESIS_FIXTURE_KEY:string;
             TRANSPORT_APPROVAL_FIXTURE_KEY:string;
             TRANSPORT_CHECKPOINT_FIXTURE_KEY:string;
             CUSTODIAN_MIGRATIONS:D1Migration[];

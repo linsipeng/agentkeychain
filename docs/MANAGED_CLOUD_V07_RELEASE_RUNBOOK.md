@@ -49,6 +49,15 @@ transport grants that scope atomically with a successful passkey ceremony;
 the independently hosted browser origin, production transport and policy
 are not wired. Do not reapprove or expose general decision lookup.
 
+The isolated handoff now uses a public random locator in the URL and a
+distinct, short-lived code displayed by the requesting device. The handler
+requires the exact device-signed stage, binds the first valid claim to one
+Auth-origin browser, and limits attempts across browser sessions. A claim
+is not a login and is not the fresh passkey approval. Pending production
+gates include bounded browser-stage allocation, expired-record cleanup,
+the installed CLI's protected prepare/poll flow and native browser recovery.
+Do not reuse QA capabilities or enable a general approval endpoint.
+
 The internal Main proof binds one currently valid approval, exact durable
 package and scoped device request to a nonce and a separately signed Custody
 assertion. The separate experimental post-commit Custody check then

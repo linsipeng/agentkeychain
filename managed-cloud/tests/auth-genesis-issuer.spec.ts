@@ -79,6 +79,7 @@ test('Auth-owned credentials approve one exact first-device decision, not a Main
 });
 
 import {continuationReadback,continuationReadbackIntent} from '../auth-trust-worker/experimental/continuation-readback.ts';
+import {continuationHandoff,handoffCodeDigest,handoffPrepareProof,handoffStageDigest} from '../auth-trust-worker/experimental/continuation-handoff.ts';
 import {continuationApprovalUi} from '../auth-trust-worker/experimental/continuation-ui.ts';
 import {continuationIssuer} from '../auth-trust-worker/experimental/continuation-issuer.ts';
 import {enrollmentFixture,signingFixture} from './synthetic-genesis-approval.ts';
@@ -226,5 +227,38 @@ test('Auth requires a newly verified ceremony for the exact continuation stage a
  expect(await recovered.json()).toEqual(await db.prepare('SELECT canonical,signature FROM auth_continuation_decisions WHERE id=?').bind(opened.id).first());
  expect((await post('complete',body,cookieHeaders)).status).toBe(401);
  expect(await db.prepare('SELECT counter FROM auth_genesis_pins').first('counter')).toBe(2);
+
+ const handoff=continuationHandoff(db,identity.origin,await crypto.subtle.generateKey({name:'HMAC',hash:'SHA-256',length:256},false,['sign']),issuer.assertStageForHandoff);
+ const priorStage=(await make()).input;
+ const routing=random(),pairCode='12345678',codeDigest=await handoffCodeDigest(routing,pairCode),expiresAt=now+70;
+ const signature=await f.device.sign(handoffPrepareProof(routing,codeDigest,await handoffStageDigest(priorStage),expiresAt));
+ const request=(route:string,input:unknown,extra:Record<string,string>={})=>handoff(new Request(identity.origin+'/v1/auth/continuation-handoff/'+route,{
+  method:'POST',headers:{'content-type':'application/json',...(route==='prepare'?{}:{origin:identity.origin}),...extra},body:JSON.stringify(input),
+ }));
+ const preparation={locator:routing,codeDigest,stage:priorStage,expiresAt,signature};
+ expect((await request('prepare',{...preparation,locator:random()})).status).toBe(401);
+ expect((await request('prepare',preparation)).status).toBe(200);
+ expect(await (await request('prepare',preparation)).json()).toEqual({locator:routing});
+ expect(await db.prepare('SELECT attempts FROM auth_continuation_handoffs WHERE locator=?').bind(routing).first('attempts')).toBe(0);
+ expect((await request('claim',{locator:routing,pairCode})).status).toBe(401);
+ const browser=async()=>{
+  const r=await request('browser',{locator:routing});expect(r.status).toBe(200);
+  const h=r.headers.get('set-cookie')!,session=/__Host-akc_handoff=([A-Za-z0-9_-]{43})/.exec(h)![1]!,csrf=/__Host-akc_handoff_csrf=([A-Za-z0-9_-]{43})/.exec(h)![1]!;
+  expect(h).toMatch(/__Host-akc_handoff=[^;]+; Path=\/; Secure; HttpOnly; SameSite=Strict/);
+  expect(h).not.toContain('Domain=');
+  return {cookie:'__Host-akc_handoff='+session+'; __Host-akc_handoff_csrf='+csrf,'x-csrf-token':csrf};
+ };
+ const original=await browser(),competitor=await browser();
+ expect((await request('claim',{locator:routing,pairCode:'00000000'},original)).status).toBe(401);
+ expect((await request('claim',{locator:routing,pairCode},{...original,'x-csrf-token':random()})).status).toBe(401);
+ // Drop the first exact response; refresh browser initialization and retry.
+ expect((await request('claim',{locator:routing,pairCode},original)).status).toBe(200);
+ expect((await request('browser',{locator:routing},original)).status).toBe(200);
+ expect(await (await request('claim',{locator:routing,pairCode},original)).json()).toEqual({stage:priorStage});
+ expect((await request('claim',{locator:routing,pairCode},competitor)).status).toBe(401);
+ expect((await request('browser',{locator:routing})).status).toBe(401);
+ expect(await db.prepare('SELECT attempts FROM auth_continuation_handoffs').first('attempts')).toBe(2);
+ // Claiming the package does not create a generic approval/readback session.
+ expect(await db.prepare('SELECT count(*) n FROM auth_genesis_view_sessions').first('n')).toBe(2);
 
 });

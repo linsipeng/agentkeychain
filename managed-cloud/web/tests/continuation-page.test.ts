@@ -63,3 +63,33 @@ test('explicit review opens native UV only on click, and uncertain submission on
  expect(calls.map(x=>x.url)).toEqual(['/v1/auth/continuation-approval/begin','/v1/auth/continuation-approval/complete','/v1/auth/continuation-receipt']);
  expect(calls[2]).toMatchObject({csrf:token,body:{decisionId:id,oldGrantCanonical:stage.oldGrantCanonical,target:stage.target}});
 });
+
+test('opaque linked handoff uses a separate code and scoped CSRF, without a file upload',async()=>{
+ const shell=continuationApprovalPage(origin,'/* synthetic bundle */')(new Request(origin+'/continuation/approve'));
+ document.body.innerHTML=new DOMParser().parseFromString(await shell.text(),'text/html').body.innerHTML;
+ const locator='c'.repeat(43),csrf='d'.repeat(43),id='e'.repeat(43);
+ location.hash='handoff='+locator;
+ try{
+  document.cookie='__Host-akc_handoff_csrf='+csrf+'; Secure; Path=/';
+  const stage={oldGrantCanonical:'fixture',target:{canonical:'intent',signature:'sig'},roster:{},keyPackage:{}};
+  const calls:{url:string;body:unknown;csrf:string|null}[]=[];
+  vi.stubGlobal('fetch',vi.fn(async(url:string,options:RequestInit)=>{
+   calls.push({url,body:JSON.parse(String(options.body)),csrf:new Headers(options.headers).get('x-csrf-token')});
+   if(url.endsWith('/browser'))return Response.json({ready:true});
+   if(url.endsWith('/claim'))return Response.json({stage});
+   return Response.json({id,options:{challenge:'AQ',rpId:'local.invalid',userVerification:'required',allowCredentials:[{id:'AQ',type:'public-key'}]},
+    display:{purpose:'continue-original-device-key-package',accountId:'a',deviceId:'original-device',vaultId:'v'}});
+  }));
+  startContinuationApprovalPage();
+  expect(fromId('manual').hidden).toBe(true);expect(fromId('handoff').hidden).toBe(false);
+  const input=fromId<HTMLInputElement>('pair-code');input.value='12345678';fromId<HTMLButtonElement>('review').click();
+  await waitFor(()=>expect(fromId<HTMLButtonElement>('approve').disabled).toBe(false));
+  expect(input.value).toBe('');
+  expect(calls).toEqual([
+   {url:'/v1/auth/continuation-handoff/browser',body:{locator},csrf:null},
+   {url:'/v1/auth/continuation-handoff/claim',body:{locator,pairCode:'12345678'},csrf},
+   {url:'/v1/auth/continuation-approval/begin',body:{stage},csrf:null},
+  ]);
+  expect(location.href).not.toContain('12345678');
+ }finally{location.hash='';document.cookie='__Host-akc_handoff_csrf=; Secure; Path=/; Max-Age=0';}
+});

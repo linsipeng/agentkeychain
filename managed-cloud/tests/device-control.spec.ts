@@ -553,7 +553,7 @@ async function expiredGenesisPackageFixture(workerTransport=false){
  const schema=(env as unknown as {GENESIS_PACKAGE_SCHEMA:Parameters<typeof applyD1Migrations>[1]}).GENESIS_PACKAGE_SCHEMA;
  await applyD1Migrations(db(),schema);
  const s=await account(), device=await identity(), authority=await identity(), custody=await identity(), checkpointIdentity=await identity();
- const transportPins=JSON.parse(env.TRANSPORT_PINS) as Record<'main'|'witness'|'approval'|'checkpoint',{keyId:string;publicKey:string}>;
+ const transportPins=JSON.parse(env.TRANSPORT_PINS) as Record<'main'|'witness'|'approval'|'checkpoint'|'genesis',{keyId:string;publicKey:string}>;
  const now=Math.floor(Date.now()/1000),requestId='original-request',deviceId='original-device',expiresAt=now-10;
  const grant={version:1,requestId,deviceId,accountId:s.account_id,tenantId:s.tenant_id,vaultId:'v',keyEpoch:1,issuerDeviceId:null,
   signingKey:device.signingKey,wrappingKey:device.wrappingKey,expiresAt};
@@ -567,7 +567,7 @@ async function expiredGenesisPackageFixture(workerTransport=false){
   db().prepare('INSERT INTO enrollment_grants VALUES(?,?,?,?,?,?,?,NULL)').bind(requestId,s.tenant_id,'v',deviceId,null,1,oldGrantCanonical),
  ]);
  const roster:TrustedDeviceRoster={version:1,revision:1,previousDigest:null,keyEpoch:1,accountId:s.account_id,tenantId:s.tenant_id,vaultId:'v',
-  active:[{deviceId,signingKey:device.signingKey,wrappingKey:device.wrappingKey}],revoked:[],issuer:{kind:'device',id:deviceId},issuedAt:now,expiresAt:now+86400,
+  active:[{deviceId,signingKey:device.signingKey,wrappingKey:device.wrappingKey}],revoked:[],issuer:{kind:'device',id:deviceId},issuedAt:workerTransport?now-30:now,expiresAt:now+86400,
   checkpointKeys:[workerTransport?transportPins.checkpoint:{keyId:'checkpoint',publicKey:checkpointIdentity.signingKey}],recoveryAuthorities:[],recovery:null};
  const canonical=canonicalRoster(roster),signature=await device.sign(ROSTER_DOMAIN+canonical),head=await rosterDigest({canonical,signature});
  await db().prepare('INSERT INTO signed_rosters VALUES(?,?,?,?,?,?,?,?,?)').bind(s.tenant_id,'v',s.account_id,1,head,null,deviceId,canonical,signature).run();
@@ -777,4 +777,54 @@ test('narrow Custody preapproval RPC signs exact current device intent without a
  await f.veto();
  await expect(rpcData(readyBinding.readiness({...request,nonce:'B'.repeat(43)}))).rejects.toThrow('continuation_head_rejected');
  expect(await db().prepare('SELECT count(*) n FROM genesis_package_continuations').first('n')).toBe(0);
+});
+
+import {canonicalGenesisApproval,GENESIS_APPROVAL_DOMAIN} from '../shared/genesis-approval.ts';
+import {encode,random,webauthn} from '../api-worker/webauthn.ts';
+import {virtualAuthenticator} from './virtual-authenticator.ts';
+
+async function authContinuationPreviewFixture(){
+ const {input,f}=await continuationReadbackFixture(true),db=env.TRANSPORT_AUTH_DB;
+ await applyD1Migrations(db,env.TRANSPORT_AUTH_SCHEMA);
+ const origin='https://continuation-auth.fixture.invalid',identity={origin,rpId:'continuation-auth.fixture.invalid'};
+ const auth=await virtualAuthenticator(),handle=random(),signup=random();
+ const credential=await webauthn.registration(identity,await digest(signup),await auth.register(signup,identity));
+ const g=f.grant,grantDigest=await digest(input.oldGrantCanonical),head=await rosterDigest(input.roster),priorId=random();
+ const prior=canonicalGenesisApproval({version:1,audience:'custodian:roster-genesis',decisionId:priorId,authorityKeyId:f.transportPins.genesis.keyId,
+  grantDigest,rosterDigest:head,issuedAt:g.expiresAt-10,expiresAt:g.expiresAt-1});
+ const authority=fixtureRoleSigner(env.TRANSPORT_GENESIS_FIXTURE_KEY,f.transportPins.genesis);
+ await db.batch([
+  db.prepare('INSERT INTO auth_genesis_pins VALUES(?,?,?,?,?,?,?,1)').bind(g.accountId,g.tenantId,g.vaultId,handle,credential.id,encode(credential.publicKey),credential.counter),
+  db.prepare('INSERT INTO auth_genesis_challenges VALUES(?,?,?,?,?,?,?,?,?)').bind(priorId,await digest('prior-approval-fixture'),g.accountId,g.tenantId,g.vaultId,credential.id,grantDigest,head,g.expiresAt-1),
+  db.prepare('INSERT INTO auth_genesis_decisions VALUES(?,?,?,?)').bind(priorId,grantDigest,prior,await authority.sign(GENESIS_APPROVAL_DOMAIN+prior)),
+ ]);
+ const stage={oldGrantCanonical:input.oldGrantCanonical,target:input.target,roster:input.roster,keyPackage:input.keyPackage};
+ const preview=env.TRANSPORT_AUTH;
+ expect((await preview.fetch(origin+'/v1/auth/continuation-approval/begin')).status).toBe(404);
+ const headers={origin,'content-type':'application/json'};
+ const opened=await preview.preview('begin',headers,JSON.stringify({stage}));
+ expect(opened.status).toBe(200);
+ const {id,options}=await opened.json<{id:string;options:{challenge:string}}>(),cookies=opened.headers.getSetCookie().join('; ');
+ const token=/__Host-akc_genesis_session=([A-Za-z0-9_-]{43})/.exec(cookies)![1]!,csrf=/__Host-akc_genesis_csrf=([A-Za-z0-9_-]{43})/.exec(cookies)![1]!;
+ const assertion=await auth.assert(options.challenge,{...identity,counter:1,userHandle:handle});
+ const body=JSON.stringify({id,stage,assertion}),complete=()=>preview.preview('complete',{...headers,
+  cookie:'__Host-akc_genesis_session='+token+'; __Host-akc_genesis_csrf='+csrf,'x-csrf-token':csrf},body);
+ return {db,f,complete,counter:credential.counter,input};
+}
+test('closed Auth preview completes real UV with independently signed readiness over a typed Custody Worker binding',async()=>{
+ const {db,f,complete}=await authContinuationPreviewFixture();
+ const result=await complete();
+ expect(result.status).toBe(200);
+ const receipt=await result.json<{canonical:string;signature:string}>();
+ expect(await verify(f.transportPins.approval.publicKey,receipt.signature,receipt.canonical)).toBe(true);
+ expect(await db.prepare('SELECT count(*) n FROM auth_continuation_decisions').first('n')).toBe(1);
+});
+test('closed Auth preview withholds the decision when independent Custody vetoes before valid UV completion',async()=>{
+ const {db,f,complete,counter}=await authContinuationPreviewFixture();
+ await f.veto();
+ const result=await complete();
+ expect(result.status).toBe(401);
+ expect(await db.prepare('SELECT count(*) n FROM auth_continuation_decisions').first('n')).toBe(0);
+ expect(await db.prepare('SELECT count(*) n FROM auth_continuation_view_grants').first('n')).toBe(0);
+ expect(await db.prepare('SELECT counter FROM auth_genesis_pins').first('counter')).toBe(counter);
 });
