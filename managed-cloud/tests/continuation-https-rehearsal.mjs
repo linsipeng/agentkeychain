@@ -1,6 +1,6 @@
 /** Disposable transport rehearsal, never a deployable auth backend.
- * Run with Node 24: node --experimental-strip-types managed-cloud/tests/continuation-https-rehearsal.mjs [--browser]
- * --browser requires a sandbox-capable Chromium and certutil. No authenticator is invoked. */
+ * Run with Node 24: node --experimental-transform-types managed-cloud/tests/continuation-https-rehearsal.mjs [--browser]
+ * --browser requires a sandbox-capable Chromium and certutil. An ephemeral virtual authenticator is used in browser mode. */
 import assert from 'node:assert/strict';
 import {execFileSync,execFile,spawn} from 'node:child_process';
 import {promisify} from 'node:util';
@@ -13,6 +13,9 @@ import {randomUUID} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import {fileURLToPath} from 'node:url';
 import {build} from 'esbuild';
+import {chromiumTestPipe} from './chromium-test-pipe.mjs';
+import {webauthn,random} from '../api-worker/webauthn.ts';
+import {digest} from '../shared/contracts.ts';
 import {continuationApprovalPage} from '../auth-trust-worker/experimental/continuation-page.ts';
 
 const browser=process.argv.includes('--browser');
@@ -31,7 +34,10 @@ try{
  let origins,handle;
  const received=[];
  const token='fixture-noncredential',probeId=randomUUID();
+ const registrationNonce=random(),authenticationNonce=random(),userId=random();
  let completeProbe;
+ let initialRegistration,verifiedAssertion=false;
+
  const probeComplete=new Promise(resolve=>{completeProbe=resolve;});
 
  server=createServer({key:readFileSync(file('server.key')),cert:readFileSync(file('server.pem'))},async(req,res)=>{
@@ -44,16 +50,23 @@ try{
    // The probe sets one synthetic cookie only. Cross-origin fetches are never allowed.
    if(req.method==='GET'&&u.pathname==='/probe'&&origin===origins[0]){
     res.writeHead(200,{'content-type':'text/html','content-security-policy':"default-src 'none'; script-src 'self'; connect-src 'self'",
+     'permissions-policy':'publickey-credentials-create=(self), publickey-credentials-get=(self)',
      'set-cookie':'__Host-akc_rehearsal='+token+'; Secure; HttpOnly; SameSite=Strict; Path=/'});
     res.end('<!doctype html><p id="proof">pending</p><script src="/probe.js"></script>');return;
    }
    if(req.method==='GET'&&u.pathname==='/probe.js'&&origin===origins[0]){
     res.writeHead(200,{'content-type':'application/javascript'});
-    res.end(`(async()=>{
+    res.end(`globalThis.runProbe=async()=>{
       const crossOrigin=${JSON.stringify(origins[1])};
       const evidence={cookie:false,csp:false,fetchBlocked:false,secure:isSecureContext,
        webauthn:typeof PublicKeyCredential==='function'&&typeof navigator.credentials?.get==='function',
-       httpOnly:!document.cookie.includes('akc_rehearsal')};
+       httpOnly:!document.cookie.includes('akc_rehearsal'),registration:false,assertion:false};
+      const bytes=value=>Uint8Array.from(atob(value.replaceAll('-','+').replaceAll('_','/')),c=>c.charCodeAt(0));
+      const post=async(path,value)=>{
+       const r=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(value)});
+       if(!r.ok)throw new Error('webauthn_probe_'+r.status);
+       return r;
+      };
       try{
        evidence.cookie=(await fetch('/cookie',{cache:'no-store'})).ok;
        const violation=new Promise(resolve=>{
@@ -67,9 +80,47 @@ try{
        try{await fetch(crossOrigin+'/cookie');}catch{evidence.fetchBlocked=true;}
        evidence.csp=await violation;
       }catch{}
+      try{
+       const reg=await (await fetch('/probe-webauthn/options')).json();
+       reg.challenge=bytes(reg.challenge);reg.user.id=bytes(reg.user.id);reg.timeout=5000;
+       const credential=await navigator.credentials.create({publicKey:reg});
+       const options=await (await post('/probe-webauthn/registration',credential.toJSON())).json();
+       evidence.registration=true;
+       options.challenge=bytes(options.challenge);options.timeout=5000;
+       const assertion=await navigator.credentials.get({publicKey:options});
+       await post('/probe-webauthn/assertion',assertion.toJSON());
+       evidence.assertion=true;
+      }catch(error){evidence.webauthnError=error.name||'Error';}
       document.querySelector('#proof').textContent=JSON.stringify(evidence);
       await fetch('/probe-complete/${probeId}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(evidence)});
-    })();`);return;
+    };`);return;
+   }
+   if(browser&&origin===origins[0]&&u.pathname.startsWith('/probe-webauthn/')&&
+      req.headers.cookie==='__Host-akc_rehearsal='+token){
+    const policy={origin,rpId:names[0]};
+    if(req.method==='GET'&&u.pathname==='/probe-webauthn/options'&&!initialRegistration){
+     res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'})
+      .end(JSON.stringify(await webauthn.registrationOptions(policy,userId,registrationNonce)));return;
+    }
+    if(req.method==='POST'&&req.headers.origin===origin&&req.headers['content-type']==='application/json'){
+     let body='';
+     for await(const chunk of req){body+=chunk;if(body.length>8192){res.writeHead(413).end();return;}}
+     if(u.pathname==='/probe-webauthn/registration'&&!initialRegistration){
+      const response=JSON.parse(body);
+      await assert.rejects(webauthn.registration(policy,await digest(authenticationNonce),response));
+      initialRegistration=await webauthn.registration(policy,await digest(registrationNonce),response);
+      res.writeHead(200,{'content-type':'application/json','cache-control':'no-store'})
+       .end(JSON.stringify(await webauthn.authenticationOptions(policy,authenticationNonce)));return;
+     }
+     if(u.pathname==='/probe-webauthn/assertion'&&initialRegistration&&!verifiedAssertion){
+      const response=JSON.parse(body),challenge=await digest(authenticationNonce);
+      await assert.rejects(webauthn.authentication({...policy,origin:origins[1]},challenge,response,initialRegistration));
+      const counter=await webauthn.authentication(policy,challenge,response,initialRegistration);
+      verifiedAssertion=counter>initialRegistration.counter;
+      res.writeHead(verifiedAssertion?204:403).end();return;
+     }
+    }
+    res.writeHead(404).end();return;
    }
    if(req.method==='POST'&&u.pathname==='/probe-complete/'+probeId&&origin===origins[0]&&
       req.headers.cookie==='__Host-akc_rehearsal='+token){
@@ -125,8 +176,34 @@ try{
   assert.doesNotMatch(doc.stdout,/<div id="handoff" hidden/);
   // Unlike --dump-dom, retain the real browser until its async network/CSP
   // assertions report back to this isolated HTTPS server, or time out.
-  const child=spawn(process.env.CHROMIUM??'chromium',[...flags,'--user-data-dir='+file('probe-profile'),origins[0]+'/probe'],
-   {env,stdio:['ignore','ignore','pipe']});
+  const child=spawn(process.env.CHROMIUM??'chromium',[...flags,'--remote-debugging-pipe','--user-data-dir='+file('probe-profile'),'about:blank'],
+   {env,stdio:['ignore','ignore','pipe','pipe','pipe']});
+  const cdp=chromiumTestPipe(child);
+  const start=async()=>{
+   let page;
+   for(let i=0;i<30&&!page;i++){
+    const {targetInfos}=await cdp('Target.getTargets');
+    page=targetInfos.find(t=>t.type==='page'&&t.url==='about:blank');
+    if(!page)await delay(100,undefined,{signal:timer.signal});
+   }
+   assert.ok(page,'disposable browser must provide its own blank page');
+   const {sessionId}=await cdp('Target.attachToTarget',{targetId:page.targetId,flatten:true});
+   await cdp('WebAuthn.enable',{enableUI:false},sessionId);
+   await cdp('WebAuthn.addVirtualAuthenticator',{options:{protocol:'ctap2',transport:'internal',hasResidentKey:true,
+    hasUserVerification:true,isUserVerified:true,automaticPresenceSimulation:true}},sessionId);
+   const navigation=await cdp('Page.navigate',{url:origins[0]+'/probe'},sessionId);
+   assert.ok(!navigation.errorText,navigation.errorText);
+   for(let i=0;i<60;i++){
+    const {result}=await cdp('Runtime.evaluate',{expression:"typeof globalThis.runProbe==='function'",returnByValue:true},sessionId);
+    if(result.value===true){
+     const called=await cdp('Runtime.evaluate',{expression:'globalThis.runProbe()',userGesture:true,awaitPromise:true},sessionId);
+     assert.ok(!called.exceptionDetails,'synthetic HTTPS probe threw');
+     return probeComplete;
+    }
+    await delay(100,undefined,{signal:timer.signal});
+   }
+   throw new Error('disposable browser probe script was not loaded');
+  };
   let stderr='';
   child.stderr.on('data',chunk=>{stderr=(stderr+chunk).slice(-4096);});
   const exited=new Promise((resolve,reject)=>{
@@ -136,11 +213,12 @@ try{
   const timer=new AbortController();
   try{
    const evidence=await Promise.race([
-    probeComplete,
+    start(),
     exited.then(({code,signal})=>{throw new Error(`browser exited before HTTPS probe completed: ${code??signal}\n${stderr}`);}),
-    delay(12_000,undefined,{signal:timer.signal}).then(()=>{throw new Error(`browser HTTPS probe timed out; requests: ${JSON.stringify(received.slice(-12))}\n${stderr}`);}),
+    delay(22_000,undefined,{signal:timer.signal}).then(()=>{throw new Error(`browser HTTPS probe timed out; requests: ${JSON.stringify(received.slice(-12))}\n${stderr}`);}),
    ]);
-   assert.deepEqual(evidence,{cookie:true,csp:true,fetchBlocked:true,secure:true,webauthn:true,httpOnly:true});
+   assert.deepEqual(evidence,{cookie:true,csp:true,fetchBlocked:true,secure:true,webauthn:true,httpOnly:true,registration:true,assertion:true});
+   assert.equal(verifiedAssertion,true);
   }finally{
    timer.abort();
    const running=()=>child.exitCode===null&&child.signalCode===null;
@@ -150,7 +228,7 @@ try{
   }
   assert.ok(received.some(r=>r.origin===origins[0]&&r.path==='/cookie'&&r.cookie));
   assert.ok(!received.some(r=>r.origin===origins[1]&&r.path==='/cookie'));
-  console.log('PASS sandboxed browser: signed TLS transport, bundle, CSP, host-only cookie and WebAuthn API reachability; no authenticator invoked');
+  console.log('PASS sandboxed browser: signed TLS transport, bundle, CSP, host-only cookie and WebAuthn registration and a verified assertion with a disposable virtual authenticator');
  }
 }finally{
  if(server?.listening){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}

@@ -1,7 +1,7 @@
 import {URL} from 'node:url';
 import {webcrypto as crypto} from 'node:crypto';
 import {expect,test} from 'bun:test';
-import {mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
+import {mkdtemp,readFile,rm,symlink,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {canonicalManifest} from '../src/cloud/config.ts';
@@ -43,13 +43,30 @@ test('only the isolated, signed pilot artifact can compile an inert pilot instal
  const dir=await mkdtemp(join(tmpdir(),'akc-pilot-build-test-'));
  try{
   const publicPath=join(dir,'pilot-public-key'),artifactPath=join(dir,'signed.json'),bin=join(dir,INSTALLED_PILOT_BINARY);
-  const env={...process.env,HOME:dir,AGENTKEYCHAIN_HOME:join(dir,'untouchable'),AKC_KEYCHAIN_TEST_MODE:'1'};
+  const env={...process.env,HOME:dir,XDG_CONFIG_HOME:join(dir,'config'),XDG_DATA_HOME:join(dir,'data'),
+   XDG_CACHE_HOME:join(dir,'cache'),DBUS_SESSION_BUS_ADDRESS:'unix:path='+join(dir,'no-bus'),
+   AGENTKEYCHAIN_HOME:join(dir,'untouchable'),AKC_KEYCHAIN_TEST_MODE:'1'};
   const compile=(outfile:string)=>Bun.spawnSync([process.execPath,'scripts/build-continuation-pilot.ts','--artifact',artifactPath,
    '--root-public-key',publicPath,'--outfile',outfile],{env});
   await writeFile(publicPath,root.publicKey);
   await writeFile(artifactPath,JSON.stringify({...artifact,installation:artifact.authAppendix}));
   expect(compile(bin).exitCode).not.toBe(0);
   expect(await Bun.file(bin).exists()).toBe(false);
+  const realArtifact=join(dir,'real-signed.json');
+  await writeFile(realArtifact,JSON.stringify(artifact));
+  await rm(artifactPath);
+  await symlink(realArtifact,artifactPath);
+  expect(compile(bin).exitCode).not.toBe(0);
+  expect(await Bun.file(bin).exists()).toBe(false);
+  await rm(artifactPath);
+  const fifo=Bun.spawnSync(['mkfifo',artifactPath],{env,timeout:5000});
+  expect(fifo.exitCode).toBe(0);
+  const rejected=await Bun.spawn([process.execPath,'scripts/build-continuation-pilot.ts','--artifact',artifactPath,
+   '--root-public-key',publicPath,'--outfile',bin],{env,stdout:'ignore',stderr:'ignore',timeout:5000}).exited;
+  // Timeout termination (143) must not be mistaken for semantic rejection.
+  expect(rejected).toBe(1);
+  expect(await Bun.file(bin).exists()).toBe(false);
+  await rm(artifactPath);
   await writeFile(artifactPath,JSON.stringify(artifact));
   expect(compile(join(dir,'agentkeychain')).exitCode).not.toBe(0);
   const result=compile(bin);

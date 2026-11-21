@@ -1,17 +1,21 @@
 /** Explicit standalone pilot compiler. Not called by release or install. */
+import {constants} from 'node:fs';
 import {mkdtemp,open,link,rm} from 'node:fs/promises';
 import {basename,dirname,join,resolve,isAbsolute} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {INSTALLED_PILOT_BINARY,verifyInstalledContinuationPilot,type ContinuationPilotBuildArtifact} from '../src/cloud/continuation-pilot-build.ts';
 
 async function readBounded(path:string,max:number){
- const input=await open(path,'r');
+ // The compiler reads public assertions only. Reject terminal symlinks and
+ // open nonblocking so a FIFO cannot turn validation into an unbounded wait.
+ if(!isAbsolute(path)||!constants.O_NOFOLLOW||!constants.O_NONBLOCK)throw new Error('invalid_pilot_input');
+ const input=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
  try{
   const info=await input.stat();
   if(!info.isFile()||info.size>max)throw new Error('invalid_pilot_input');
   const data=Buffer.alloc(max+1),{bytesRead}=await input.read(data,0,data.length,0);
   if(bytesRead>max||bytesRead!==info.size)throw new Error('invalid_pilot_input');
-  return data.subarray(0,bytesRead).toString('utf8');
+  return new TextDecoder('utf-8',{fatal:true,ignoreBOM:true}).decode(data.subarray(0,bytesRead));
  }finally{await input.close();}
 }
 
