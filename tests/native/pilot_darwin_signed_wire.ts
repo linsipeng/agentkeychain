@@ -18,10 +18,12 @@ function authority(){
  return {pin:{keyId:sha(publicKey),publicKey},sign:(canonical:string)=>({canonical,signature:sign(null,Buffer.from(canonical),k.privateKey).toString('base64')})};
 }
 type ArchitecturePhase = 'matrix-architecture'|'bun-process-arch'|'uname-os'|'uname-arch'|'bun-native-query'|'bun-native-translated'|
- 'bun-workflow-image'|'bun-os-image'|'bun-canonical-image'|'bun-image-open-actual'|'bun-image-open-pinned'|
+ 'bun-workflow-image'|'bun-os-image'|'bun-image-spelling'|'bun-image-open-actual'|'bun-image-reopen-pinned'|
  'bun-image-stat'|'bun-image-filetype'|'bun-image-inode'|'bun-image-mode'|'bun-lipo-tool'|'bun-lipo-arch'|'fixture-lipo-tool'|'fixture-lipo-arch'|'helper-lipo-tool'|'helper-lipo-arch';
 let phase: 'runner'|ArchitecturePhase|'fixture'|'build'|'digest'|'positive'|'invalid-wire'|'missing-wrong-inode'|'unchanged-original'|'configuration'='runner';
 let imageRelation:'unchecked'|'same-spelling'|'different-spelling'='unchecked';
+const strictAbsoluteImage=(value:unknown):value is string=>typeof value==='string'&&value.startsWith('/')&&value.length<=4095&&
+ value.slice(1).split('/').every(component=>/^[A-Za-z0-9._-]+$/.test(component)&&component!=='.'&&component!=='..');
 const wireHash=(value:{canonical:string;signature:string})=>sha(JSON.stringify([value.canonical,value.signature]));
 async function main(){
  must(process.platform==='darwin'&&!!process.getuid?.()&&process.getuid()===process.geteuid?.()&&
@@ -40,6 +42,7 @@ async function main(){
  function capture(argv:string[],extra:Record<string,string>={},stdin?:string){
   const r=launch(argv,extra,stdin);must(r.exitCode===0&&r.stderr.length===0);return r.stdout.toString();
  }
+ let retainedBunFD:number|undefined;
  try{
   phase='matrix-architecture';
   const expectedArch=process.env.AKC_EXPECTED_DARWIN_ARCH;
@@ -91,11 +94,7 @@ async function main(){
   };
   phase='bun-workflow-image';
   const workflowBun=process.env.AKC_SIGNED_WIRE_BUN;
-  must(typeof workflowBun==='string'&&workflowBun.startsWith('/')&&Buffer.byteLength(workflowBun,'utf8')<=4095);
-  for(let i=0;i<workflowBun.length;i++){
-   const code=workflowBun.charCodeAt(i);
-   must(code>=32&&code!==127);
-  }
+  must(strictAbsoluteImage(workflowBun));
   phase='bun-os-image';
   // Read the actual process text vnode path from Darwin, not Bun's
   // process.execPath shim or shell PATH. No falling back to either.
@@ -108,58 +107,38 @@ async function main(){
    must(length>0&&length<=image.length&&end>0&&end<=length&&image[0]===47);
   }finally{proc.close();}
   const imagePath=new TextDecoder('utf-8',{fatal:true}).decode(image.subarray(0,image.indexOf(0)));
-  phase='bun-canonical-image';
-  // Use POSIX realpath, not a runtime-specific .native shim.
-  const libc=dlopen('/usr/lib/libSystem.B.dylib',{
-   realpath:{args:[FFIType.ptr,FFIType.ptr],returns:FFIType.ptr},
-  });
-  function canonical(path:string){
-   const arg=Buffer.from(path+'\0','utf8'),out=Buffer.alloc(4096);
-   const result=libc.symbols.realpath(ptr(arg),ptr(out)),end=out.indexOf(0);
-   must(result!==null&&result!==0&&end>0&&out[0]===47);
-   return new TextDecoder('utf-8',{fatal:true}).decode(out.subarray(0,end));
-  }
-  let actualBun:string,expectedBun:string;
-  try{actualBun=canonical(imagePath);expectedBun=canonical(workflowBun);}
-  finally{libc.close();}
-  imageRelation=actualBun===expectedBun?'same-spelling':'different-spelling';
-  const verifyImages=()=>{
-   const previous=phase;
-   phase='bun-image-open-actual';
-   const actualFD=openSync(actualBun,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
-   try{
-    phase='bun-image-open-pinned';
-    const pinnedFD=openSync(expectedBun,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK);
-    try{
-     phase='bun-image-stat';
-     const actual=fstatSync(actualFD,{bigint:true}),pinned=fstatSync(pinnedFD,{bigint:true});
-     const actualNamed=lstatSync(actualBun,{bigint:true}),pinnedNamed=lstatSync(expectedBun,{bigint:true});
-     const all=[actual,pinned,actualNamed,pinnedNamed];
-     phase='bun-image-filetype';
-     must(all.every(info=>info.isFile()));
-     phase='bun-image-inode';
-     must(all.every(info=>info.dev===actual.dev&&info.ino===actual.ino&&info.ino!==0n));
-     phase='bun-image-mode';
-     must((actual.mode&0o111n)!==0n&&all.every(info=>info.mode===actual.mode&&info.uid===actual.uid));
-     phase=previous;
-     return actual;
-    }finally{closeSync(pinnedFD);}
-   }finally{closeSync(actualFD);}
-  };
-  // Equality of two canonical strings is not evidence of image identity.
-  // A differing macOS spelling is allowed only when both pinned and kernel
-  // paths independently open the same regular executable vnode.
-  const bunImage=verifyImages();
-  const verifyBunName=()=>{
-   const current=verifyImages();
-   const previous=phase;
+  phase='bun-image-spelling';
+  imageRelation=imagePath===workflowBun?'same-spelling':'different-spelling';
+  // Both independent path sources must supply the same raw spelling. Do not
+  // normalize aliases or rely on realpath FFI for an already exact match.
+  must(strictAbsoluteImage(imagePath)&&imagePath===workflowBun);
+  const actualBun=imagePath,openFlags=constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK;
+  phase='bun-image-open-actual';
+  retainedBunFD=openSync(actualBun,openFlags);
+  phase='bun-image-stat';
+  const bunImage=fstatSync(retainedBunFD,{bigint:true});
+  const assertImage=(rows:typeof bunImage[])=>{
+   phase='bun-image-filetype';
+   must(rows.every(info=>info.isFile()));
    phase='bun-image-inode';
-   must(current.dev===bunImage.dev&&current.ino===bunImage.ino);
+   must(bunImage.ino!==0n&&rows.every(info=>info.dev===bunImage.dev&&info.ino===bunImage.ino));
    phase='bun-image-mode';
-   must(current.mode===bunImage.mode&&current.uid===bunImage.uid);
-   phase=previous;
+   must((bunImage.mode&0o111n)!==0n&&rows.every(info=>info.mode===bunImage.mode&&info.uid===bunImage.uid));
+  };
+  assertImage([bunImage,lstatSync(workflowBun,{bigint:true})]);
+  const verifyBunName=()=>{
+   const previous=phase;
+   phase='bun-image-reopen-pinned';
+   const reopened=openSync(workflowBun,openFlags);
+   try{
+    phase='bun-image-stat';
+    const rows=[fstatSync(retainedBunFD!,{bigint:true}),fstatSync(reopened,{bigint:true}),lstatSync(workflowBun,{bigint:true})];
+    assertImage(rows);
+    phase=previous;
+   }finally{closeSync(reopened);}
   };
   nativeArch(actualBun,'bun');
+  phase='configuration';
   const baseline=capture(['/bin/bash','tests/native/pilot_darwin_keychain_config_digest.sh']);
   must(/^[a-f0-9]{64}\n$/.test(baseline));
   try{
@@ -294,6 +273,9 @@ async function main(){
    phase=previous;
   }
   process.stdout.write('PASS signed Darwin companion wire, exact hash/signature and scoped fixture identity\n');
- }finally{rmSync(dir,{recursive:true,force:true});}
+ }finally{
+  if(retainedBunFD!==undefined)closeSync(retainedBunFD);
+  rmSync(dir,{recursive:true,force:true});
+ }
 }
 main().catch(()=>{process.stderr.write('darwin_pilot_signed_wire_rehearsal_denied phase='+phase+' image_relation='+imageRelation+'\n');process.exitCode=1;});

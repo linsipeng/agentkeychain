@@ -166,13 +166,13 @@ be inferred.
 The reviewed workflow passes the absolute path selected by its pinned Bun
 setup and invokes that path explicitly. Inside the running process, the
 test driver independently asks Darwin `proc_pidpath` for the process image,
-then opens both POSIX-canonical names without following a terminal symlink
-and requires matching device/inode, executable mode and owner from both
-descriptors and names. Distinct spellings alone are not fatal if all four
-metadata checks identify the exact same regular executable. No alternative
-image is accepted and there is no fallback to `process.execPath` or PATH.
-Diagnostics report only a fixed mismatch stage and whether the spellings
-were the same. The verified image is the only Bun
+and requires an exact spelling match to the approved absolute ASCII
+path (no traversal, empty components or alternate aliases). A retained
+terminal-no-follow descriptor and named metadata must identify the
+same regular executable, with device/inode, executable mode and owner
+rechecked against a fresh descriptor before the child process. There is
+no realpath-FFI normalization or fallback to `process.execPath` or PATH.
+Diagnostics report only fixed stages. The verified image is the only Bun
 file used for the architecture check and companion build. This tests
 one hosted fixture's process identity, not shipped installer provenance or
 a race-free generic executable launcher.
