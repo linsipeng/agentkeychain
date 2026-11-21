@@ -11,6 +11,7 @@ on:
       - 'tests/cloud-continuation-pilot-build.test.ts'
       - 'tests/native/pilot_offline_package.ts'
       - 'native/pilot-linux-descriptor-launch.*'
+      - 'native/pilot-linux-peer-frame.*'
       - 'tests/native/pilot_linux_descriptor_*.c'
 
 permissions:
@@ -62,8 +63,8 @@ jobs:
           pkg-config --atleast-version=3.0.0 libcrypto
           fixture=$(mktemp -d "$RUNNER_TEMP/akc-fd-launch.XXXXXXXX")
           trap 'rm -rf -- "$fixture"' EXIT
-          cc -std=c11 -Wall -Wextra -Werror -pedantic -static tests/native/pilot_linux_descriptor_target.c -o "$fixture/reader"
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -static native/pilot-linux-peer-frame.c tests/native/pilot_linux_descriptor_target.c -o "$fixture/reader"
           chmod 0500 "$fixture/reader"
           digest=$(sha256sum "$fixture/reader" | cut -d ' ' -f 1)
-          cc -std=c11 -Wall -Wextra -Werror -pedantic native/pilot-linux-descriptor-launch.c tests/native/pilot_linux_descriptor_launch.c -lcrypto -o "$fixture/smoke"
+          cc -std=c11 -Wall -Wextra -Werror -pedantic native/pilot-linux-descriptor-launch.c native/pilot-linux-peer-frame.c tests/native/pilot_linux_descriptor_launch.c -lcrypto -o "$fixture/smoke"
           "$fixture/smoke" "$fixture" "$digest"
