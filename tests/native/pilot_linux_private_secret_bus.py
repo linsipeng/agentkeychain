@@ -94,19 +94,45 @@ def prompt_cancel_policy():
 
 
 def wait_owner(conn, name, process, image, snapshot):
+    global phase
     for _ in range(60):
+        phase = "prompter-process"
+        exit_code = process.poll()
+        if exit_code is not None:
+            phase = {
+                0: "prompter-exited-normally",
+                1: "prompter-exited-status-one",
+                127: "prompter-exited-status-127",
+            }.get(exit_code, "prompter-exited-signal" if exit_code < 0 else "prompter-exited-other")
+            raise RuntimeError("fixture prompter no longer running")
+        phase = "prompter-process-image"
         owned_image(process, image, snapshot)
+        phase = "prompter-owner-rpc"
         try:
             owner = call(conn, "GetNameOwner", name, "(s)")
         except GLib.Error as error:
             if Gio.DBusError.get_remote_error(error) != DBUS + ".Error.NameHasNoOwner":
+                phase = "prompter-owner-rpc-" + session_rpc_failure(error)
                 raise
         else:
-            need(re.fullmatch(r":[0-9]+\.[0-9]+", owner))
-            credentials = call(conn, "GetConnectionCredentials", owner, "(a{sv})")
-            need(credentials.get("UnixUserID") == os.getuid() and credentials.get("ProcessID") == process.pid)
+            phase = "prompter-owner-shape"
+            need(isinstance(owner, str) and re.fullmatch(r":[0-9]+\.[0-9]+", owner))
+            phase = "prompter-credentials-rpc"
+            try:
+                credentials = call(conn, "GetConnectionCredentials", owner, "(a{sv})")
+            except GLib.Error as error:
+                phase = "prompter-credentials-rpc-" + session_rpc_failure(error)
+                raise
+            phase = "prompter-credentials-uid"
+            need(credentials.get("UnixUserID") == os.getuid())
+            phase = "prompter-credentials-pid"
+            need(credentials.get("ProcessID") == process.pid)
+            phase = "prompter-process-image-recheck"
+            owned_image(process, image, snapshot)
             return owner
+        phase = "prompter-owner-pending"
         time.sleep(0.05)
+    phase = "prompter-owner-timeout"
     raise RuntimeError("fixture role owner unavailable")
 
 
@@ -472,11 +498,12 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                                                GLib.Variant("(su)", (FIXTURE_CLIENT, 4)), GLib.VariantType.new("(u)"),
                                                Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
                         need(result.unpack() == (1,) and call(conn, "GetNameOwner", FIXTURE_CLIENT, "(s)") == conn.get_unique_name())
-                        phase = "prompter-role"
+                        phase = "prompter-start"
                         image, snapshot, display_env, windows = prompt
                         prompter = start([str(image)], {**env, **display_env, "DBUS_SESSION_BUS_ADDRESS": "unix:path=" + str(endpoint),
                                                          "LD_LIBRARY_PATH": str(library_dir)})
                         prompt_owner = wait_owner(conn, PROMPTER, prompter, image, snapshot)
+                        phase = "prompter-role-collision"
                         need(prompt_owner not in (owner, conn.get_unique_name()))
                         phase = "prompter-library-identity"
                         verify_mapped_libraries(prompter, staged_libraries)
@@ -495,8 +522,9 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                                 need(call(conn, "GetNameOwner", PROMPTER, "(s)") == prompt_owner)
 
                         show_then_cancel(conn, owner, offer, prompter.pid, windows, prompt_liveness)
-                        phase = "prompter-owner-after"
-                        need(wait_owner(conn, PROMPTER, prompter, image, snapshot) == prompt_owner)
+                        owner_after = wait_owner(conn, PROMPTER, prompter, image, snapshot)
+                        phase = "prompter-owner-changed"
+                        need(owner_after == prompt_owner)
                     phase = "collection-offer-owner"
                     owned_image(provider, provider_path, staged_provider)
                     owned_image(broker, BROKER)
