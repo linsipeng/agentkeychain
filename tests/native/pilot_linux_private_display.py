@@ -189,12 +189,15 @@ def screen_windows(display, mark, input_scope=None):
             # MappingNotify is server-originated and unrequested (core X11).
             # It can interleave between a query and its reply. No other event
             # or send-event form is accepted, and the burst is bounded.
-            if label.startswith("input-dialog-"):
-                for _ in range(4):
-                    if header[0] != 34:
-                        break
-                    mark(label + "-mapping-notify")
-                    header = read(32)
+            if label.startswith("input-"):
+                if label.startswith("input-dialog-") or label == "input-xtest-extension":
+                    for _ in range(4):
+                        if header[0] != 34:
+                            break
+                        mark(label + "-mapping-notify")
+                        header = read(32)
+                # Never skip a mapping change once the keyboard map is being
+                # established/used: subsequent synthesized input must abort.
                 if header[0] == 0:
                     # Core error code 3=BadWindow, 5=BadAtom, 8=BadMatch.
                     mark(label + "-error-" + {3: "window", 5: "atom", 8: "match"}.get(header[1], "other"))
@@ -226,19 +229,18 @@ def screen_windows(display, mark, input_scope=None):
             if attr_head[26] != 2:  # IsViewable
                 continue
             result.append(window)
-        resolved = {}
-        for window in result:
+        def local_pid_for_window(window):
             head, body = reply("xres-client-id", opcode, struct.pack("<III", 1, window, 2), minor=4)
             ids, = struct.unpack_from("<I", head, 8)
             mark("xres-client-id-shape")
             need(ids == 1 and len(body) == 16)
             resource, mask, length, local_pid = struct.unpack("<IIII", body)
-            # Xorg ConstructClientIdValue reports the client's resource base,
-            # not the queried window XID. The checked X server resolves the
-            # exact request to a single local PID; reject missing/extra IDs.
+            # Xorg returns the owning client's resource base, not the queried XID.
             mark("xres-local-pid")
             need(resource != 0 and mask == 2 and length == 4 and local_pid > 0)
-            resolved[window] = local_pid
+            return local_pid
+
+        resolved = {window: local_pid_for_window(window) for window in result}
         if input_scope is not None:
             need(os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") == "named-write-v1")
             expected_pid, password = input_scope
@@ -246,7 +248,9 @@ def screen_windows(display, mark, input_scope=None):
             need(len(resolved) == 1 and tuple(resolved.values()) == (expected_pid,))
             window = next(iter(resolved))
             authenticate_named_dialog(reply, mark, window, allow_pinned_empty=True)
-            enter_fixture_password(reply, request, mark, setup, root, window, password)
+            enter_fixture_password(reply, request, mark, setup, root, window, password,
+                                   lambda focus: authenticate_gdk_focus_child(
+                                       reply, mark, root, window, focus, expected_pid, local_pid_for_window))
         mark("mapped" if resolved else "no-viewable-top-level" if count else "no-top-level")
         return set(resolved.values())
 
@@ -321,7 +325,38 @@ def authenticate_named_dialog(reply, mark, window, *, allow_pinned_empty=False):
     need(title("legacy", 39, 31))
 
 
-def enter_fixture_password(reply, request, mark, setup, root, window, password):
+def authenticate_gdk_focus_child(reply, mark, root, window, focus, expected_pid, local_pid_for_window):
+    # GTK 3.24 GDK-X11 setup_toplevel_window installs the special focus
+    # target in _NET_WM_USER_TIME_WINDOW (type XA_WINDOW), and creates it as
+    # a direct mapped 1x1 InputOnly child at (-1,-1). An X11 client property
+    # alone is insufficient: prove ancestry and server-attested PID too.
+    mark("input-focus-child-nonreserved")
+    need(focus > 1 and focus not in (root, window))
+    name = b"_NET_WM_USER_TIME_WINDOW"
+    header, body = reply("input-focus-child-atom", 16, struct.pack("<H2x", len(name)) + padded(name), minor=1)
+    atom, = struct.unpack_from("<I", header, 8)
+    mark("input-focus-child-atom-shape")
+    need(atom != 0 and not body)
+    header, body = reply("input-focus-child-property", 20, struct.pack("<IIIII", window, atom, 33, 0, 1))
+    mark("input-focus-child-property-shape")
+    need(header[1] == 32 and struct.unpack_from("<III", header, 8) == (33, 0, 1) and len(body) == 4)
+    mark("input-focus-child-property-id")
+    need(struct.unpack("<I", body)[0] == focus)
+    header, _ = reply("input-focus-child-tree", 15, struct.pack("<I", focus))
+    mark("input-focus-child-ancestry")
+    need(struct.unpack_from("<II", header, 8) == (root, window))
+    header, body = reply("input-focus-child-attributes", 3, struct.pack("<I", focus))
+    mark("input-focus-child-attributes-shape")
+    need(len(body) == 12 and struct.unpack_from("<H", header, 12)[0] == 2 and header[26] == 2)
+    header, body = reply("input-focus-child-geometry", 14, struct.pack("<I", focus))
+    mark("input-focus-child-geometry-shape")
+    need(not body and struct.unpack_from("<IhhHHH", header, 8) == (root, -1, -1, 1, 1, 0))
+    owner = local_pid_for_window(focus)
+    mark("input-focus-child-owner")
+    need(owner == expected_pid)
+
+
+def enter_fixture_password(reply, request, mark, setup, root, window, password, check_child):
     need(isinstance(password, bytearray) and len(password) == 40 and
          all(48 <= number <= 57 for number in password))
     query = b"XTEST"
@@ -342,8 +377,12 @@ def enter_fixture_password(reply, request, mark, setup, root, window, password):
         keys[symbol] = candidates[0]
 
     def exact_focus():
-        header, _ = reply("input-focus", 43)
-        need(struct.unpack_from("<I", header, 8)[0] == window)
+        header, body = reply("input-focus", 43)
+        mark("input-focus-reply-shape")
+        need(not body)
+        focus, = struct.unpack_from("<I", header, 8)
+        if focus != window:
+            check_child(focus)
 
     # Assign focus only to the already authenticated mapped GCR window; the
     # fixture runs without a window manager. GCR source initially focuses
@@ -351,7 +390,11 @@ def enter_fixture_password(reply, request, mark, setup, root, window, password):
     request(42, struct.pack("<II", window, 0))
     exact_focus()
     keymap, keymap_body = reply("input-no-held-keys", 44)
-    need(len(keymap_body) == 8 and not any(keymap[8:32] + keymap_body))
+    # QueryKeymap reply is 40 bytes: eight framing bytes and 32 key bytes.
+    mark("input-no-held-keys-reply-shape")
+    need(len(keymap_body) == 8)
+    mark("input-held-keys-present")
+    need(not any(keymap[8:32] + keymap_body))
     for group in (password, (0xff09,), password, (0xff0d,)):
         exact_focus()
         for symbol in group:
