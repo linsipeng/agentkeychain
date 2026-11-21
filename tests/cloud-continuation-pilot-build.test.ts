@@ -1,4 +1,5 @@
 import {URL} from 'node:url';
+import {TextEncoder} from 'node:util';
 import {webcrypto as crypto} from 'node:crypto';
 import {expect,test} from 'bun:test';
 import {mkdtemp,readFile,rm,symlink,writeFile} from 'node:fs/promises';
@@ -8,6 +9,8 @@ import {canonicalManifest} from '../src/cloud/config.ts';
 import {INSTALLED_PILOT_BINARY,INSTALLED_PILOT_CONTRACT,INSTALLED_PILOT_NATIVE_READER_ABI,
  installedContinuationPilotNativeReaderScope,verifyInstalledContinuationPilot} from '../src/cloud/continuation-pilot-build.ts';
 import {digest} from '../managed-cloud/shared/contracts.ts';
+import {beginNativeInspectVerification,NATIVE_INSPECT_REPLY,verifyNativeInspectObservation} from '../src/cloud/continuation-pilot-native-inspect.ts';
+import {parsePilotBrokerRequest} from '../src/cloud/pilot-broker-wire.ts';
 
 async function authority(){
  const key=await crypto.subtle.generateKey('Ed25519',true,['sign','verify']);
@@ -43,7 +46,7 @@ async function makeNativeClaim(artifact:Awaited<ReturnType<typeof makeArtifact>>
  const {issuedAt}=JSON.parse(artifact.installation.canonical) as {issuedAt:number};
  return {version:1,domain:'AgentKeychain-installed-continuation-pilot-native-reader-v1',
   installationDigest:await digest(JSON.stringify([artifact.installation.canonical,artifact.installation.signature])),target,
-  nativeImageSha256:'a'.repeat(64),abi:INSTALLED_PILOT_NATIVE_READER_ABI,readerPin,issuedAt,expiresAt};
+  nativeImageSha256:'a'.repeat(64),abi:INSTALLED_PILOT_NATIVE_READER_ABI,readerPin,issuedAt,expiresAt} as const;
 }
 
 test('native read pin is root-only, exact installation, role, target, ABI and time bound',async()=>{
@@ -63,6 +66,47 @@ test('native read pin is root-only, exact installation, role, target, ABI and ti
  }
  await expect(open(await rollout.sign(JSON.stringify(claim)))).rejects.toThrow('cloud_continuation_pilot_not_provisioned');
  await expect(open(null)).rejects.toThrow('cloud_continuation_pilot_not_provisioned');
+});
+
+test('native inspect authenticates only a one-use correlated metadata response',async()=>{
+ const {artifact,root,target,expiresAt,rollout}=await makeArtifact('linux-x64'),reader=await authority();
+ const claim=await makeNativeClaim(artifact,target,reader.pin,expiresAt);
+ const gate=await verifyInstalledContinuationPilot({...artifact,nativeReaderAppendix:await root.sign(JSON.stringify(claim))},root.publicKey,target);
+ const profile='c'.repeat(64),begin=()=>beginNativeInspectVerification(gate,profile),encode=(s:string)=>new TextEncoder().encode(s);
+ const replyValue=async(ticket:ReturnType<typeof begin>,override:object={})=>{
+  const request=JSON.parse(ticket.request) as {nonce:string;wire:object;issuedAt:number};
+  expect(parsePilotBrokerRequest(JSON.stringify(request.wire))).toEqual({version:1,op:'inspect',profileDigest:profile});
+  return {version:1,domain:NATIVE_INSPECT_REPLY,keyId:reader.pin.keyId,abi:claim.abi,
+   installationDigest:claim.installationDigest,profileDigest:profile,nonce:request.nonce,requestDigest:await digest(ticket.request),
+   observedAt:request.issuedAt,status:'snapshot-present',...override};
+ };
+ const response=async(ticket:ReturnType<typeof begin>,override:object={},signer=reader)=>
+  encode(JSON.stringify(await signer.sign(JSON.stringify(await replyValue(ticket,override)))));
+ const fail='cloud_continuation_pilot_native_inspect_denied',first=begin(),frame=await response(first);
+ await expect(verifyNativeInspectObservation({...first},frame)).rejects.toThrow(fail);
+ expect(await verifyNativeInspectObservation(first,frame)).toEqual({status:'snapshot-present'});
+ await expect(verifyNativeInspectObservation(first,frame)).rejects.toThrow(fail);
+ await expect(verifyNativeInspectObservation(begin(),frame)).rejects.toThrow(fail);
+ for(const override of [{installationDigest:'d'.repeat(64)},{profileDigest:'d'.repeat(64)},{abi:'other'},
+  {requestDigest:'d'.repeat(64)},{status:'active'},{receipt:{}},{observedAt:expiresAt+1}]){
+  const ticket=begin();await expect(verifyNativeInspectObservation(ticket,await response(ticket,override))).rejects.toThrow(fail);
+ }
+ const wrongRole=begin();
+ await expect(verifyNativeInspectObservation(wrongRole,await response(wrongRole,{},rollout))).rejects.toThrow(fail);
+ const noncanonical=begin();
+ const pretty=await reader.sign(JSON.stringify(await replyValue(noncanonical),null,1));
+ await expect(verifyNativeInspectObservation(noncanonical,encode(JSON.stringify(pretty)))).rejects.toThrow(fail);
+ const duplicate=begin();
+ const repeated=await reader.sign('{"version":1,'+JSON.stringify(await replyValue(duplicate)).slice(1));
+ await expect(verifyNativeInspectObservation(duplicate,encode(JSON.stringify(repeated)))).rejects.toThrow(fail);
+ const invalid=begin(),valid=await response(invalid);
+ await expect(verifyNativeInspectObservation(invalid,new Uint8Array([0xff]))).rejects.toThrow(fail);
+ await expect(verifyNativeInspectObservation(invalid,valid)).rejects.toThrow(fail);
+ const empty=begin();
+ expect(await verifyNativeInspectObservation(empty,await response(empty,{status:'empty'}))).toEqual({status:'empty'});
+ const journal=begin();
+ expect(await verifyNativeInspectObservation(journal,await response(journal,{status:'rollback-journal-present'})))
+  .toEqual({status:'rollback-journal-present'});
 });
 
 test('only the isolated, signed pilot artifact can compile an inert pilot installation',async()=>{
