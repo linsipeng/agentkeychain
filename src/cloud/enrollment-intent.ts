@@ -207,6 +207,27 @@ const continuationLeases=new WeakMap<EnrollmentLease,{store:CloudStore;fence:()=
 export function assertContinuationLease(store:CloudStore,lease:EnrollmentLease){
  const current=continuationLeases.get(lease);if(current?.store!==store)throw new Error('cloud_lease_lost');current.fence();
 }
+/** Only purpose-scoped post-proof transport receives exact protected evidence.
+ * Retain both the lease and exact stage throughout the callback. */
+export async function withStagedGenesisPostProof(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,nonce:string,
+ lease:EnrollmentLease,
+ // eslint-disable-next-line no-unused-vars -- private callback contract
+ obtain:(evidence:ContinuationEvidence)=>Promise<SignedManagedOperation>):Promise<SignedManagedOperation>{
+ assertContinuationLease(store,lease);
+ const verified=await validatedStage(secure,store,policy);
+ if(!verified)throw denied();
+ const {stage,stageDigest}=verified;
+ const current=()=>Math.floor(Date.now()/1000);
+ if(JSON.parse(stage.evidence.commit.canonical).expiresAt<=current())throw denied();
+ assertContinuationLease(store,lease);
+ const proof=await obtain(stage.evidence);
+ const after=await validatedStage(secure,store,policy);
+ if(!after||after.stageDigest!==stageDigest)throw denied();
+ await validatePostCommit(policy,after.stage.evidence,nonce,proof);
+ assertContinuationLease(store,lease);
+ return proof;
+}
+
 // eslint-disable-next-line no-unused-vars -- private callback contract
 export async function withContinuationEnrollmentLease<T>(store:CloudStore,action:(lease:EnrollmentLease)=>Promise<T>):Promise<T>{
  const owner=newContinuationReadbackNonce(),leaseMs=30_000;

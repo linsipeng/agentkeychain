@@ -299,3 +299,48 @@ test('Auth requires a newly verified ceremony for the exact continuation stage a
  expect(await db.prepare('SELECT count(*) n FROM auth_continuation_decisions').first('n')).toBe(3);
 
 });
+
+test('pilot independently registers once and approves only invited exact original intent in the same scoped browser',async()=>{
+ await reset();
+ const {AUTH:db,GENESIS_ISSUER_SCHEMA,PILOT_GENESIS_SCHEMA}=env as unknown as {AUTH:D1Database;GENESIS_ISSUER_SCHEMA:Parameters<typeof applyD1Migrations>[1];PILOT_GENESIS_SCHEMA:Parameters<typeof applyD1Migrations>[1]};
+ await applyD1Migrations(db,GENESIS_ISSUER_SCHEMA);
+ // Distinct migration ledger; the pilot set is never part of the normal experimental or deployed migrations.
+ await applyD1Migrations(db,PILOT_GENESIS_SCHEMA,'pilot_migrations');
+ const {pilotGenesisRegistration,PILOT_GENESIS_INVITE_DOMAIN}=await import('../auth-trust-worker/experimental/pilot-genesis-registration.ts');
+ const identity={origin:'https://auth-pilot-genesis.rehearsal.invalid',rpId:'auth-pilot-genesis.rehearsal.invalid'},now=Math.floor(Date.now()/1000);
+ const [authority,inviteKey,device,wrapping,checkpoint]=await Promise.all(Array.from({length:5},pair));
+ const policy={authority:authority!.pin,checkpointKeys:[checkpoint!.pin],recoveryAuthorities:[]};
+ const grant:EnrollmentGrant={version:1,requestId:'request',accountId:'account',tenantId:'tenant',vaultId:'vault',deviceId:'device',
+  signingKey:device!.pin.publicKey,wrappingKey:wrapping!.pin.publicKey,issuerDeviceId:null,keyEpoch:1,expiresAt:now+150};
+ const {requestId,accountId,tenantId,vaultId,deviceId,keyEpoch,signingKey,wrappingKey}=grant;
+ const canonical=canonicalRoster({version:1,accountId,tenantId,vaultId,revision:1,previousDigest:null,keyEpoch,active:[{deviceId,signingKey,wrappingKey}],revoked:[],
+  issuer:{kind:'device',id:deviceId},issuedAt:now,expiresAt:now+150,checkpointKeys:policy.checkpointKeys,recoveryAuthorities:[],recovery:null});
+ const roster={canonical,signature:await device!.sign(ROSTER_DOMAIN+canonical)},grantBytes=canonicalGrant(grant),browser=await digest(random());
+ const inviteBody={version:1,domain:PILOT_GENESIS_INVITE_DOMAIN,keyId:inviteKey!.pin.keyId,origin:identity.origin,rpId:identity.rpId,id:random(),
+  accountId,tenantId,vaultId,deviceId,requestId,keyEpoch,grantDigest:await digest(grantBytes),rosterDigest:await rosterDigest(roster),issuedAt:now,expiresAt:now+100};
+ const inviteBytes=JSON.stringify(inviteBody),invite={canonical:inviteBytes,signature:await inviteKey!.sign(inviteBytes)};
+ const registration=pilotGenesisRegistration(db,identity,policy,inviteKey!.pin);
+ const wrongGrant=canonicalGrant({...grant,requestId:'other'});
+ await expect(registration.begin(invite,wrongGrant,roster,browser)).rejects.toThrow('pilot_genesis_registration_unavailable');
+ const wrongRole=pilotGenesisRegistration(db,identity,policy,authority!.pin);
+ await expect(wrongRole.begin(invite,grantBytes,roster,browser)).rejects.toThrow('pilot_genesis_registration_unavailable');
+ const option=await registration.begin(invite,grantBytes,roster,browser);
+ await expect(registration.begin(invite,grantBytes,roster,browser)).rejects.toThrow('pilot_genesis_registration_unavailable');
+ const auth=await virtualAuthenticator(),response=await auth.register(option.challenge,identity);
+ await expect(registration.complete(invite,grantBytes,roster,await digest(random()),response)).rejects.toThrow('pilot_genesis_registration_unavailable');
+ await expect(registration.complete(invite,grantBytes,roster,browser,await auth.register(option.challenge,{...identity,uv:false}))).rejects.toThrow('pilot_genesis_registration_unavailable');
+ const attempts=await Promise.allSettled(Array.from({length:2},()=>registration.complete(invite,grantBytes,roster,browser,response)));
+ expect(attempts.filter(x=>x.status==='fulfilled')).toHaveLength(1);
+ expect(await db.prepare('SELECT COUNT(*) n FROM auth_genesis_pins').first('n')).toBe(1);
+ expect(await db.prepare('SELECT COUNT(*) n FROM auth_genesis_decisions').first('n')).toBe(0);
+ const signer={key:async()=>authority!.pin,sign:authority!.sign};
+ await expect(genesisIssuer(db,identity,policy,signer,browser).begin(wrongGrant,roster)).rejects.toThrow('genesis_approval_unavailable');
+ await expect(genesisIssuer(db,identity,policy,signer,await digest(random())).begin(grantBytes,roster)).rejects.toThrow('genesis_approval_unavailable');
+ const issuer=genesisIssuer(db,identity,policy,signer,browser),challenge=await issuer.begin(grantBytes,roster);
+ await expect(issuer.complete(challenge.id,grantBytes,roster,await auth.assert(challenge.options.challenge,{...identity,uv:false}))).rejects.toThrow('genesis_approval_unavailable');
+ const assertion=await auth.assert(challenge.options.challenge,{...identity,counter:1});
+ // The legacy kernel, even if miswired to this pilot DB, cannot commit a scoped pilot challenge.
+ expect(()=>genesisIssuer(db,identity,policy,signer)).toThrow('genesis_approval_unavailable');
+ const proof=await issuer.complete(challenge.id,grantBytes,roster,assertion);
+ await expect(verifyGenesisApproval(proof,grantBytes,roster,policy)).resolves.toBeTruthy();
+});

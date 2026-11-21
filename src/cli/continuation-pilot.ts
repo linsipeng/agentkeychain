@@ -1,4 +1,5 @@
 import {verifyInstalledContinuationPilot} from '../cloud/continuation-pilot-build.ts';
+import {installedContinuationPilotTransport} from '../cloud/continuation-pilot-transport.ts';
 import {installedPilotArtifact} from './continuation-pilot.generated.ts';
 
 async function main(){
@@ -10,7 +11,7 @@ async function main(){
  if(!installed)throw new Error('cloud_continuation_pilot_not_provisioned');
  const {artifact,rootPublicKey}=installed;
  const result=await verifyInstalledContinuationPilot(artifact,rootPublicKey,`${process.platform}-${process.arch}`);
- process.stdout.write(JSON.stringify({state:'transport_unavailable',...result})+'\n');
+ process.stdout.write(JSON.stringify({state:installedContinuationPilotTransport(result).state,...result})+'\n');
 }
 
 main().catch((error:unknown)=>{

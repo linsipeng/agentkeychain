@@ -2,7 +2,7 @@
 import {WorkerEntrypoint} from 'cloudflare:workers';
 import {exactFields,type SignedManagedOperation} from '../../src/cloud/protocol.ts';
 import {authenticate} from '../api-worker/auth.ts';
-import {canonicalGenesisCommitProofExpectation,proveGenesisPackageCommit} from '../api-worker/genesis-package-continuation-readback.ts';
+import {canonicalGenesisCommitProofExpectation,MAIN_CONTINUATION_COMMIT_DOMAIN,proveGenesisPackageCommit} from '../api-worker/genesis-package-continuation-readback.ts';
 import type {CheckpointKey} from '../shared/checkpoints.ts';
 import {digest} from '../shared/contracts.ts';
 import {canonicalGrant,type EnrollmentGrant} from '../shared/device-protocol.ts';
@@ -47,6 +47,23 @@ export class CustodyContinuationTransport extends WorkerEntrypoint<CustodyEnv>{
 }
 
 /** Test-only role binding for the hosted Main adapter: no test seeding capability. */
+export class PilotCustodyFreshFixture extends WorkerEntrypoint<CustodyEnv>{
+ override async fetch(){return new Response(null,{status:404});}
+ async fresh(input:ContinuationFreshHeadRequest){
+  const p=JSON.parse(this.env.PINS) as PinPolicy;
+  return proveFreshContinuationHead(this.env.CUSTODIAN,input,{authority:p.approval,witnessKeys:[p.witness],checkpointKeys:[p.checkpoint],recoveryAuthorities:[]},
+    await localSigner(this.env.ROLE_KEY,p.witness));
+ }
+}
+export class PilotMainSignerFixture extends WorkerEntrypoint<Pick<MainEnv,'ROLE_KEY'|'PINS'>>{
+ override async fetch(){return new Response(null,{status:404});}
+ async key(){return (JSON.parse(this.env.PINS) as PinPolicy).main;}
+ async sign(canonical:string){
+  if(canonical.length>4096||JSON.parse(canonical).domain!==MAIN_CONTINUATION_COMMIT_DOMAIN)throw unavailable();
+  return (await localSigner(this.env.ROLE_KEY,await this.key())).sign(canonical);
+ }
+}
+
 export class PilotCustodyPostFixture extends WorkerEntrypoint<CustodyEnv>{
  override async fetch(){return new Response(null,{status:404});}
  async post(input:ContinuationFreshHeadRequest,prior:SignedManagedOperation,main:SignedManagedOperation){

@@ -902,3 +902,45 @@ test('compiled disabled-by-default Main pilot HTTP proof binds the exact origina
  await f.veto();
  expect((await env.PILOT_MAIN_POST.fetch(send())).status).toBe(404);
 });
+
+import {PILOT_COMMIT_PATH,PILOT_PREFLIGHT_PATH,pilotCommitInput,pilotPreflightInput} from '../shared/pilot-continuation-post-wire.ts';
+test('pilot compiled Main preflight and commit-or-read require exact fresh independent evidence',async()=>{
+ const {f,input}=await continuationReadbackFixture(true);
+ const request=f.custodyInput(input,'A'.repeat(43));
+ const send=async(path:string,value:unknown)=>{
+  const url=new URL('https://api.web-pilot-device.fixture.invalid'+path),body=JSON.stringify(value);
+  return env.PILOT_MAIN_POST.fetch(new Request(url,{method:'POST',headers:{...await f.signedHeaders(url,body),'content-type':'application/json'},body}));
+ };
+ const count=()=>db().prepare('SELECT count(*) n FROM genesis_package_continuations').first('n');
+ const fresh=await send(PILOT_PREFLIGHT_PATH,pilotPreflightInput({request}));
+ expect(fresh.status).toBe(200);
+ const evidence=await fresh.json<{witness:{canonical:string;signature:string};freshHead:{canonical:string;signature:string}}>();
+ expect(await count()).toBe(0);
+ const candidate=pilotCommitInput({request,...evidence});
+ expect((await send(PILOT_COMMIT_PATH,{...candidate,request:{...request,nonce:'B'.repeat(42)+'A'}})).status).toBe(404);
+ expect(await count()).toBe(0);
+ const result=await send(PILOT_COMMIT_PATH,candidate);
+ expect(result.status).toBe(200);
+ const proof=await result.json<{canonical:string;signature:string}>();
+ expect(await verify(f.transportPins.main.publicKey,proof.signature,proof.canonical)).toBe(true);
+ expect(JSON.parse(proof.canonical)).toMatchObject({nonce:request.nonce,domain:MAIN_CONTINUATION_COMMIT_DOMAIN});
+ expect(await count()).toBe(1);
+ expect((await send(PILOT_COMMIT_PATH,candidate)).status).toBe(200);
+ expect(await count()).toBe(1);
+ await f.veto();
+ expect((await send(PILOT_COMMIT_PATH,candidate)).status).toBe(404);
+ expect(await count()).toBe(1);
+});
+
+test('pilot conditional insertion rechecks freshness and original device session inside transaction',async()=>{
+ const {f,input}=await continuationReadbackFixture();
+ const scope=await f.context('pilot-transaction-fence-fixture'),now=Math.floor(Date.now()/1000);
+ const count=()=>db().prepare('SELECT count(*) n FROM genesis_package_continuations').first('n');
+ const consume=(freshUntil:number)=>consumeGenesisPackageContinuation(db(),input,f.pins,{scope,freshUntil});
+ await expect(consume(now-1)).rejects.toThrow('idempotency_conflict');
+ expect(await count()).toBe(0);
+ await db().prepare('UPDATE device_sessions SET active=0 WHERE digest=?').bind(scope.sessionDigest).run();
+ await expect(consume(now+30)).rejects.toThrow('idempotency_conflict');
+ expect(await count()).toBe(0);
+ expect(await db().prepare('SELECT count(*) n FROM device_key_packages').first('n')).toBe(0);
+});

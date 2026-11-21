@@ -8,6 +8,6 @@ await build({absWorkingDir:root,entryPoints:['auth-trust-worker/pilot-continuati
  outfile:'dist/auth-trust-worker/pilot-continuation.js',bundle:true,format:'esm',platform:'neutral',
  mainFields:['module','main'],external:['cloudflare:workers','cloudflare:email','node:buffer','node:net'],
  target:'es2022',define:{AKC_PILOT_BROWSER_BUNDLE:JSON.stringify(bundle.outputFiles[0].text)}});
-await build({absWorkingDir:root,entryPoints:['api-worker/pilot-continuation-post.ts'],
+await build({absWorkingDir:root,entryPoints:['api-worker/pilot-continuation-main.ts'],
  outfile:'dist/api-worker/pilot-continuation-post.js',bundle:true,format:'esm',platform:'neutral',
  mainFields:['module','main'],external:['cloudflare:workers','cloudflare:email','node:buffer','node:net'],target:'es2022'});

@@ -4,6 +4,7 @@ import {ApiError,digest,verify} from '../shared/contracts.ts';
 import {canonicalGrant,canonicalPackage,type EnrollmentGrant,type KeyPackage} from '../shared/device-protocol.ts';
 import {canonicalContinuationIntent,canonicalContinuationReceipt} from '../shared/enrollment-continuation.ts';
 import {genesisRoot,type CheckpointKey,type CheckpointSigner} from '../shared/checkpoints.ts';
+import {pilotCommitInput} from '../shared/pilot-continuation-post-wire.ts';
 import {verifyWitness} from '../shared/roster-witness.ts';
 import {CONTINUATION_HEAD_DOMAIN,MAIN_CONTINUATION_COMMIT_DOMAIN} from '../shared/continuation-fresh-head.ts';
 export { MAIN_CONTINUATION_COMMIT_DOMAIN };
@@ -45,7 +46,7 @@ export function canonicalGenesisCommitExpectation(input:unknown):string{
  return JSON.stringify({continuationId,requestId,intentDigest,approvalDigest,payloadDigest});
 }
 
-async function lookupGenesisPackageCommit(db:D1Database,scope:DeviceContext,input:Expectation){
+async function lookupGenesisPackageCommit(db:Pick<D1Database,'prepare'>,scope:DeviceContext,input:Expectation){
   const row=await db.prepare(`SELECT c.old_grant,c.signed_intent,c.signed_approval,c.witness,c.roster_digest,c.key_epoch,
     p.canonical AS package_canonical,p.signature AS package_signature FROM genesis_package_continuations c
    JOIN enrollment_grants g ON g.id=c.request_id AND g.canonical=c.old_grant AND g.tenant_id=c.tenant_id
@@ -99,7 +100,7 @@ async function lookupGenesisPackageCommit(db:D1Database,scope:DeviceContext,inpu
 
 /** A read-only view owned by the Main transaction that wrote both immutable
  * records. This is a local projection, not a signed attestation. */
-export async function readGenesisPackageCommit(db:D1Database,scope:DeviceContext,input:Expectation){
+export async function readGenesisPackageCommit(db:Pick<D1Database,'prepare'>,scope:DeviceContext,input:Expectation){
  try{
   if(await digest(canonicalGenesisCommitExpectation(input))!==scope.bodyDigest)throw notFound();
   return (await lookupGenesisPackageCommit(db,scope,input)).commit;
@@ -130,13 +131,34 @@ export function canonicalGenesisCommitProofExpectation(input:unknown):string{
  * configuration, while the Custody assertion is generated and signed there.
  * The returned Main claim does not represent independent durability. */
 export async function proveGenesisPackageCommit(
- db:D1Database,scope:DeviceContext,input:ProofExpectation,
+ db:Pick<D1Database,'prepare'>,scope:DeviceContext,input:ProofExpectation,
+ custody:{readonly witness:SignedManagedOperation;readonly freshHead:SignedManagedOperation},
+ pins:ProofPins,localCommitKey:CheckpointSigner,
+):Promise<SignedManagedOperation>{
+ if(await digest(canonicalGenesisCommitProofExpectation(input))!==scope.bodyDigest)throw notFound();
+ return proveBoundCommit(db,scope,input,custody,pins,localCommitKey);
+}
+
+/** Scope digest derives from exactly the pilot request, never rewrites its branded context. */
+export async function provePilotGenesisPackageCommit(db:Pick<D1Database,'prepare'>,scope:DeviceContext,
+ body:unknown,pins:ProofPins,localCommitKey:CheckpointSigner):Promise<SignedManagedOperation>{
+ const {request,witness,freshHead}=pilotCommitInput(body);
+ if(await digest(JSON.stringify({request,witness,freshHead}))!==scope.bodyDigest)throw notFound();
+ const [target,grant]=[JSON.parse(request.target.canonical),JSON.parse(request.grant)] as [{id:string},EnrollmentGrant];
+ const {nonce}=request,custodyFreshHeadDigest=await signedDigest(freshHead);
+ const commit={continuationId:target.id,requestId:grant.requestId,intentDigest:await digest(request.target.canonical),
+  approvalDigest:await signedDigest(request.approval),payloadDigest:await digest(JSON.stringify(['AgentKeychain-enrollment-continuation-package-v1',request.keyPackage.canonical,request.keyPackage.signature]))};
+ const expectation={commit,nonce,custodyFreshHeadDigest};canonicalGenesisCommitProofExpectation(expectation);
+ return proveBoundCommit(db,scope,expectation,{witness,freshHead},pins,localCommitKey);
+}
+
+async function proveBoundCommit(
+ db:Pick<D1Database,'prepare'>,scope:DeviceContext,input:ProofExpectation,
  custody:{readonly witness:SignedManagedOperation;readonly freshHead:SignedManagedOperation},
  pins:ProofPins, localCommitKey:CheckpointSigner,
 ):Promise<SignedManagedOperation>{
  try{
   const {commit:request,nonce,custodyFreshHeadDigest}=input;
-  if(await digest(canonicalGenesisCommitProofExpectation(input))!==scope.bodyDigest)throw notFound();
   const record=await lookupGenesisPackageCommit(db,scope,request),actual=record.commit;
   const witness=envelope(JSON.stringify(custody.witness),8192),fresh=envelope(JSON.stringify(custody.freshHead),4096);
   if(fresh.canonical.length>2048||await signedDigest(fresh)!==custodyFreshHeadDigest||await signedDigest(witness)!==actual.witnessDigest)throw notFound();

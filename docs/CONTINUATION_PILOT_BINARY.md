@@ -51,3 +51,29 @@ authPinDigest, mainPinDigest, rolloutPinDigest, genesisPin, issuedAt, expiresAt
   Custody pre/post checks, genuine pilot secure-store/lease integration and
   full compiled response-loss/revocation acceptance. Runtime operators must
   validate those services against the same pinned graph before using it.
+
+## Installed narrow transport adapter
+
+A verified installation now creates a private branded transport scope. It cannot
+be reconstructed from the public `check-installation` output. The compiled
+command constructs that adapter but still does not invoke any operation.
+
+- Auth prepare and poll use only the exact signed Auth origin and existing
+  typed paths. Existing protected state helpers build and verify the
+  device-signed request and the Auth approval. The adapter supplies only a
+  credential-free HTTPS POST, no redirected or cross-origin response, and no
+  browser cookies, access token, or pair code in the request. Preparation
+  requires an explicit exact-stage pre-publish authorizer from composition.
+- The Main adapter exposes only the post-commit proof query, against the
+  signed Main origin and shared canonical wire. It requires exact protected
+  staged evidence under the existing local enrollment lease plus a currently
+  issued short-lived, original-device session from the caller. It locally
+  checks the device's request signature and independently checks the exact
+  nonce-bound returned Custody proof against retained staged evidence before
+  returning. It does not store the session, log its contents, kick off sync,
+  provision a session, or activate a profile.
+
+These ports do not enable a continuation command. Independently provisioned
+short-lived permit, compatible shared enrollment writers, pilot-only secure
+state and session acquisition, authenticated published Main preflight and
+commit-or-read, and complete enrolled-client acceptance are still required.

@@ -1,7 +1,7 @@
 import {URL} from 'node:url';
 import {digest,verify} from '../../managed-cloud/shared/contracts.ts';
 import {verifyContinuationAuthority,verifyContinuationCommitAuthority,verifyContinuationHandoffOrigin,
- verifyContinuationRolloutAuthority,verifyReleaseManifest} from './config.ts';
+ verifyContinuationRolloutAuthority,verifyReleaseManifest,type ManagedEndpointPolicy} from './config.ts';
 import {base64,exactFields,type SignedManagedOperation} from './protocol.ts';
 import {releaseArtifact} from './release.generated.ts';
 
@@ -18,6 +18,20 @@ export interface ContinuationPilotBuildArtifact {
  installation:SignedManagedOperation;
 }
 
+export interface VerifiedInstalledContinuationPilot {
+ readonly releaseId:string;
+ readonly contract:typeof INSTALLED_PILOT_CONTRACT;
+ readonly expiresAt:number;
+}
+type TransportScope={policy:ManagedEndpointPolicy;authOrigin:string;authOriginAppendix:SignedManagedOperation;
+ authAppendix:SignedManagedOperation;commitAppendix:SignedManagedOperation};
+const installedScopes=new WeakMap<VerifiedInstalledContinuationPilot,Readonly<TransportScope>>();
+export function installedContinuationPilotScope(gate:VerifiedInstalledContinuationPilot){
+ const scope=installedScopes.get(gate);
+ if(!scope||Math.floor(Date.now()/1000)>=gate.expiresAt)throw deny();
+ return scope;
+}
+
 function namespaceOrigin(origin:string):URL{
  const u=new URL(origin);
  if(u.origin!==origin||u.protocol!=='https:'||u.port||!u.hostname.includes('.')||
@@ -30,6 +44,8 @@ function namespaceOrigin(origin:string):URL{
  * reach this gate. No runtime override, enrollment storage, or transport. */
 export async function verifyInstalledContinuationPilot(artifact:ContinuationPilotBuildArtifact,rootPublicKey:string,target:string){
  try{
+  // Take an immutable local snapshot before the first asynchronous check.
+  artifact=JSON.parse(JSON.stringify(artifact)) as ContinuationPilotBuildArtifact;
   if(!/^(darwin|linux)-(arm64|x64)$/.test(target))throw deny();
   exactFields(artifact,['manifest','authOriginAppendix','authAppendix','commitAppendix','rolloutAppendix','installation']);
   base64(rootPublicKey,32,32);
@@ -46,7 +62,7 @@ export async function verifyInstalledContinuationPilot(artifact:ContinuationPilo
   const web=namespaceOrigin(manifest.webOrigin),api=namespaceOrigin(manifest.apiOrigin),authUrl=namespaceOrigin(authOrigin);
   const current=namespaceOrigin(existing.webOrigin).hostname;
   if(!/^api\.web-pilot-[a-z0-9](?:[a-z0-9-]{0,39}[a-z0-9])?\./.test(api.hostname)||api.hostname!=='api.'+web.hostname||
-    !/^auth-pilot-[a-z0-9]+(?:-[a-z0-9]+)*\./.test(authUrl.hostname)||
+    !/^auth-pilot-[a-z0-9]+(?:-[a-z0-9]+)*\.(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(authUrl.hostname)||
     [web,api,authUrl].some(u=>u.hostname===current||u.hostname.endsWith('.'+current)))throw deny();
   const manifestPins=(p:typeof manifest)=>[...p.checkpointKeys,...(p.witnessKeys??[]),...(p.recoveryAuthorities??[]),
    ...(p.recoveryServices?[p.recoveryServices.api,p.recoveryServices.custodian]:[])];
@@ -76,6 +92,9 @@ export async function verifyInstalledContinuationPilot(artifact:ContinuationPilo
    authPinDigest:await signedDigest(artifact.authAppendix),mainPinDigest:await signedDigest(artifact.commitAppendix),
    rolloutPinDigest:await signedDigest(artifact.rolloutAppendix),genesisPin,issuedAt,expiresAt});
   if(installation.canonical!==canonical||!await verify(rootPublicKey,installation.signature,canonical)||Math.floor(Date.now()/1000)>=expiresAt)throw deny();
-  return Object.freeze({releaseId:manifest.releaseId,contract:INSTALLED_PILOT_CONTRACT,expiresAt});
+  const gate=Object.freeze({releaseId:manifest.releaseId,contract:INSTALLED_PILOT_CONTRACT,expiresAt});
+  installedScopes.set(gate,Object.freeze({policy:manifest,authOrigin,authOriginAppendix:Object.freeze(artifact.authOriginAppendix),
+   authAppendix:Object.freeze(artifact.authAppendix),commitAppendix:Object.freeze(artifact.commitAppendix)}));
+  return gate;
  }catch{throw deny();}
 }
