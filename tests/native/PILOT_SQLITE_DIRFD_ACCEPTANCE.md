@@ -135,21 +135,31 @@ private pager state within that exclusivity, not an interoperability protocol
 with other SQLite clients. Only fixed SQL statements and the disposition
 approved by this fixture are implemented.
 
-Linux acceptance at the first actual main page write, after journal contents
-and its directory were synced: parent observes that callback, verifies an
-independently opened contender still gets busy, and SIGKILLs the writer before
-SQLite can sync and delete the journal. A fresh child reopens the same profile,
-requires SQLite to restore the exact original three rows and remove the
-existing journal, then retries one transaction. A third, freshly leased
-process reads the complete committed rows and matching database inode, checks
-integrity and requires no leftover journal. The commit requires DELETE journal
-mode, synchronous EXTRA, memory temp, and no mmap/WAL/SHM/extensions or stock
-VFS fallback. Directory sync is required when flushing a journal and when
-deleting it for this fixture.
+Each case provisions a separate fixture. The parent waits for an exact
+callback token, confirms a fresh independent lease attempt is busy, then
+SIGKILLs the writer before it can reply. Expected outcomes:
 
-One process-crash fence is not power-cut recovery, multiple-writer support,
-an installed pilot helper, or a general VFS. macOS full file sync plus
-directory behavior still requires runtime testing on each supported
-architecture/filesystem. Additional independent review, other callback crash
-fences, injected I/O/sync failure and races, and production ownership/security
-gates are all still open. Do not ship or enable storage from this test.
+| Test fence | Required first observable state after restart |
+| --- | --- |
+| Journal contents and directory synced; first dirty main page about to be written | All three old rows; recover and retry once |
+| First successful nonzero main page write; main not yet synced | All three old rows; recover and retry once |
+| Main file synced; journal still present | All three old rows; recover and retry once |
+| Journal unlinked and parent directory synced; commit not returned to caller | All three new rows; verify read-only, do not retry |
+| Test VFS injects EIO before first main pwrite | SQLite returns IOERR_WRITE, retains journal, reopens with all old rows before retry |
+
+The recovery child reopens the original lease and profile, checks each row
+including its fixed BLOB, runs SQLite integrity_check, and requires exactly
+one hot-journal removal before retry. A freshly leased read-only process
+verifies final committed rows and integrity with no residual journal; the
+parent confirms the main file retains its original inode. The VFS requires
+DELETE journal mode, synchronous EXTRA and memory temp, denies
+WAL/SHM/extensions or stock-path VFS fallback, and syncs the directory after
+journal sync and deletion.
+
+These are deterministic **process-failure** tests, not a physical power-cut,
+arbitrary multi-writer, production readiness, or installed helper claim.
+The synthetic EIO is injected in the VFS; it does not represent arbitrary
+OS, filesystem or device errors. Hosted macOS should verify the enlarged
+matrix anew even if an earlier single-fence pass is known. Independent
+audit and the remaining installed-broker/profile ownership and native
+credential gates are still open. Do not ship or enable storage from this test.

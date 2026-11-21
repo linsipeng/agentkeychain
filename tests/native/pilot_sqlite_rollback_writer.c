@@ -11,12 +11,15 @@
 
 enum { maximum = 1024 * 1024 };
 enum role { main_db, journal };
+enum fence { no_fence, journal_durable='J', first_dirty='W', main_durable='S', commit_durable='C', fail_first_write='E' };
 struct run {
     struct scope scope;
     int parent, lease, fence_fd, keepalive;
     ino_t lock_inode;
     bool main_open, journal_open, journal_synced, dirty, main_synced, fault, verify_only;
     unsigned deletions;
+    enum fence barrier;
+    bool fault_injected;
     int level;
 };
 struct file { sqlite3_file base; struct run *r; int fd; enum role role; };
@@ -60,24 +63,33 @@ static int read_file(sqlite3_file *p,void *dest,int n,sqlite3_int64 offset) {
 static bool may_mutate(struct file *f) {
     return !f->r->verify_only && live_file(f) && (f->role==journal || (f->r->level==SQLITE_LOCK_EXCLUSIVE && f->r->journal_synced));
 }
-static void main_change(struct file *f,bool can_fence) {
-    if(f->role!=main_db)return;
+static void pause_at(struct run *r,enum fence reached) {
+    if(r->barrier!=reached||r->fence_fd<0)return;
+    const char token=(char)reached;
+    if(write(r->fence_fd,&token,1)!=1)_exit(94);
+    /* A parent error closes the pipe; no orphan keeps the lease. */
+    char dummy;
+    while(read(r->keepalive,&dummy,1)<0&&errno==EINTR){}
+    _exit(93);
+}
+static void main_change(struct file *f) {
     f->r->main_synced=false;
-    if(can_fence&&!f->r->dirty&&f->r->fence_fd>=0){
-        /* Pager must have durably flushed a usable journal before this write.
-         * Pause AFTER actual data changed, BEFORE SQLite can sync/delete. */
-        if(write(f->r->fence_fd,"W",1)!=1)_exit(94);
-        /* Parent normally SIGKILLs. If the test itself is interrupted, its
-         * pipe closes and the child exits without an orphaned lease. */
-        char dummy;
-        while(read(f->r->keepalive,&dummy,1)<0&&errno==EINTR){}
-        _exit(93);
-    }
     f->r->dirty=true;
 }
 static int write_file(sqlite3_file *p,const void *src,int n,sqlite3_int64 offset) {
     struct file *f=(struct file *)p;
     if(!may_mutate(f)||!bounds(n,offset))return fail(f->r,SQLITE_IOERR_WRITE);
+    const bool first_page=f->role==main_db&&!f->r->dirty&&n>0;
+    if(first_page) {
+        /* may_mutate has already verified exact lease, main fd, EXCLUSIVE
+         * pager level, and synced journal contents plus directory. */
+        pause_at(f->r,journal_durable);
+        if(f->r->barrier==fail_first_write){
+            f->r->fault_injected=true;
+            errno=EIO; /* test VFS simulates an underlying pwrite EIO */
+            return fail(f->r,SQLITE_IOERR_WRITE);
+        }
+    }
     const unsigned char *b=src;size_t done=0;
     while(done<(size_t)n){
         const ssize_t got=pwrite(f->fd,b+done,(size_t)n-done,(off_t)(offset+(sqlite3_int64)done));
@@ -87,14 +99,17 @@ static int write_file(sqlite3_file *p,const void *src,int n,sqlite3_int64 offset
     }
     if(n){
         if(f->role==journal)f->r->journal_synced=false;
-        else main_change(f,true);
+        else {
+            main_change(f);
+            if(first_page)pause_at(f->r,first_dirty);
+        }
     }
     return SQLITE_OK;
 }
 static int truncate_file(sqlite3_file *p,sqlite3_int64 length) {
     struct file *f=(struct file *)p;
     if(!may_mutate(f)||!bounds(0,length)||ftruncate(f->fd,(off_t)length)!=0)return fail(f->r,SQLITE_IOERR_TRUNCATE);
-    if(f->role==journal)f->r->journal_synced=false;else main_change(f,false);
+    if(f->role==journal)f->r->journal_synced=false;else main_change(f);
     return SQLITE_OK;
 }
 static int verified_sync(int fd) {
@@ -113,7 +128,10 @@ static int sync_file(sqlite3_file *p,int flags) {
     if(f->role==journal){
         if(fsync(f->r->scope.directory)!=0)return fail(f->r,SQLITE_IOERR_DIR_FSYNC);
         f->r->journal_synced=true;
-    }else f->r->main_synced=true;
+    }else {
+        f->r->main_synced=true;
+        if(f->r->dirty&&f->r->journal_synced)pause_at(f->r,main_durable);
+    }
     return SQLITE_OK;
 }
 static int file_size(sqlite3_file *p,sqlite3_int64 *n) {
@@ -190,7 +208,10 @@ static int delete_file(sqlite3_vfs *v,const char *name,int sync) {
     if(r->verify_only||!lease_live(r)||!name||strcmp(name,rollback_name)||(r->dirty&&(!r->main_synced||gate_access(&r->scope,name)!=1)))
         return fail(r,SQLITE_IOERR_DELETE);
     if(gate_delete_journal(&r->scope,name,true)!=0)return fail(r,SQLITE_IOERR_DELETE);
-    r->deletions++;r->journal_synced=false;r->dirty=false;r->main_synced=false;return SQLITE_OK;
+    const bool dirty_commit=r->dirty&&r->main_synced;
+    r->deletions++;r->journal_synced=false;r->dirty=false;r->main_synced=false;
+    if(dirty_commit&&gate_access(&r->scope,name)==0)pause_at(r,commit_durable);
+    return SQLITE_OK;
 }
 static int canonical_path(sqlite3_vfs *v,const char *name,int n,char *out) {
     struct run *r=v->pAppData;
@@ -219,9 +240,9 @@ static void sql(sqlite3 *db,const char *statement) {
     if(rc!=SQLITE_OK)fprintf(stderr,"SQL fixed fixture failure %d / %d: %s\n",rc,sqlite3_extended_errcode(db),sqlite3_errmsg(db));
     CHECK(rc==SQLITE_OK);
 }
-static void writer(struct run r,int fence,int keepalive,bool read_committed) {
+static void writer(struct run r,enum fence barrier,int fence_fd,int keepalive,bool read_committed) {
     CHECK(acquire(&r.scope,r.parent,r.lock_inode,&r.lease)==lease_held);
-    r.fence_fd=fence;r.keepalive=keepalive;r.verify_only=read_committed;
+    r.barrier=barrier;r.fence_fd=fence_fd;r.keepalive=keepalive;r.verify_only=read_committed;
     sqlite3_vfs v={.iVersion=1,.szOsFile=sizeof(struct file),.mxPathname=128,.zName=vfs_name,.pAppData=&r,
         .xOpen=open_file,.xDelete=delete_file,.xAccess=access_file,.xFullPathname=canonical_path,.xRandomness=randomness,
         .xSleep=sleep_for,.xCurrentTime=clock_now};
@@ -237,14 +258,18 @@ static void writer(struct run r,int fence,int keepalive,bool read_committed) {
     }
     /* Read verifies the previous full state, not an aggregate coincidence.
      * SQLite must replay before the second child can observe old rows. */
-    const char *old="SELECT count(*) FROM witness WHERE (rowid=1 AND i=10) OR (rowid=2 AND i=11) OR (rowid=3 AND i=12)";
-    const char *updated="SELECT count(*) FROM witness WHERE (rowid=1 AND i=20) OR (rowid=2 AND i=21) OR (rowid=3 AND i=22)";
+    const char *old="SELECT count(*) FROM witness WHERE p=zeroblob(3000) AND ((rowid=1 AND i=10) OR (rowid=2 AND i=11) OR (rowid=3 AND i=12))";
+    const char *updated="SELECT count(*) FROM witness WHERE p=zeroblob(3000) AND ((rowid=1 AND i=20) OR (rowid=2 AND i=21) OR (rowid=3 AND i=22))";
     CHECK(scalar(db,"SELECT count(*) FROM witness")==3 && scalar(db,read_committed?updated:old)==3);
     CHECK(scalar(db,"SELECT count(*) FROM pragma_integrity_check WHERE integrity_check='ok'")==1);
     CHECK(r.deletions==(unsigned)had_journal&&gate_access(&r.scope,rollback_name)==0);
-    if(!read_committed){
+    if(barrier==fail_first_write){
+        const int rc=sqlite3_exec(db,"BEGIN IMMEDIATE; UPDATE witness SET i=i+10; COMMIT;",NULL,NULL,NULL);
+        CHECK(rc==SQLITE_IOERR && sqlite3_extended_errcode(db)==SQLITE_IOERR_WRITE && r.fault_injected);
+        CHECK(!r.dirty&&r.deletions==0&&gate_access(&r.scope,rollback_name)==1);
+    }else if(!read_committed){
         sql(db,"BEGIN IMMEDIATE; UPDATE witness SET i=i+10; COMMIT;");
-        CHECK(fence<0 && r.deletions==(unsigned)had_journal+1 && lease_live(&r) && scalar(db,updated)==3);
+        CHECK(fence_fd<0 && r.deletions==(unsigned)had_journal+1 && lease_live(&r) && scalar(db,updated)==3);
     }else CHECK(r.deletions==0&&lease_live(&r));
     CHECK(sqlite3_close(db)==SQLITE_OK && sqlite3_vfs_unregister(&v)==SQLITE_OK);
     close_checked(r.lease);
@@ -262,9 +287,7 @@ static int wait_child(pid_t p) {
     }
     CHECK(got==p);return st;
 }
-int main(void) {
-    CHECK(getuid()!=0&&getuid()==geteuid()&&sqlite3_libversion_number()==3054001&&!strcmp(sqlite3_sourceid(),sqlite_source));
-    umask(077);
+static void run_case(enum fence barrier,const char *name) {
     char tmp[]="/tmp/akc-rollback-XXXXXX";CHECK(mkdtemp(tmp)!=NULL);
     const int top=open(tmp,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
     CHECK(top>=0&&mkdirat(top,"pilot",0700)==0);
@@ -283,25 +306,34 @@ int main(void) {
     CHECK(fd>=0&&write(fd,data,(size_t)n)==n&&fstat(fd,&original)==0&&fsync(fd)==0&&fsync(dir)==0);
     close_checked(fd);sqlite3_free(data);CHECK(sqlite3_close(seed)==SQLITE_OK);
     close_checked(r.lease);r.lease=-1; /* no inherited lease */
-    int pipefd[2],alive[2];CHECK(pipe(pipefd)==0&&pipe(alive)==0);
-    const pid_t first=fork();CHECK(first>=0);
-    if(first==0){close_checked(pipefd[0]);close_checked(alive[1]);writer(r,pipefd[1],alive[0],false);_exit(95);}
-    close_checked(pipefd[1]);close_checked(alive[0]);
-    struct pollfd pollfd={.fd=pipefd[0],.events=POLLIN};char token=0;
-    const bool fence_hit=poll(&pollfd,1,5000)==1&&(pollfd.revents&POLLIN)&&read(pipefd[0],&token,1)==1&&token=='W';
-    close_checked(pipefd[0]);
-    int contender=-1;
-    const enum lease_state while_first=fence_hit?acquire(&r.scope,top,r.lock_inode,&contender):lease_rejected;
-    const int killed=kill(first,SIGKILL);close_checked(alive[1]);
-    const int status=wait_child(first);
-    CHECK(fence_hit&&while_first==lease_busy&&contender<0&&killed==0&&WIFSIGNALED(status)&&WTERMSIG(status)==SIGKILL);
-    CHECK(gate_access(&r.scope,rollback_name)==1);
-    const pid_t second=fork();CHECK(second>=0);
-    if(second==0){writer(r,-1,-1,false);_exit(0);}
-    const int reopened=wait_child(second);CHECK(WIFEXITED(reopened)&&WEXITSTATUS(reopened)==0);
-    CHECK(gate_access(&r.scope,rollback_name)==0);
+    if(barrier==fail_first_write){
+        const pid_t fault=fork();CHECK(fault>=0);
+        if(fault==0){writer(r,barrier,-1,-1,false);_exit(0);}
+        const int rejected=wait_child(fault);
+        CHECK(WIFEXITED(rejected)&&WEXITSTATUS(rejected)==0);
+    }else{
+        int pipefd[2],alive[2];CHECK(pipe(pipefd)==0&&pipe(alive)==0);
+        const pid_t first=fork();CHECK(first>=0);
+        if(first==0){close_checked(pipefd[0]);close_checked(alive[1]);writer(r,barrier,pipefd[1],alive[0],false);_exit(95);}
+        close_checked(pipefd[1]);close_checked(alive[0]);
+        struct pollfd pollfd={.fd=pipefd[0],.events=POLLIN};char token=0;
+        const bool fence_hit=poll(&pollfd,1,5000)==1&&(pollfd.revents&POLLIN)&&read(pipefd[0],&token,1)==1&&token==(char)barrier;
+        close_checked(pipefd[0]);
+        int contender=-1;
+        const enum lease_state while_first=fence_hit?acquire(&r.scope,top,r.lock_inode,&contender):lease_rejected;
+        const int killed=kill(first,SIGKILL);close_checked(alive[1]);
+        const int status=wait_child(first);
+        CHECK(fence_hit&&while_first==lease_busy&&contender<0&&killed==0&&WIFSIGNALED(status)&&WTERMSIG(status)==SIGKILL);
+    }
+    CHECK(gate_access(&r.scope,rollback_name)==(barrier==commit_durable?0:1));
+    if(barrier!=commit_durable){
+        const pid_t second=fork();CHECK(second>=0);
+        if(second==0){writer(r,no_fence,-1,-1,false);_exit(0);}
+        const int reopened=wait_child(second);CHECK(WIFEXITED(reopened)&&WEXITSTATUS(reopened)==0);
+        CHECK(gate_access(&r.scope,rollback_name)==0);
+    }
     const pid_t third=fork();CHECK(third>=0);
-    if(third==0){writer(r,-1,-1,true);_exit(0);}
+    if(third==0){writer(r,no_fence,-1,-1,true);_exit(0);}
     const int committed=wait_child(third);CHECK(WIFEXITED(committed)&&WEXITSTATUS(committed)==0);
     CHECK(gate_access(&r.scope,rollback_name)==0);
     struct stat after;CHECK(fstatat(dir,main_name,&after,AT_SYMLINK_NOFOLLOW)==0&&after.st_ino==original.st_ino);
@@ -312,6 +344,15 @@ int main(void) {
     close_checked(r.lease);
     close_checked(dir);CHECK(unlinkat(top,"pilot",AT_REMOVEDIR)==0);
     close_checked(top);CHECK(rmdir(tmp)==0);
-    puts("PASS pinned SQLite rollback after SIGKILL and exact protected retry (synthetic only)");
+    printf("PASS pinned SQLite %s (synthetic local process-failure only)\n",name);
+}
+int main(void) {
+    CHECK(getuid()!=0&&getuid()==geteuid()&&sqlite3_libversion_number()==3054001&&!strcmp(sqlite3_sourceid(),sqlite_source));
+    umask(077);
+    run_case(journal_durable,"journal synced, before main write: original then retry");
+    run_case(first_dirty,"actual first dirty main page: rollback then retry");
+    run_case(main_durable,"main synced, journal intact: rollback then retry");
+    run_case(commit_durable,"journal removed and parent synced: committed, no retry");
+    run_case(fail_first_write,"injected main-write EIO: reject and recover before retry");
     return 0;
 }
