@@ -102,3 +102,22 @@ and randomness callbacks are not eligible for reuse in a writer: reserved
 locks, real exclusion across processes, failure-safe journal create/delete,
 fsync, crash replay, production trust wiring, and Darwin execution are still
 separate gates.
+
+## Phase 2 dependency: independent operating-system lease
+
+`pilot_sqlite_writer_lease.c` is a separate test-only process fixture. It
+checks that a fresh contender cannot acquire an existing, exact-inode lease
+while another process holds it, then can claim that same inode after the
+owner is killed. It rejects a missing, linked or substituted file instead
+of creating or unlinking a lock at startup. Build and run as an ordinary
+user on a disposable host:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror -pedantic -O2 \
+  tests/native/pilot_sqlite_writer_lease.c -o "$out/pilot-lease-test"
+"$out/pilot-lease-test"
+```
+
+This is only a prerequisite for the rollback writer. It does not exercise
+any SQLite write, journal, or recovery. The POSIX lock coordinates
+cooperating brokers, not arbitrary writers using the same UID.
