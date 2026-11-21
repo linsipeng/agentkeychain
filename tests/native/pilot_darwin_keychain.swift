@@ -9,13 +9,14 @@ import Darwin
 // Closed enumeration only: do not reflect Error descriptions or arguments.
 enum GatePhase: String {
  case argumentShape, runnerUID, runnerGitHub, runnerHosted, fixtureMode, rootCanonical, rootIdentity, scratchCanonical
- case ancestorStat, ancestorIdentity, ancestorSticky, ancestorModes, rootCreate, randomSource, randomShape
+ case canonicalLookup, ancestorStat, ancestorIdentity, ancestorSticky, ancestorModes, rootCreate, randomSource, randomShape
+ case directoryOpen, directoryStat, childStat
  case snapshotSearch, snapshotSearchDecode, snapshotDefault, snapshotDefaultDecode
  case fixtureBasename, fixtureAbsent, fixtureAlreadyExists, fixtureMetadata
  case filesystemType, filesystemOwner, filesystemPermissions, filesystemLinkCount
  case fixtureAlias, fixtureOpen, fixtureOpenRef, fixtureIdentity, fixturePairDistinct
  case securityPath, securityPathBuffer, securityPathEncoding, securityStatus, securityFlags
- case createBeforeSnapshot, createAfterSnapshot, createAPI, createRefPath, createMetadata
+ case createBeforeSnapshot, createAfterSnapshot, createAPI, createRefPath
  case unlockAPI, unlockAfterSnapshot, unlockedFlags, provisionIdentity, provisionFinalSnapshot
  case provisionStatusBeforeUnlock, provisionStatusAfterUnlock
  case slotPolicy, itemAdd, itemRead, itemReadDecode, itemDelete
@@ -39,6 +40,39 @@ func signedStatus(_ status: OSStatus, _ phase: GatePhase) throws {
 // Read errno immediately after the failing syscall. No path is logged.
 func syscallStatus(_ status: Int32, _ phase: GatePhase) throws {
  if status != 0 { throw GateFailure.posix(phase, errno) }
+}
+
+// Foundation's URL.resolvingSymlinksInPath may remove a leading /private.
+// Compare the POSIX canonical spelling instead, without accepting aliases.
+func canonicalPOSIX(_ path: String) throws -> String {
+ var chars = [CChar](repeating: 0, count: Int(PATH_MAX))
+ let canonical = try chars.withUnsafeMutableBufferPointer { buf -> String in
+  guard let buffer = buf.baseAddress else { throw GateFailure.denied(.canonicalLookup) }
+  let result = path.withCString { realpath($0, buffer) }
+  guard result != nil else { throw GateFailure.posix(.canonicalLookup, errno) }
+  guard let value = String(validatingUTF8: buffer) else { throw GateFailure.denied(.canonicalLookup) }
+  return value
+ }
+ return canonical
+}
+
+func directoryFD(_ path: String, at parent: Int32? = nil) throws -> Int32 {
+ let fd = path.withCString { name in
+  if let parent = parent { return openat(parent, name, O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC) }
+  return open(name, O_RDONLY | O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC)
+ }
+ guard fd >= 0 else { throw GateFailure.posix(.directoryOpen, errno) }
+ return fd
+}
+
+func statDirectory(_ fd: Int32) throws -> stat {
+ var row = stat()
+ try syscallStatus(fstat(fd, &row), .directoryStat)
+ try require((row.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR), .filesystemType)
+ return row
+}
+func sameIdentity(_ a: stat, _ b: stat) -> Bool {
+ a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_uid == b.st_uid && a.st_mode == b.st_mode
 }
 
 func keychainPath(_ keychain: SecKeychain) throws -> String {
@@ -70,25 +104,38 @@ func snapshot() throws -> [String] {
 func privateMetadata(_ path: String, directory: Bool, phase: GatePhase = .fixtureMetadata) throws -> stat {
  var row = stat()
  try syscallStatus(path.withCString { lstat($0, &row) }, phase)
+ try checkPrivateMetadata(row, directory: directory)
+ return row
+}
+func checkPrivateMetadata(_ row: stat, directory: Bool) throws {
  let type = directory ? S_IFDIR : S_IFREG
  try require((row.st_mode & mode_t(S_IFMT)) == mode_t(type), .filesystemType)
  try require(row.st_uid == geteuid(), .filesystemOwner)
  try require((row.st_mode & 0o7777) == (directory ? 0o700 : 0o600), .filesystemPermissions)
  try require(directory || row.st_nlink == 1, .filesystemLinkCount)
+}
+func fixtureMetadata(directory: Int32, name: String, path: String) throws -> stat {
+ var row = stat()
+ try syscallStatus(name.withCString { fstatat(directory, $0, &row, AT_SYMLINK_NOFOLLOW) }, .childStat)
+ try checkPrivateMetadata(row, directory: false)
+ let visible = try privateMetadata(path, directory: false)
+ try require(sameIdentity(row, visible), .fixtureIdentity)
  return row
 }
 
 struct Fixture {
  let path: String
+ let name: String
+ let directoryFD: Int32
  let keychain: SecKeychain
  let device: dev_t
  let inode: ino_t
  let expectedService: String
 
- init(directory: String, basename: String, outside: [String], expectedService: String) throws {
+ init(directory: String, directoryFD: Int32, basename: String, outside: [String], expectedService: String) throws {
   try require(["pilot-primary.keychain-db", "pilot-sibling.keychain-db"].contains(basename), .fixtureBasename)
   let path = directory + "/" + basename
-  let row = try privateMetadata(path, directory: false)
+  let row = try fixtureMetadata(directory: directoryFD, name: basename, path: path)
   try require(!outside.contains(path), .fixtureAlias)
   for candidate in outside where !candidate.isEmpty {
    // A fixture may not alias an existing/default search-list database.
@@ -101,6 +148,8 @@ struct Fixture {
   try signedStatus(path.withCString { SecKeychainOpen($0, &selected) }, .fixtureOpen)
   guard let loaded = selected else { throw GateFailure.denied(.fixtureOpenRef) }
   self.path = path
+  self.name = basename
+  self.directoryFD = directoryFD
   self.keychain = loaded
   self.device = row.st_dev
   self.inode = row.st_ino
@@ -109,7 +158,7 @@ struct Fixture {
  }
 
  func recheck() throws {
-  let row = try privateMetadata(path, directory: false)
+  let row = try fixtureMetadata(directory: directoryFD, name: name, path: path)
   let explicit = try keychainPath(keychain)
   try require(row.st_dev == device && row.st_ino == inode && explicit == path, .fixtureIdentity)
   var status: SecKeychainStatus = 0
@@ -156,30 +205,43 @@ struct Fixture {
 // Candidate fixture preparation only. Public SecKeychainCreate uses the
 // private-path branch in the reviewed Apple Security source. Check observed
 // default/search-list state around each create on the disposable runner.
-func provisionDisposableKeychains(before: [String]) throws -> String {
+func provisionDisposableKeychains(before: [String]) throws -> (path: String, fd: Int32) {
  let parent = "/private/tmp"
- let parentURL = URL(fileURLWithPath: parent, isDirectory: true)
- try require(parentURL.resolvingSymlinksInPath().path == parent, .scratchCanonical)
- // Only the fixed canonical system scratch ancestor is accepted. Its writable
- // final component must be root-owned + sticky; the new child is owner-only.
- for name in ["/", "/private", parent] {
-  var metadata = stat()
-  try syscallStatus(name.withCString { lstat($0, &metadata) }, .ancestorStat)
-  try require((metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR) && metadata.st_uid == 0, .ancestorIdentity)
-  if name == parent { try require((metadata.st_mode & 0o1000) != 0, .ancestorSticky) }
+ try require(try canonicalPOSIX(parent) == parent, .scratchCanonical)
+ // Anchor from the root and refuse symlinks at every trusted ancestor.
+ let rootFD = try directoryFD("/")
+ defer { close(rootFD) }
+ let privateFD = try directoryFD("private", at: rootFD)
+ defer { close(privateFD) }
+ let scratchFD = try directoryFD("tmp", at: privateFD)
+ defer { close(scratchFD) }
+ for (path, fd) in [("/", rootFD), ("/private", privateFD), (parent, scratchFD)] {
+  let metadata = try statDirectory(fd)
+  var visible = stat()
+  try syscallStatus(path.withCString { lstat($0, &visible) }, .ancestorStat)
+  try require(metadata.st_uid == 0 && sameIdentity(metadata, visible), .ancestorIdentity)
+  if fd == scratchFD { try require((metadata.st_mode & 0o1000) != 0, .ancestorSticky) }
   else { try require((metadata.st_mode & 0o022) == 0, .ancestorModes) }
  }
  let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
  try require(suffix.range(of: #"^[a-f0-9]{32}$"#, options: .regularExpression) != nil, .randomShape)
- let root = parent + "/akc-pilot-native-" + suffix
- try syscallStatus(root.withCString { mkdir($0, 0o700) }, .rootCreate)
- let original = try privateMetadata(root, directory: true, phase: .rootIdentity)
- try require(URL(fileURLWithPath: root, isDirectory: true).resolvingSymlinksInPath().path == root, .rootCanonical)
+ let leaf = "akc-pilot-native-" + suffix
+ let root = parent + "/" + leaf
+ try syscallStatus(leaf.withCString { mkdirat(scratchFD, $0, 0o700) }, .rootCreate)
+ let fd = try directoryFD(leaf, at: scratchFD)
+ var transferFD = false
+ defer { if !transferFD { close(fd) } }
+ let original = try statDirectory(fd)
+ try checkPrivateMetadata(original, directory: true)
+ let visible = try privateMetadata(root, directory: true, phase: .rootIdentity)
+ try require(sameIdentity(visible, original), .rootIdentity)
+ try require(try canonicalPOSIX(root) == root, .rootCanonical)
  // No recursive filesystem cleanup and no Keychain delete or config API.
  // Only dispose the ephemeral runner; partial synthetic fixtures remain there.
  func checkRoot() throws {
   let current = try privateMetadata(root, directory: true, phase: .rootIdentity)
-  try require(current.st_dev == original.st_dev && current.st_ino == original.st_ino, .rootIdentity)
+  let retained = try statDirectory(fd)
+  try require(sameIdentity(current, original) && sameIdentity(retained, original), .rootIdentity)
  }
  func create(_ name: String) throws {
   try require(["pilot-primary.keychain-db", "pilot-sibling.keychain-db"].contains(name), .fixtureBasename)
@@ -187,7 +249,7 @@ func provisionDisposableKeychains(before: [String]) throws -> String {
   try require(try snapshot() == before, .createBeforeSnapshot)
   let path = root + "/" + name
   var old = stat()
-  let existsStatus = path.withCString { lstat($0, &old) }
+  let existsStatus = name.withCString { fstatat(fd, $0, &old, AT_SYMLINK_NOFOLLOW) }
   let existsErrno = errno
   if existsStatus == 0 { throw GateFailure.denied(.fixtureAlreadyExists) }
   if existsStatus != -1 || existsErrno != ENOENT { throw GateFailure.posix(.fixtureAbsent, existsErrno) }
@@ -216,7 +278,7 @@ func provisionDisposableKeychains(before: [String]) throws -> String {
   try checkRoot()
   try signedStatus(createStatus, .createAPI)
   guard let keychain = selected, try keychainPath(keychain) == path else { throw GateFailure.denied(.createRefPath) }
-  let created = try privateMetadata(path, directory: false, phase: .createMetadata)
+  let created = try fixtureMetadata(directory: fd, name: name, path: path)
   var status: SecKeychainStatus = 0
   try signedStatus(SecKeychainGetStatus(keychain, &status), .provisionStatusBeforeUnlock)
   if (status & kSecUnlockStateStatus) == 0 {
@@ -229,14 +291,15 @@ func provisionDisposableKeychains(before: [String]) throws -> String {
   }
   try signedStatus(SecKeychainGetStatus(keychain, &status), .provisionStatusAfterUnlock)
   try require((status & kSecUnlockStateStatus) != 0, .unlockedFlags)
-  let still = try privateMetadata(path, directory: false)
+  let still = try fixtureMetadata(directory: fd, name: name, path: path)
   try require(still.st_dev == created.st_dev && still.st_ino == created.st_ino, .provisionIdentity)
   try require(try snapshot() == before, .provisionFinalSnapshot)
  }
  try create("pilot-primary.keychain-db")
  try create("pilot-sibling.keychain-db")
  try checkRoot()
- return root
+ transferFD = true
+ return (root, fd)
 }
 
 func run() throws {
@@ -252,15 +315,27 @@ func run() throws {
  let marker = provision ? "create-two-private-keychains-v1" : "explicit-two-keychains-v1"
  try require(env["AKC_DISPOSABLE_DARWIN_FIXTURE"] == marker, .fixtureMode)
  let before = try snapshot()
- let root = provision ? try provisionDisposableKeychains(before: before) : argument
- let url = URL(fileURLWithPath: root, isDirectory: true)
- try require(root.hasPrefix("/") && url.resolvingSymlinksInPath().path == root &&
-             url.lastPathComponent.range(of: #"^akc-pilot-native-[a-f0-9]{32}$"#, options: .regularExpression) != nil, .rootCanonical)
- _ = try privateMetadata(root, directory: true, phase: .rootIdentity)
+ func requireCanonicalRoot(_ path: String) throws {
+  let leaf = path.split(separator: "/").last.map { String($0) } ?? ""
+  try require(path.hasPrefix("/") && leaf.range(of: #"^akc-pilot-native-[a-f0-9]{32}$"#, options: .regularExpression) != nil, .rootCanonical)
+  try require(try canonicalPOSIX(path) == path, .rootCanonical)
+ }
+ let location: (path: String, fd: Int32)
+ if provision {
+  location = try provisionDisposableKeychains(before: before)
+ } else {
+  try requireCanonicalRoot(argument)
+  location = (argument, try directoryFD(argument))
+ }
+ defer { close(location.fd) }
+ let root = location.path
+ try requireCanonicalRoot(root)
+ let named = try privateMetadata(root, directory: true, phase: .rootIdentity)
+ try require(sameIdentity(named, try statDirectory(location.fd)), .rootIdentity)
  var aliases = Set<String>()
  for configured in before where !configured.isEmpty {
   aliases.insert(configured)
-  aliases.insert(URL(fileURLWithPath: configured).resolvingSymlinksInPath().path)
+  if let resolved = try? canonicalPOSIX(configured) { aliases.insert(resolved) }
  }
  // Same random synthetic namespace and exact slot in both stores. This
  // isolates the keychain boundary independently of the namespace check.
@@ -268,8 +343,8 @@ func run() throws {
               UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
  let service = "agentkeychain.pilot." + suffix
  try require(suffix != String(repeating: "0", count: 64), .randomShape)
- let one = try Fixture(directory: root, basename: "pilot-primary.keychain-db", outside: Array(aliases), expectedService: service)
- let two = try Fixture(directory: root, basename: "pilot-sibling.keychain-db", outside: Array(aliases), expectedService: service)
+ let one = try Fixture(directory: root, directoryFD: location.fd, basename: "pilot-primary.keychain-db", outside: Array(aliases), expectedService: service)
+ let two = try Fixture(directory: root, directoryFD: location.fd, basename: "pilot-sibling.keychain-db", outside: Array(aliases), expectedService: service)
  try require(one.device != two.device || one.inode != two.inode, .fixturePairDistinct)
  let slot = "synthetic-acceptance-marker", first = Data("synthetic-primary".utf8), second = Data("synthetic-sibling".utf8)
  // Check local policy without submitting an ordinary namespace to Security.
