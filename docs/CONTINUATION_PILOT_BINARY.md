@@ -180,3 +180,23 @@ hardlink refusal and interruption/restart under that disposable account, then
 bind it to the same signed pilot location and exact original-device session.
 In-memory enrollment fixtures remain test-only and cannot clear either gate.
 No persistent pilot profile, fallback seal, or OS secret access is enabled.
+
+## Offline transfer fixture (PR only)
+
+The disposable AMD64/ARM64 Ubuntu fixture builds the actual standalone pilot
+binary with one-run synthetic trust, signs a separate exact-target package
+descriptor, copies the binary from an offline fixture directory to a fresh
+owner-only alternate install directory, and then invokes the transferred
+binary after deleting the source and public build inputs. The test-only
+admission utility reads through no-follow descriptors, limits the copy and
+checks the signed byte count and SHA-256 before no-overwrite publication; it
+does not unpack archives. Wrong signer, stale claim, wrong architecture,
+wrong hash, changed bytes, symlink input, or occupied destination deny.
+
+The installed command still reports `transport_unavailable`. Neither
+environment overrides nor the ordinary synthetic Vault marker allow login,
+continuation or native dispatch. No ordinary install directory is modified.
+The fixture assumes a single owner on a disposable runner and does not establish
+publisher identity, provide a distributor/installer, touch native stores,
+or enable runtime transport. No changes to normal installer, build/release, or
+CLI code.

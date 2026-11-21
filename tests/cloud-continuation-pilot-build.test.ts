@@ -330,3 +330,72 @@ test('Darwin package index binds exact staged bytes to this pilot, not Apple pub
  await expect(check(await (await authority()).sign(JSON.stringify(claim)))).rejects.toThrow(denied);
  await expect(check(await root.sign(JSON.stringify(claim,null,2)))).rejects.toThrow(denied);
 });
+
+test('offline pilot smoke installs the actual synthetic candidate only into the alternate directory',async()=>{
+ if(process.platform!=='linux'||!process.getuid?.()||!['x64','arm64'].includes(process.arch))return;
+ const {admitDisposablePilotPackage,offlineDomain}=await import('./native/pilot_offline_package.ts');
+ const {mkdir,lstat,rename,open}=await import('node:fs/promises');
+ const {createHash}=await import('node:crypto');
+ const {installedContinuationPilotScope}=await import('../src/cloud/continuation-pilot-build.ts');
+ const {artifact,root,target,rollout,expiresAt}=await makeArtifact();
+ const gate=await verifyInstalledContinuationPilot(artifact,root.publicKey,target),scope=installedContinuationPilotScope(gate);
+ const dir=await mkdtemp('/tmp/akc-offline-pilot-');
+ try{
+  const inbox=join(dir,'offline'),alternate=join(dir,'alternate'),home=join(dir,'home');
+  for(const folder of [inbox,alternate,home])await mkdir(folder,{mode:0o700});
+  const ordinary=join(home,'.agentkeychain'),defaultInstall=join(home,'.local','bin');
+  await mkdir(ordinary,{mode:0o700});await mkdir(defaultInstall,{recursive:true,mode:0o700});
+  const marker=join(ordinary,'vault.db'),ordinaryBin=join(defaultInstall,'agentkeychain');
+  await writeFile(marker,'ordinary fixture untouched',{flag:'wx'});await writeFile(ordinaryBin,'ordinary binary untouched',{flag:'wx'});
+  const binary=join(inbox,INSTALLED_PILOT_BINARY),material=join(dir,'artifact.json'),rootFile=join(dir,'root.pub');
+  await writeFile(material,JSON.stringify(artifact));await writeFile(rootFile,root.publicKey);
+  const env={PATH:'/usr/bin:/bin',HOME:home,XDG_CONFIG_HOME:join(dir,'config'),XDG_DATA_HOME:join(dir,'data'),XDG_CACHE_HOME:join(dir,'cache'),
+   DBUS_SESSION_BUS_ADDRESS:'unix:path='+join(dir,'not-a-bus')};
+  const build=Bun.spawnSync([process.execPath,'scripts/build-continuation-pilot.ts','--artifact',material,'--root-public-key',rootFile,'--outfile',binary],{env,timeout:30000});
+  expect(build.exitCode).toBe(0);
+  const clock=Math.floor(Date.now()/1000);
+  const bytes=await readFile(binary);
+  const claim={version:1,domain:offlineDomain,mode:'synthetic-only',installationDigest:scope.installationDigest,keyId:rollout.pin.keyId,
+   target,name:INSTALLED_PILOT_BINARY,size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex'),issuedAt:clock,expiresAt};
+  const seal=(change:Partial<typeof claim>={})=>rollout.sign(JSON.stringify({...claim,...change}));
+  const denied='pilot_offline_fixture_denied',destination=join(alternate,INSTALLED_PILOT_BINARY);
+  for(const invalid of [{issuedAt:clock-2,expiresAt:clock-1},{sha256:'0'.repeat(64)},{target:target==='linux-x64'?'linux-arm64':'linux-x64'}]){
+   await expect(admitDisposablePilotPackage(gate,dir,await seal(invalid))).rejects.toThrow(denied);
+   expect(await Bun.file(destination).exists()).toBe(false);
+  }
+  await expect(admitDisposablePilotPackage(gate,dir,await root.sign(JSON.stringify(claim)))).rejects.toThrow(denied);
+  const original=join(inbox,'held');
+  await rename(binary,original);await symlink(original,binary);
+  await expect(admitDisposablePilotPackage(gate,dir,await seal())).rejects.toThrow(denied);
+  await rm(binary);await rename(original,binary);
+  const handle=await open(binary,'r+');
+  try{
+   const last=bytes.length-1,originalByte=bytes[last]!;
+   await handle.write(Buffer.from([originalByte^1]),0,1,last);
+   await expect(admitDisposablePilotPackage(gate,dir,await seal())).rejects.toThrow(denied);
+   await handle.write(Buffer.from([originalByte]),0,1,last);
+  }finally{await handle.close();}
+  expect(await Bun.file(destination).exists()).toBe(false);
+  const installed=await admitDisposablePilotPackage(gate,dir,await seal());
+  expect(installed).toBe(destination);
+  expect((await lstat(installed)).mode&0o7777).toBe(0o700);
+  expect((await lstat(installed)).ino).not.toBe((await lstat(binary)).ino);
+  await expect(admitDisposablePilotPackage(gate,dir,await seal())).rejects.toThrow(denied);
+  await rm(binary);await rm(material);await rm(rootFile); // Verify from installed path alone.
+  const execute=(args:string[],extra:Record<string,string>={})=>Bun.spawnSync([installed,...args],{cwd:home,env:{...env,...extra},timeout:8000});
+  for(const extra of [{},{AKC_KEYCHAIN_TEST_MODE:'1',AGENTKEYCHAIN_HOME:ordinary,AKC_PILOT_ROOT_PUBLIC_KEY:'not a trust pin'}]){
+   const status=execute(['check-installation'],extra);
+   expect(status.exitCode).toBe(0);
+   expect(JSON.parse(status.stdout.toString())).toEqual({state:'transport_unavailable',releaseId:'continuation-pilot-local-fixture',
+    contract:INSTALLED_PILOT_CONTRACT,expiresAt});
+   for(const command of ['continue-enrollment','login','check-native']){
+    const rejected=execute([command],extra);
+    expect(rejected.exitCode).toBe(1);expect(rejected.stdout.length).toBe(0);
+    expect(rejected.stderr.toString()).toBe('cloud_continuation_pilot_transport_unavailable\n');
+   }
+  }
+  expect(await readFile(marker,'utf8')).toBe('ordinary fixture untouched');
+  expect(await readFile(ordinaryBin,'utf8')).toBe('ordinary binary untouched');
+  expect(await Bun.file(join(defaultInstall,INSTALLED_PILOT_BINARY)).exists()).toBe(false);
+ }finally{await rm(dir,{recursive:true,force:true});}
+},45000);
