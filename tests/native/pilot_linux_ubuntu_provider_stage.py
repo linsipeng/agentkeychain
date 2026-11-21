@@ -122,10 +122,11 @@ def run():
     need("ID=ubuntu" in os_release.splitlines() and "VERSION_CODENAME=noble" in os_release.splitlines())
     need(len(sys.argv) == 1 and os.environ.get("GITHUB_ACTIONS") == "true"
          and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("archive-only-v1", "private-peer-v1", "encrypted-session-v1", "collection-offer-v1", "private-display-v1", "prompt-cancel-v1", "named-write-v1", "named-reopen-v1"))
+         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("archive-only-v1", "private-peer-v1", "encrypted-session-v1", "collection-offer-v1", "private-display-v1", "prompt-cancel-v1", "named-write-v1", "named-reopen-v1", "named-reopen-signer-v1"))
     mode = os.environ["AKC_UBUNTU_PROVIDER_STAGE"]
     display_smoke = mode == "private-display-v1"
-    named_reopen = mode == "named-reopen-v1"
+    protected_signer = mode == "named-reopen-signer-v1"
+    named_reopen = mode == "named-reopen-v1" or protected_signer
     named_write = mode == "named-write-v1" or named_reopen
     prompt_cancel = mode == "prompt-cancel-v1" or named_write
     verify_peer = mode not in ("archive-only-v1", "private-display-v1")
@@ -328,16 +329,18 @@ APT::Get::AllowUnauthenticated "false";
                     import cryptography.hazmat.primitives.ciphers  # noqa: F401
                 if named_reopen:
                     phase = "named-reopen-scratch"
-                    fixture = named["RestartFixture"](work / "retained-fixture-data")
+                    fixture = named["RestartFixture"](work / "retained-fixture-data", protected_signer=protected_signer)
                 display_pass(named, fixture)
                 if fixture:
                     phase = "named-reopen-between-isolated-processes"
                     need(fixture.snapshot is not None and fixture.stopped_broker is not None and
                          fixture.stopped_roles is not None and fixture.stopped_display is not None and
                          fixture.item is not None and not fixture.readback)
+                    if protected_signer:
+                        fixture.drop_original_seed()
                     display_pass(named, fixture, reopen=True)
                     phase = "named-reopen-complete"
-                    need(fixture.readback)
+                    need(fixture.readback and fixture.signer_verified == protected_signer)
             except Exception:
                 if phase == "prompt-display-prerequisites":
                     phase = display["owned_private_display"].__wrapped__.__globals__["phase"]
@@ -345,7 +348,9 @@ APT::Get::AllowUnauthenticated "false";
             finally:
                 if fixture:
                     fixture.close()
-            if named_reopen:
+            if protected_signer:
+                print("linux_private_named_fixture_reopened_protected_signer_verified_not_installed")
+            elif named_reopen:
                 print("linux_private_named_fixture_encrypted_write_restart_and_readback_verified")
             else:
                 print("linux_private_named_fixture_encrypted_write_verified_not_reopened" if named_write else

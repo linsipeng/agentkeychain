@@ -1,4 +1,5 @@
 """Hosted disposable Ubuntu prerequisite only; never access a collection or secret."""
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -455,7 +456,7 @@ def require_locked_item_denial(conn, owner, session, named, fixture):
     raise RuntimeError("fixture item available before explicit unlock")
 
 
-def read_fixture_item(conn, owner, new_session, named, fixture):
+def read_fixture_item(conn, owner, new_session, named, fixture, expected_file):
     global phase
     phase = "named-reopen-item-rpc"
     session_path, shared = new_session
@@ -474,8 +475,23 @@ def read_fixture_item(conn, owner, new_session, named, fixture):
     # encrypted-session path, CBC IV/ciphertext shape, and decrypts to the
     # expected marker under the fresh derived key.
     need(path == session_path and content_type == "text/plain" and len(iv) == 16 and len(ciphertext) == 48)
-    phase = "named-reopen-marker-compare"
-    named["verify_encrypted_fixture_secret"](shared, bytes(iv), bytes(ciphertext), fixture.marker)
+    if fixture.signer_pin is None:
+        phase = "named-reopen-marker-compare"
+        named["verify_encrypted_fixture_secret"](shared, bytes(iv), bytes(ciphertext), fixture.marker)
+        return
+
+    phase = "named-reopen-signer-ready"
+    need(fixture.marker is None and not fixture.signer_verified)
+    def consume(seed):
+        global phase
+        unchanged_named_file(fixture.held, seed, expected_file, "named-reopen-signer-seed-not-plaintext")
+        phase = "named-reopen-signer-pin-and-challenge"
+        scope = hashlib.sha256(named["COLLECTION"].encode("ascii") + b"\0" +
+                               fixture.item.encode("ascii") + b"\0" + expected_file[-1]).digest()
+        named["verify_reopened_signing_once"](fixture.signer_pin, scope, seed)
+        fixture.signer_verified = True
+
+    named["with_reopened_seed"](shared, bytes(iv), bytes(ciphertext), consume)
 
 
 def write_fixture_item(conn, owner, session, named, marker):
@@ -672,8 +688,9 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                 need(collection_offer)
                 policy += prompt_cancel_policy(unlock=reopen)
             if named is not None:
-                need(prompt and encrypted and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") ==
-                     ("named-reopen-v1" if fixture else "named-write-v1"))
+                expected_mode = ("named-reopen-signer-v1" if fixture and fixture.signer_pin is not None else
+                                 "named-reopen-v1" if fixture else "named-write-v1")
+                need(prompt and encrypted and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") == expected_mode)
                 if fixture:
                     # Only this explicit owned directory survives the process transition.
                     env["XDG_DATA_HOME"] = str(fixture.home)
@@ -851,7 +868,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                         # After the authorized replacement no further file
                         # replacement is allowed during read or shutdown.
                         unchanged_named_file(held, fixture.marker, observed, "named-reopen-after-unlock-file")
-                        read_fixture_item(conn, owner, encrypted_session, named, fixture)
+                        read_fixture_item(conn, owner, encrypted_session, named, fixture, observed)
                         final_file = unchanged_named_file(held, fixture.marker, observed, "named-reopen-after-read-file")
                     else:
                         phase = "named-created-file-no-alias"

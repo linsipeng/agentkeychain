@@ -68,7 +68,7 @@ def owned_private_display(prompt=False):
     need(platform.system() == "Linux" and platform.machine() == "x86_64" and os.getuid() == os.geteuid() != 0)
     need(os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
          and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in
-         (("prompt-cancel-v1", "named-write-v1", "named-reopen-v1") if prompt else ("private-display-v1",)))
+         (("prompt-cancel-v1", "named-write-v1", "named-reopen-v1", "named-reopen-signer-v1") if prompt else ("private-display-v1",)))
     os.umask(0o077)
     phase = "display-unix-capability"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM):
@@ -261,9 +261,9 @@ def screen_windows(display, mark, input_scope=None):
 
         resolved = {window: local_pid_for_window(window) for window in result}
         if input_scope is not None:
-            need(os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("named-write-v1", "named-reopen-v1"))
+            need(os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("named-write-v1", "named-reopen-v1", "named-reopen-signer-v1"))
             expected_pid, password, unlock = input_scope
-            need(not unlock or os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") == "named-reopen-v1")
+            need(not unlock or os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("named-reopen-v1", "named-reopen-signer-v1"))
             mark("input-pinned-window")
             need(len(resolved) == 1 and tuple(resolved.values()) == (expected_pid,))
             window = next(iter(resolved))

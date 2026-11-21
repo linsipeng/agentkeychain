@@ -21,8 +21,6 @@ def require(ok):
 
 def encrypted_fixture_secret(shared, marker):
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-    from cryptography.hazmat.primitives.padding import PKCS7
-
     require(isinstance(shared, int) and 2 <= shared < (1 << 1024) and len(marker) == 32)
     # GNOME 46.1 CKM_DH_PKCS_DERIVE defaults to the full prime length
     # and zero-pads the leading edge (gkm-dh-mechanism.c). Its HKDF uses
@@ -30,10 +28,50 @@ def encrypted_fixture_secret(shared, marker):
     prk = hmac.digest(bytes(32), shared.to_bytes(128, "big"), "sha256")
     key = hmac.digest(prk, b"\x01", "sha256")[:16]
     iv = secrets.token_bytes(16)
-    padding = PKCS7(128).padder()
-    padded = padding.update(marker) + padding.finalize()
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
-    return iv, cipher.update(padded) + cipher.finalize()
+    padded = bytearray(48)
+    padded[:32] = marker
+    padded[32:] = bytes([16]) * 16
+    try:
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+        return iv, cipher.update(padded) + cipher.finalize()
+    finally:
+        padded[:] = bytes(len(padded))
+
+
+def with_reopened_seed(shared, iv, ciphertext, consume):
+    """Consume one fixed 32-byte secret; never return plaintext."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    require(isinstance(shared, int) and 2 <= shared < (1 << 1024) and
+            len(iv) == 16 and len(ciphertext) == 48)
+    prk = hmac.digest(bytes(32), shared.to_bytes(128, "big"), "sha256")
+    key = hmac.digest(prk, b"\x01", "sha256")[:16]
+    decoder = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+    clear = bytearray(63)  # update_into needs ciphertext length plus block size minus one.
+    view = memoryview(clear)
+    try:
+        require(decoder.update_into(ciphertext, clear) == 48 and decoder.finalize() == b"")
+        require(hmac.compare_digest(view[32:48], bytes([16]) * 16))
+        consume(view[:32])
+    finally:
+        clear[:] = bytes(len(clear))
+
+
+def fixture_public(seed):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    return Ed25519PrivateKey.from_private_bytes(seed).public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+
+def verify_reopened_signing_once(pinned_public, signed_context, seed):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+
+    require(len(pinned_public) == 32 and len(signed_context) == 32 and len(seed) == 32)
+    challenge = b"AgentKeychain-disposable-provider-reopen-signing-v1\0" + signed_context + secrets.token_bytes(32)
+    require(hmac.compare_digest(fixture_public(seed), pinned_public))
+    signature = Ed25519PrivateKey.from_private_bytes(seed).sign(challenge)
+    Ed25519PublicKey.from_public_bytes(pinned_public).verify(signature, challenge)
 
 
 def verify_encrypted_fixture_secret(shared, iv, ciphertext, marker):
@@ -55,13 +93,15 @@ def verify_encrypted_fixture_secret(shared, iv, ciphertext, marker):
 
 class RestartFixture:
     """One disposable data directory and RAM-only continuity."""
-    def __init__(self, home):
+    def __init__(self, home, protected_signer=False):
         self.home = home
         self.home.mkdir(mode=0o700)
         self.held = HeldKeyrings(home)
         try:
             self.password = bytearray(48 + secrets.randbelow(10) for _ in range(40))
             self.marker = bytearray(secrets.token_bytes(32))
+            self.signer_pin = fixture_public(self.marker) if protected_signer else None
+            self.signer_verified = False
             self.item = None
             self.snapshot = None
             self.stopped_broker = None
@@ -71,6 +111,12 @@ class RestartFixture:
         except BaseException:
             self.close()
             raise
+
+    def drop_original_seed(self):
+        require(self.signer_pin is not None and self.marker is not None and not self.readback and
+                not self.signer_verified and self.snapshot is not None)
+        self.marker[:] = bytes(len(self.marker))
+        self.marker = None
 
     def close(self):
         for name in ("password", "marker"):
@@ -216,7 +262,12 @@ class HeldKeyrings:
         require(chunks.startswith(GNOME_BINARY))
         if absent_marker is not None:
             mark("leaf-plaintext-marker-denied")
-            require(absent_marker not in chunks)
+            if isinstance(absent_marker, memoryview):
+                view = memoryview(chunks)
+                require(not any(hmac.compare_digest(view[i:i + len(absent_marker)], absent_marker)
+                                for i in range(len(view) - len(absent_marker) + 1)))
+            else:
+                require(absent_marker not in chunks)
         mark("leaf-stable-read")
         require(self._sidecar_identity(row) == self._sidecar_identity(os.fstat(fd)))
         return row.st_dev, row.st_ino, row.st_size, row.st_mtime_ns, hashlib.sha256(chunks).digest()
