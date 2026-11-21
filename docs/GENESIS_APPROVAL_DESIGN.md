@@ -134,3 +134,22 @@ registration and approval, proof transport pinned to the authenticated session,
 Custody runtime pin provisioning, and one atomic database transaction for
 first witness plus admission consumption. A caller receiving a valid result
 from this verifier must not assume consumption occurred.
+
+### Custody admission transaction
+
+`managed-cloud/shared/genesis-admission.ts` consumes a verified decision with
+the event-one witness in one Custody D1 batch. It independently verifies the
+sequence-zero checkpoint and pinned witness signer. Migration
+`0009_genesis_admissions.sql` makes the decision and its vault admission unique
+and immutable, requires their exact first-witness link, and rechecks the
+deadline against the database clock. If either insert fails, neither remains.
+An exact replay returns event one without resigning, even after the initial
+window closed; alternate approval or checkpoint bytes get no replay receipt.
+
+This subsystem is not connected to production or legacy witness ingress.
+Integration must authenticate admission transport, route unwitnessed vaults
+exclusively through the new admission for a fully provisioned rollout, and
+keep legacy witnessed heads and later witness events unchanged. Never infer
+a missing decision from Main D1 or retry legacy genesis on an admission
+failure. The signed grant, roster and checkpoint fixture use ephemeral keys
+and a local Custody D1.

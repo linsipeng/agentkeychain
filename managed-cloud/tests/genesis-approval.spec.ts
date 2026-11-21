@@ -1,34 +1,10 @@
 import {describe,expect,it} from 'vitest';
-import {digest} from '../shared/contracts.ts';
-import {canonicalGrant,type EnrollmentGrant} from '../shared/device-protocol.ts';
-import {canonicalGenesisApproval,GENESIS_APPROVAL_DOMAIN,type GenesisApproval,verifyGenesisApproval} from '../shared/genesis-approval.ts';
-import {canonicalRoster,ROSTER_DOMAIN,rosterDigest,type TrustedDeviceRoster} from '../shared/roster.ts';
+import {canonicalGrant} from '../shared/device-protocol.ts';
+import {canonicalGenesisApproval,verifyGenesisApproval} from '../shared/genesis-approval.ts';
+import {enrollmentFixture as enrollmentFixtureAt} from './synthetic-genesis-approval.ts';
 
+const enrollmentFixture=()=>enrollmentFixtureAt(now);
 const now=2_000_000_000;
-const bytes=(value:ArrayBuffer)=>btoa(String.fromCharCode(...new Uint8Array(value)));
-async function signingFixture(){
- const pair=await crypto.subtle.generateKey('Ed25519',true,['sign','verify']);
- const publicKey=bytes(await crypto.subtle.exportKey('raw',pair.publicKey));
- const sign=async (message:string)=>bytes(await crypto.subtle.sign('Ed25519',pair.privateKey,new TextEncoder().encode(message)));
- return {publicKey,keyId:await digest(publicKey),sign};
-}
-
-async function enrollmentFixture(){
- const [authority,device,checkpoint,recovery]=await Promise.all([signingFixture(),signingFixture(),signingFixture(),signingFixture()]);
- const wrapping=await crypto.subtle.generateKey('X25519',true,['deriveBits']) as CryptoKeyPair;
- const grant:EnrollmentGrant={version:1,requestId:'request',accountId:'account',tenantId:'tenant',vaultId:'vault',deviceId:'device',signingKey:device.publicKey,wrappingKey:bytes(await crypto.subtle.exportKey('raw',wrapping.publicKey)),issuerDeviceId:null,keyEpoch:1,expiresAt:now+480};
- const keyPin=({keyId,publicKey}:{keyId:string;publicKey:string})=>({keyId,publicKey});
- const policy={authority:keyPin(authority),checkpointKeys:[keyPin(checkpoint)],recoveryAuthorities:[keyPin(recovery)]};
- const initial:TrustedDeviceRoster={version:1,accountId:grant.accountId,tenantId:grant.tenantId,vaultId:grant.vaultId,revision:1,previousDigest:null,keyEpoch:grant.keyEpoch,active:[{deviceId:grant.deviceId,signingKey:grant.signingKey,wrappingKey:grant.wrappingKey}],revoked:[],issuer:{kind:'device',id:grant.deviceId},issuedAt:now,expiresAt:now+720,checkpointKeys:policy.checkpointKeys,recoveryAuthorities:policy.recoveryAuthorities,recovery:null};
- const signedRoster=async (change:Partial<TrustedDeviceRoster>={})=>{const canonical=canonicalRoster({...initial,...change});return {canonical,signature:await device.sign(ROSTER_DOMAIN+canonical)};};
- const roster=await signedRoster();
- const approval=async (change:Partial<GenesisApproval>={},grantBytes=canonicalGrant(grant),signed=roster)=>{
-  const data:GenesisApproval={version:1,audience:'custodian:roster-genesis',decisionId:'approval',authorityKeyId:authority.keyId,grantDigest:await digest(grantBytes),rosterDigest:await rosterDigest(signed),issuedAt:now-1,expiresAt:now+60,...change};
-  const canonical=canonicalGenesisApproval(data);
-  return {proof:{canonical,signature:await authority.sign(GENESIS_APPROVAL_DOMAIN+canonical)},data};
- };
- return {authority,device,grant,policy,roster,signedRoster,approval};
-}
 
 describe('independent genesis approval verifier',()=>{
  it('verifies the exact initial grant and roster against an explicitly pinned authority',async()=>{

@@ -1,0 +1,11 @@
+# Isolated Auth-side first-device approval experiment
+
+This module is not an HTTP route, Worker RPC export, provisioning change, or deployed migration. It reads only the caller-supplied **Auth-owned D1 binding**, not Main, and has no peer credential import, pin-write API, or production signer. The experimental SQL is excluded from the deployed Auth migration directory. The local Worker regression installs it into the synthetic Auth D1, generates a fresh Auth RP credential, verifies its registration and attaches its verified public key as test setup.
+
+The local Auth service prepares an exact-grant/roster challenge, reads the Auth-managed account/tenant/vault credential, verifies fresh WebAuthn presence, user verification, origin, RP, challenge, credential and counter and checks signed roster device possession. The signed Custody contract cannot exceed the existing grant and roster windows. An atomic Auth D1 transaction rechecks the live challenge and credential and records only one decision per challenge and grant, updating the credential counter. A replay cannot mint a new receipt; an authenticated receipt read after response loss is not exposed by this slice.
+
+Do not wire this directly to untrusted callers. Remaining prerequisites:
+- Identify who independently owns the Auth domain, account identity enrollment, credential store, signer and deployed binaries. This module cannot prove operator independence.
+- Build Auth-owned enrollment under that RP using an independent account-to-vault proof, plus an independently served exact-intent approval screen and authenticated, bounded, non-enumerating ingress. Existing Main credential rows are not portable trust evidence. Decide whether existing RP custody can move independently or require separate registration/key provisioning with explicit authorization.
+- Define Auth-owned challenge/session lockout, expiry cleanup, approved decision read-after-loss, authority pin/key lifecycle, revocation, and exact proof carry to Custody. Keep existing witness continuity; no unwitnessed first device should pass an independent-admission gate without valid evidence once the new trust path is activated.
+- Independently verify the actual deployment graph, keeping the feature disabled until a staging authorization and independent review.
