@@ -6,6 +6,7 @@ import {canonicalGrant} from '../shared/device-protocol.ts';
 import {deviceRepository} from '../api-worker/device-repository.ts';
 import {stagePilotGenesisMainBinding} from '../api-worker/genesis-main-binding-stage.ts';
 import {admitGenesis} from '../shared/genesis-admission.ts';
+import {PILOT_MAIN_INVITE_LINK,verifyPendingPilotMainInviteLink} from '../shared/pilot-main-invite-link.ts';
 import {MAIN_BIND_GENESIS,mainGenesisBindingDeviceProof,readExactMainGenesisAdmission,verifyMainGenesisBinding} from '../shared/genesis-main-binding.ts';
 import {custodyAbsenceHeadRequestProof,proveCustodyAbsenceHead} from '../custody-trust-worker/package-absence-head.ts';
 import {digest,verify} from '../shared/contracts.ts';
@@ -290,4 +291,38 @@ test('stages one independently approved Main link atomically without standard de
  await expect(stagePilotGenesisMainBinding(port,policy,raw)).rejects.toThrow(reject);
  expect(await countMain('pilot_genesis_main_binding_stage')).toBe(1);
  expect(await countMain('device_challenges')).toBe(0);
+});
+
+test('an exact independent Admin invitation link remains pending without an Auth consumption receipt',async()=>{
+ const at=current(),{f,request}=await attempt(at,'pilot-invite-link');
+ const [inviter,admin]=await Promise.all([signingFixture(),signingFixture()]);
+ const pin=({keyId,publicKey}:{keyId:string;publicKey:string})=>({keyId,publicKey});
+ const policy={...f.policy,inviteAuthority:pin(inviter),mainLinkAuthority:pin(admin)};
+ const expected={grantCanonical:request.grant,installationDigest:'a'.repeat(64),profileDigest:'b'.repeat(64),
+  installationExpiresAt:at+300,authOrigin:'https://auth-pilot-link.fixture.invalid',rpId:'auth-pilot-link.fixture.invalid'};
+ const {accountId,tenantId,vaultId,deviceId,requestId,keyEpoch}=f.grant;
+ const grantDigest=await digest(expected.grantCanonical),rosterHash=await rosterDigest(request.roster);
+ const signed=async(data:object,key=admin)=>{const canonical=JSON.stringify(data);return {canonical,signature:await key.sign(canonical)};};
+ const invite=await signed({version:1,domain:'AgentKeychain-pilot-genesis-registration-invite-v1',keyId:inviter.keyId,
+  origin:expected.authOrigin,rpId:expected.rpId,id:'A'.repeat(43),accountId,tenantId,vaultId,deviceId,requestId,keyEpoch,grantDigest,
+  rosterDigest:rosterHash,issuedAt:at-1,expiresAt:at+60},inviter);
+ const sha=(v:{canonical:string;signature:string})=>digest(JSON.stringify([v.canonical,v.signature]));
+ const link={version:1,domain:PILOT_MAIN_INVITE_LINK,keyId:admin.keyId,accountId,tenantId,vaultId,deviceId,requestId,keyEpoch,
+  grantDigest,inviteDigest:await sha(invite),authApprovalDigest:await sha(request.proof),installationDigest:expected.installationDigest,
+  profileDigest:expected.profileDigest,issuedAt:at,expiresAt:at+30};
+ const input={invite,authApproval:request.proof,roster:request.roster,mainLink:await signed(link)};
+ const rejected='pilot_main_invite_link_unavailable';
+ expect(await verifyPendingPilotMainInviteLink(input,expected,policy)).toEqual({state:'pending-auth-invite-consumption-proof'});
+ await expect(verifyPendingPilotMainInviteLink({...input,mainLink:undefined},expected,policy)).rejects.toThrow(rejected);
+ await expect(verifyPendingPilotMainInviteLink({...input,invite:undefined},expected,policy)).rejects.toThrow(rejected);
+ await expect(verifyPendingPilotMainInviteLink({...input,mainLink:await signed(link,inviter)},expected,policy)).rejects.toThrow(rejected);
+ await expect(verifyPendingPilotMainInviteLink(input,expected,{...policy,mainLinkAuthority:pin(inviter)})).rejects.toThrow(rejected);
+ for(const change of [{tenantId:'another-tenant'},{accountId:'another-account'},{requestId:'other-request'},{deviceId:'other-device'},
+  {vaultId:'other-vault'},{installationDigest:'c'.repeat(64)},{profileDigest:'c'.repeat(64)},
+  {authApprovalDigest:'c'.repeat(64)},{inviteDigest:'c'.repeat(64)},{expiresAt:f.grant.expiresAt+1}])
+  await expect(verifyPendingPilotMainInviteLink({...input,mainLink:await signed({...link,...change})},expected,policy)).rejects.toThrow(rejected);
+ const {version,...rest}=link;
+ await expect(verifyPendingPilotMainInviteLink({...input,mainLink:await signed({...rest,version})},expected,policy)).rejects.toThrow(rejected);
+ await expect(verifyPendingPilotMainInviteLink(input,{...expected,installationExpiresAt:at+11},policy)).rejects.toThrow(rejected);
+ await expect(verifyPendingPilotMainInviteLink({...input,authConsumptionProof:request.proof},expected,policy)).rejects.toThrow(rejected);
 });

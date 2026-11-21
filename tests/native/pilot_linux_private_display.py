@@ -424,13 +424,16 @@ def enter_fixture_password(reply, request, mark, setup, root, window, password, 
         need(not any(key in body for key in keys.values()))
         return keys
 
-    def no_held_keys(stage):
+    def exact_key_release_barrier(stage):
         keymap, keymap_body = reply("input-" + stage + "-held-keys", 44)
         # QueryKeymap reply is 40 bytes: eight framing bytes and 32 key bytes.
         mark("input-" + stage + "-held-keys-reply-shape")
         need(len(keymap_body) == 8)
         mark("input-" + stage + "-held-keys-present")
         need(not any(keymap[8:32] + keymap_body))
+
+    def no_held_keys(stage):
+        exact_key_release_barrier(stage)
         header, body = reply("input-" + stage + "-modifier-state", 38, struct.pack("<I", window))
         # QueryPointer's exact root and modifier/button mask. No physical
         # or latched modifier may affect translation of the input keycodes.
@@ -460,6 +463,9 @@ def enter_fixture_password(reply, request, mark, setup, root, window, password, 
         for symbol in group:
             for event in (2, 3):  # core KeyPress/KeyRelease; standard XTEST only.
                 request(extension[9], struct.pack("<BB2xII20x", event, keys[symbol], 0, root), minor=2)
+    # XTEST requests do not reply. Confirm the server processed Return and
+    # its release before closing this connection; the dialog may be gone.
+    exact_key_release_barrier("after-submit")
     mark("input-submitted")
 
 

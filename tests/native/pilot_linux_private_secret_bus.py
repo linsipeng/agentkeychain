@@ -254,7 +254,14 @@ def show_then_cancel(bus, owner, offer, prompter_pid, windows, liveness, named=N
             if wait > 0:
                 time.sleep(min(0.05, wait))
         if not completed:
-            phase = result_phase + "-timeout-no-signal"
+            # Diagnostic only; a visible window cannot complete or retry.
+            try:
+                remaining_windows = observed("result-timeout")
+                detail = ("pinned-window-remains" if remaining_windows == {prompter_pid} else
+                          "no-window" if not remaining_windows else "unexpected-window")
+            except (OSError, ValueError):
+                detail = "window-observation-denied"
+            phase = result_phase + "-timeout-no-signal-" + detail
             need(False)
         phase = result_phase + "-duplicate-signal"
         need(len(completed) == 1)
