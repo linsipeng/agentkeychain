@@ -58,14 +58,17 @@ COLLECTION_OFFER_POLICY = """
 PROMPTER = "org.gnome.keyring.SystemPrompter"
 FIXTURE_CLIENT = "org.agentkeychain.PromptFixture"
 FIRST_PROMPT = "/org/freedesktop/secrets/prompt/p1"
+FIRST_UNLOCK = "/org/freedesktop/secrets/prompt/u1"
 PROMPT_IFACE = "org.freedesktop.Secret.Prompt"
 
 
-def prompt_cancel_policy():
+def prompt_cancel_policy(unlock=False):
     rules = [f'<allow own="{PROMPTER}"/>', f'<allow own="{FIXTURE_CLIENT}"/>']
     # Exact pinned Ubuntu fixture observed callback p2; no other GCR callback path is enabled.
+    exact_prompt = FIRST_UNLOCK if unlock else FIRST_PROMPT
+    prompt_commands = ("Prompt",) if unlock else ("Prompt", "Dismiss")
     routes = (
-        (FIXTURE_CLIENT, SERVICE, FIRST_PROMPT, PROMPT_IFACE, ("Prompt", "Dismiss")),
+        (FIXTURE_CLIENT, SERVICE, exact_prompt, PROMPT_IFACE, prompt_commands),
         (SERVICE, PROMPTER, "/org/gnome/keyring/Prompter", "org.gnome.keyring.internal.Prompter",
          ("BeginPrompting", "PerformPrompt", "StopPrompting")),
         (PROMPTER, SERVICE, "/org/gnome/keyring/Prompt/p2", "org.gnome.keyring.internal.Prompter.Callback",
@@ -80,9 +83,9 @@ def prompt_cancel_policy():
                 f'receive_member="{method}" receive_type="method_call" max_fds="0"/>',
             ]
     rules += [
-        f'<allow send_destination="{FIXTURE_CLIENT}" send_path="{FIRST_PROMPT}" send_interface="{PROMPT_IFACE}" '
+        f'<allow send_destination="{FIXTURE_CLIENT}" send_path="{exact_prompt}" send_interface="{PROMPT_IFACE}" '
         'send_member="Completed" send_type="signal" send_broadcast="false" max_fds="0"/>',
-        f'<allow receive_sender="{SERVICE}" receive_path="{FIRST_PROMPT}" receive_interface="{PROMPT_IFACE}" '
+        f'<allow receive_sender="{SERVICE}" receive_path="{exact_prompt}" receive_interface="{PROMPT_IFACE}" '
         'receive_member="Completed" receive_type="signal" max_fds="0"/>',
     ]
     # The existing requested-reply send rules apply; do not add any general
@@ -166,9 +169,9 @@ def wait_owner(conn, name, process, image, snapshot, *, startup_timeout=6):
     raise RuntimeError("fixture role owner unavailable")
 
 
-def show_then_cancel(bus, owner, offer, prompter_pid, windows, liveness, named=None):
+def show_then_cancel(bus, owner, offer, prompter_pid, windows, liveness, named=None, fixture=None, unlock=False):
     global phase
-    need(offer == FIRST_PROMPT)
+    need(offer == (FIRST_UNLOCK if unlock else FIRST_PROMPT))
     def observed(step):
         def mark(stage):
             global phase
@@ -214,13 +217,14 @@ def show_then_cancel(bus, owner, offer, prompter_pid, windows, liveness, named=N
             liveness(0)
             phase = "prompt-synthetic-entry"
             # Independent fresh digits of adequate entropy; no system credentials.
-            password = bytearray(48 + secrets.randbelow(10) for _ in range(40))
+            password = fixture.password if fixture else bytearray(48 + secrets.randbelow(10) for _ in range(40))
             try:
-                named["input"](prompter_pid, password)
+                named["input"](prompter_pid, password, unlock)
             finally:
-                for i in range(len(password)):
-                    password[i] = 0
-            phase = "prompt-created-result"
+                if fixture is None:
+                    for i in range(len(password)):
+                        password[i] = 0
+            phase = "prompt-unlocked-result" if unlock else "prompt-created-result"
         for _ in range(60):
             context.iteration(False)
             if completed:
@@ -229,8 +233,11 @@ def show_then_cancel(bus, owner, offer, prompter_pid, windows, liveness, named=N
         need(len(completed) == 1 and completed[0].get_type_string() == "(bv)")
         variant = completed[0].get_child_value(1).get_variant()
         dismissed = completed[0].get_child_value(0).get_boolean()
-        need(variant.get_type_string() == "o" and
-             (dismissed, variant.get_string()) == ((True, "/") if named is None else (False, named["COLLECTION"])))
+        if unlock:
+            need(not dismissed and variant.get_type_string() == "ao" and variant.unpack() == [named["COLLECTION"]])
+        else:
+            need(variant.get_type_string() == "o" and
+                 (dismissed, variant.get_string()) == ((True, "/") if named is None else (False, named["COLLECTION"])))
         phase = "prompt-closed-screen"
         for _ in range(60):
             if not observed("closed-screen"):
@@ -379,6 +386,82 @@ def scoped_write_policy(named):
     )
 
 
+def exact_fixture_item(collection, item):
+    need(isinstance(item, str) and re.fullmatch(re.escape(collection) + r"/[A-Za-z0-9_]{1,64}", item))
+
+
+def scoped_reopen_policy(named, fixture):
+    collection, item = named["COLLECTION"], fixture.item
+    exact_fixture_item(collection, item)
+    rules = []
+    for path, interface, member in (
+        ("/org/freedesktop/secrets", "org.freedesktop.Secret.Service", "Unlock"),
+        (collection, "org.freedesktop.DBus.Properties", "Get"),
+        (item, "org.freedesktop.Secret.Item", "GetSecret"),
+    ):
+        rules += [
+            f'<allow send_destination="{SERVICE}" send_interface="{interface}" send_member="{member}" '
+            f'send_path="{path}" send_type="method_call" max_fds="0"/>',
+            f'<allow receive_sender="{FIXTURE_CLIENT}" receive_interface="{interface}" receive_member="{member}" '
+            f'receive_path="{path}" receive_type="method_call" max_fds="0"/>',
+        ]
+    return "\n".join(rules)
+
+
+def require_collection_locked(conn, owner, named, locked):
+    reply = conn.call_sync(owner, named["COLLECTION"], "org.freedesktop.DBus.Properties", "Get",
+                          GLib.Variant("(ss)", ("org.freedesktop.Secret.Collection", "Locked")),
+                          GLib.VariantType.new("(v)"), Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+    value = reply.get_child_value(0).get_variant()
+    need(value.get_type_string() == "b" and value.get_boolean() == locked)
+
+
+def offer_collection_unlock(conn, owner, named):
+    reply = conn.call_sync(owner, "/org/freedesktop/secrets", "org.freedesktop.Secret.Service", "Unlock",
+                          GLib.Variant("(ao)", ([named["COLLECTION"]],)), GLib.VariantType.new("(aoo)"),
+                          Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+    paths, prompt = reply.unpack()
+    need(not paths and prompt == FIRST_UNLOCK)
+    return prompt
+
+
+def require_locked_item_denial(conn, owner, session, named, fixture):
+    exact_fixture_item(named["COLLECTION"], fixture.item)
+    try:
+        conn.call_sync(owner, fixture.item, "org.freedesktop.Secret.Item", "GetSecret",
+                       GLib.Variant("(o)", (session[0],)), GLib.VariantType.new("((oayays))"),
+                       Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+    except GLib.Error as error:
+        # Neither routing refusal nor timeout proves that the persisted
+        # target is locked. Require the pinned provider's exact public error.
+        need(Gio.DBusError.get_remote_error(error) == "org.freedesktop.Secret.Error.IsLocked")
+        return
+    raise RuntimeError("fixture item available before explicit unlock")
+
+
+def read_fixture_item(conn, owner, new_session, named, fixture):
+    global phase
+    phase = "named-reopen-item-rpc"
+    session_path, shared = new_session
+    exact_fixture_item(named["COLLECTION"], fixture.item)
+    try:
+        reply = conn.call_sync(owner, fixture.item, "org.freedesktop.Secret.Item", "GetSecret",
+                              GLib.Variant("(o)", (session_path,)), GLib.VariantType.new("((oayays))"),
+                              Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+    except GLib.Error as error:
+        phase += "-" + session_rpc_failure(error)
+        raise
+    phase = "named-reopen-item-shape"
+    path, iv, ciphertext, content_type = reply.unpack()[0]
+    # GNOME 46.1 gkd_secret_secret_append() hard-codes this MIME metadata.
+    # It does not mean the D-Bus payload was plain: this still has the exact
+    # encrypted-session path, CBC IV/ciphertext shape, and decrypts to the
+    # expected marker under the fresh derived key.
+    need(path == session_path and content_type == "text/plain" and len(iv) == 16 and len(ciphertext) == 48)
+    phase = "named-reopen-marker-compare"
+    named["verify_encrypted_fixture_secret"](shared, bytes(iv), bytes(ciphertext), fixture.marker)
+
+
 def write_fixture_item(conn, owner, session, named, marker):
     global phase
     phase = "named-encrypt-item"
@@ -401,7 +484,9 @@ def write_fixture_item(conn, owner, session, named, marker):
         raise
     phase = "named-write-item-result"
     item, prompt = reply.unpack()
-    need(prompt == "/" and re.fullmatch(re.escape(named["COLLECTION"]) + r"/[A-Za-z0-9_]{1,64}", item))
+    need(prompt == "/")
+    exact_fixture_item(named["COLLECTION"], item)
+    return item
 
 
 def need(condition):
@@ -530,7 +615,7 @@ def interrupted(_signum, _frame):
 
 
 def verify_private_provider(provider_path, staged_provider, library_dir, staged_libraries, encrypted=False,
-                            collection_offer=False, prompt=None, named=None):
+                            collection_offer=False, prompt=None, named=None, fixture=None, reopen=False):
     global phase
     need(sys.platform == "linux" and os.getuid() == os.geteuid() != 0)
     os.umask(0o077)
@@ -542,6 +627,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
     conn = None
     held = None
     final_file = None
+    broker_identity = None
     try:
         phase = "unix-capability"
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -562,16 +648,31 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
             conf = root / "bus.xml"
             need(not collection_offer or encrypted)
             policy = SESSION_POLICY if encrypted else ""
-            if collection_offer:
+            if collection_offer and not reopen:
                 policy += COLLECTION_OFFER_POLICY
             if prompt:
                 need(collection_offer)
-                policy += prompt_cancel_policy()
+                policy += prompt_cancel_policy(unlock=reopen)
             if named is not None:
-                need(prompt and encrypted and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") == "named-write-v1")
-                phase = "named-empty-held-directory"
-                held = named["HeldKeyrings"](env["XDG_DATA_HOME"])
-                policy += scoped_write_policy(named)
+                need(prompt and encrypted and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") ==
+                     ("named-reopen-v1" if fixture else "named-write-v1"))
+                if fixture:
+                    # Only this explicit owned directory survives the process transition.
+                    env["XDG_DATA_HOME"] = str(fixture.home)
+                    held = fixture.held
+                else:
+                    need(not reopen)
+                    phase = "named-empty-held-directory"
+                    held = named["HeldKeyrings"](env["XDG_DATA_HOME"])
+                if reopen:
+                    phase = "named-reopen-existing-held-file"
+                    need(fixture.stopped_broker is not None and fixture.stopped_roles is not None and
+                         fixture.snapshot == held.read_exact(fixture.marker))
+                    policy += scoped_reopen_policy(named, fixture)
+                else:
+                    policy += scoped_write_policy(named)
+            else:
+                need(fixture is None and not reopen)
             conf.write_text(BUS_CONFIG.format(endpoint, os.getuid(), policy), encoding="ascii")
             def start(argv, environment, role):
                 child = subprocess.Popen(argv, env=environment, cwd=root, stdin=subprocess.DEVNULL,
@@ -595,6 +696,11 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                 need((pid, uid) == (broker.pid, os.getuid()))
                 latest = endpoint.lstat()
                 need((pinned.st_dev, pinned.st_ino) == (latest.st_dev, latest.st_ino))
+                broker_identity = str(endpoint), broker.pid, pinned.st_dev, pinned.st_ino
+                if reopen:
+                    phase = "named-reopen-new-broker-identity"
+                    old_path, old_pid, _, _ = fixture.stopped_broker
+                    need(old_path != str(endpoint) and old_pid != broker.pid and not os.path.lexists(old_path))
                 # Transfer the exact tested socket; do not open a new or ambient connection.
                 fd = sock.detach()
                 try:
@@ -652,8 +758,9 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                     credentials = call(conn, "GetConnectionCredentials", owner, "(a{sv})")
                     need(credentials.get("UnixUserID") == os.getuid() and credentials.get("ProcessID") == provider.pid)
                 if collection_offer:
-                    phase = "collection-offer-fresh-data"
-                    require_no_fixture_keyring_files(env["XDG_DATA_HOME"])
+                    if not reopen:
+                        phase = "collection-offer-fresh-data"
+                        require_no_fixture_keyring_files(env["XDG_DATA_HOME"])
                     need(call(conn, "GetNameOwner", SERVICE, "(s)") == owner)
                     if prompt:
                         phase = "prompt-requester-role"
@@ -670,7 +777,18 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                         need(prompt_owner not in (owner, conn.get_unique_name()))
                         phase = "prompter-library-identity"
                         verify_mapped_libraries(prompter, staged_libraries)
-                    offer = verify_collection_offer(conn, owner, named["LABEL"] if named else COLLECTION_LABEL)
+                        if reopen:
+                            phase = "named-reopen-distinct-processes"
+                            need(not {broker.pid, provider.pid, prompter.pid}.intersection(fixture.stopped_roles))
+                    if reopen:
+                        phase = "named-reopen-locked-before-unlock"
+                        require_collection_locked(conn, owner, named, True)
+                        phase = "named-reopen-read-denied-while-locked"
+                        require_locked_item_denial(conn, owner, encrypted_session, named, fixture)
+                        phase = "named-reopen-exact-unlock-offer"
+                        offer = offer_collection_unlock(conn, owner, named)
+                    else:
+                        offer = verify_collection_offer(conn, owner, named["LABEL"] if named else COLLECTION_LABEL)
                     if prompt:
                         def prompt_liveness(attempt):
                             global phase
@@ -684,7 +802,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                                 phase = "prompt-gcr-owner-live"
                                 need(call(conn, "GetNameOwner", PROMPTER, "(s)") == prompt_owner)
 
-                        show_then_cancel(conn, owner, offer, prompter.pid, windows, prompt_liveness, named)
+                        show_then_cancel(conn, owner, offer, prompter.pid, windows, prompt_liveness, named, fixture, reopen)
                         owner_after = wait_owner(conn, PROMPTER, prompter, image, snapshot)
                         phase = "prompter-owner-changed"
                         need(owner_after == prompt_owner)
@@ -697,11 +815,20 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                     if named is None:
                         phase = "collection-offer-no-fixture-files"
                         require_no_fixture_keyring_files(env["XDG_DATA_HOME"])
+                    elif reopen:
+                        phase = "named-reopen-unlocked-only-after-prompt"
+                        require_collection_locked(conn, owner, named, False)
+                        read_fixture_item(conn, owner, encrypted_session, named, fixture)
+                        phase = "named-reopen-file-unchanged"
+                        final_file = held.read_exact(fixture.marker)
+                        need(final_file == fixture.snapshot)
                     else:
                         phase = "named-created-file-no-alias"
                         before = held.read_exact()
-                        marker = secrets.token_bytes(32)
-                        write_fixture_item(conn, owner, encrypted_session, named, marker)
+                        marker = fixture.marker if fixture else secrets.token_bytes(32)
+                        item = write_fixture_item(conn, owner, encrypted_session, named, marker)
+                        if fixture:
+                            fixture.item = item
                         phase = "named-written-file-no-alias"
                         final_file = held.read_exact(marker)
                         need(before[-1] != final_file[-1])
@@ -737,11 +864,20 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                         if final_file is not None and not prompt_failed:
                             phase = "named-file-after-owned-shutdown"
                             need(held.read_exact() == final_file)
+                            if fixture:
+                                need(conn.is_closed() and all(child.poll() is not None for child in children) and
+                                     broker_identity is not None and not os.path.lexists(broker_identity[0]))
+                                if reopen:
+                                    fixture.readback = True
+                                else:
+                                    fixture.stopped_broker = broker_identity
+                                    fixture.stopped_roles = tuple(child.pid for child in children)
+                                    fixture.snapshot = final_file
                     finally:
-                        if held is not None:
+                        if held is not None and fixture is None:
                             held.close()
                             held = None
     finally:
-        if held is not None:
+        if held is not None and fixture is None:
             held.close()
         signal.alarm(0)

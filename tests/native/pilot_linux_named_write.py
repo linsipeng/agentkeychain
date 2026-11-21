@@ -34,6 +34,50 @@ def encrypted_fixture_secret(shared, marker):
     return iv, cipher.update(padded) + cipher.finalize()
 
 
+def verify_encrypted_fixture_secret(shared, iv, ciphertext, marker):
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives.padding import PKCS7
+
+    require(isinstance(shared, int) and 2 <= shared < (1 << 1024) and
+            len(marker) == 32 and len(iv) == 16 and len(ciphertext) == 48)
+    prk = hmac.digest(bytes(32), shared.to_bytes(128, "big"), "sha256")
+    key = hmac.digest(prk, b"\x01", "sha256")[:16]
+    decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+    try:
+        unpad = PKCS7(128).unpadder()
+        plaintext = unpad.update(decryptor.update(ciphertext) + decryptor.finalize()) + unpad.finalize()
+        require(hmac.compare_digest(plaintext, marker))
+    except ValueError:
+        raise ValueError("fixture marker denied") from None
+
+
+class RestartFixture:
+    """One disposable data directory and RAM-only continuity."""
+    def __init__(self, home):
+        self.home = home
+        self.home.mkdir(mode=0o700)
+        self.held = HeldKeyrings(home)
+        try:
+            self.password = bytearray(48 + secrets.randbelow(10) for _ in range(40))
+            self.marker = bytearray(secrets.token_bytes(32))
+            self.item = None
+            self.snapshot = None
+            self.stopped_broker = None
+            self.stopped_roles = None
+            self.stopped_display = None
+            self.readback = False
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        for name in ("password", "marker"):
+            value = getattr(self, name, None)
+            if value is not None:
+                value[:] = bytes(len(value))
+        self.held.close()
+
+
 class HeldKeyrings:
     def __init__(self, data_home):
         self.path = Path(data_home) / "keyrings"

@@ -68,7 +68,7 @@ def owned_private_display(prompt=False):
     need(platform.system() == "Linux" and platform.machine() == "x86_64" and os.getuid() == os.geteuid() != 0)
     need(os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
          and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in
-         (("prompt-cancel-v1", "named-write-v1") if prompt else ("private-display-v1",)))
+         (("prompt-cancel-v1", "named-write-v1", "named-reopen-v1") if prompt else ("private-display-v1",)))
     os.umask(0o077)
     phase = "display-unix-capability"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM):
@@ -261,20 +261,21 @@ def screen_windows(display, mark, input_scope=None):
 
         resolved = {window: local_pid_for_window(window) for window in result}
         if input_scope is not None:
-            need(os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") == "named-write-v1")
-            expected_pid, password = input_scope
+            need(os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("named-write-v1", "named-reopen-v1"))
+            expected_pid, password, unlock = input_scope
+            need(not unlock or os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") == "named-reopen-v1")
             mark("input-pinned-window")
             need(len(resolved) == 1 and tuple(resolved.values()) == (expected_pid,))
             window = next(iter(resolved))
-            authenticate_named_dialog(reply, mark, window, allow_pinned_empty=True)
+            authenticate_named_dialog(reply, mark, window, allow_pinned_empty=True, unlock=unlock)
             enter_fixture_password(reply, request, mark, setup, root, window, password,
                                    lambda focus: authenticate_gdk_focus_child(
-                                       reply, mark, root, window, focus, expected_pid, local_pid_for_window))
+                                       reply, mark, root, window, focus, expected_pid, local_pid_for_window), confirm=not unlock)
         mark("mapped" if resolved else "no-viewable-top-level" if count else "no-top-level")
         return set(resolved.values())
 
 
-def authenticate_named_dialog(reply, mark, window, *, allow_pinned_empty=False):
+def authenticate_named_dialog(reply, mark, window, *, allow_pinned_empty=False, unlock=False):
     # The window ID and owner were checked on this exact authenticated X11
     # connection. Resolve only the fixed EWMH title and its UTF-8 type with
     # InternAtom(only-if-exists); never create atoms or accept a caller name.
@@ -284,7 +285,12 @@ def authenticate_named_dialog(reply, mark, window, *, allow_pinned_empty=False):
         need(not body)
         return struct.unpack_from("<I", header, 8)[0]
 
-    expected = b"New Keyring Password"
+    # gkm-wrap-prompt.c setup_unlock_keyring_other sets this on the
+    # explicit non-login path. Unlike create, this assignment is made
+    # after construction; never accept the blank title for unlock.
+    expected = b"Unlock Keyring" if unlock else b"New Keyring Password"
+    if unlock:
+        allow_pinned_empty = False
 
     def require_named_prompter_class():
         # GTK 3 window init: instance=g_get_prgname(), class=GDK program
@@ -375,7 +381,7 @@ def authenticate_gdk_focus_child(reply, mark, root, window, focus, expected_pid,
     need(owner == expected_pid)
 
 
-def enter_fixture_password(reply, request, mark, setup, root, window, password, check_child):
+def enter_fixture_password(reply, request, mark, setup, root, window, password, check_child, *, confirm=True):
     need(isinstance(password, bytearray) and len(password) == 40 and
          all(48 <= number <= 57 for number in password))
     query = b"XTEST"
@@ -445,8 +451,11 @@ def enter_fixture_password(reply, request, mark, setup, root, window, password, 
     exact_focus("warmup")
     keys = mapping("authoritative")
     no_held_keys("authoritative")
-    for stage, group in (("before-password", password), ("after-password", (0xff09,)),
-                         ("after-tab", password), ("after-confirmation", (0xff0d,))):
+    groups = (("before-password", password), ("after-password", (0xff0d,)))
+    if confirm:
+        groups = (("before-password", password), ("after-password", (0xff09,)),
+                  ("after-tab", password), ("after-confirmation", (0xff0d,)))
+    for stage, group in groups:
         exact_focus(stage)
         for symbol in group:
             for event in (2, 3):  # core KeyPress/KeyRelease; standard XTEST only.
