@@ -1,6 +1,6 @@
 import {URL} from 'node:url';
 import {TextEncoder} from 'node:util';
-import {createPrivateKey,createPublicKey,randomBytes,webcrypto as crypto} from 'node:crypto';
+import {generateKeyPairSync,webcrypto as crypto} from 'node:crypto';
 import {expect,test} from 'bun:test';
 import {mkdtemp,readFile,rm,symlink,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -111,7 +111,10 @@ test('native inspect authenticates only a one-use correlated metadata response',
 
 test('native C inspect wire interoperates with the signed installed pilot verifier',async()=>{
  if(process.platform!=='linux'||process.env.AKC_HOSTED_NATIVE_INTEROP!=='1')return;
- const seed=randomBytes(32);
+ const keys=generateKeyPairSync('ed25519');
+ const privateDER=keys.privateKey.export({format:'der',type:'pkcs8'});
+ const publicDER=keys.publicKey.export({format:'der',type:'spki'});
+ const seed=privateDER.subarray(16);
  const dir=await mkdtemp('/tmp/akc-inspect-wire-');
  try{
   const bin=join(dir,'wire-fixture');
@@ -119,12 +122,10 @@ test('native C inspect wire interoperates with the signed installed pilot verifi
    'tests/native/pilot_linux_inspect_wire_fixture.c','-lcrypto','-o',bin],{timeout:20000});
   expect(build.stderr.toString()).toBe('');
   expect(build.exitCode).toBe(0);
-  const der=Buffer.concat([Buffer.from('302e020100300506032b657004220420','hex'),seed]);
-  let publicKey:string;
-  try{
-   publicKey=createPublicKey(createPrivateKey({key:der,format:'der',type:'pkcs8'}))
-    .export({format:'der',type:'spki'}).subarray(-32).toString('base64');
-  }finally{der.fill(0);}
+  expect(privateDER.subarray(0,16).toString('hex')).toBe('302e020100300506032b657004220420');
+  expect(seed.length).toBe(32);
+  expect(publicDER.length).toBe(44);
+  const publicKey=publicDER.subarray(-32).toString('base64');
   const {artifact,root,target,expiresAt}=await makeArtifact();
   const claim=await makeNativeClaim(artifact,target,{keyId:await digest(publicKey),publicKey},expiresAt);
   const gate=await verifyInstalledContinuationPilot({...artifact,nativeReaderAppendix:await root.sign(JSON.stringify(claim))},root.publicKey,target);
@@ -146,7 +147,7 @@ test('native C inspect wire interoperates with the signed installed pilot verifi
    expect(wrong.stdout.length).toBe(0);
    expect(wrong.stderr.length).toBe(0);
   }
- }finally{seed.fill(0);await rm(dir,{recursive:true,force:true});}
+ }finally{privateDER.fill(0);await rm(dir,{recursive:true,force:true});}
 },30000);
 
 test('only the isolated, signed pilot artifact can compile an inert pilot installation',async()=>{
