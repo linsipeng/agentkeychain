@@ -38,6 +38,9 @@ jobs:
           test -x "$DEVELOPER_DIR/usr/bin/xcodebuild"
           test "$(xcodebuild -version | head -n 1)" = 'Xcode 16.4'
           printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
+      - name: Type-check the isolated macOS Keychain test (do not run it)
+        if: github.event_name == 'pull_request' && runner.os == 'macOS'
+        run: xcrun swiftc -typecheck tests/native/pilot_darwin_keychain.swift
       - name: Verify native packaging with synthetic policy
         if: github.event_name == 'pull_request'
         env:
