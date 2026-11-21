@@ -9,6 +9,41 @@ This runbook is preparation, not permission to deploy, publish a release or chan
 - Require both compiled clients to complete onboarding, sync/restart, scope approval and denial, offline retry, revocation, and recovery without exposing credential material. Verify cookie behavior in a disposable real-browser session and keep actual passkey user verification intact.
 - Use [the candidate packaging workflow](RELEASE_PACKAGING.md) to produce binaries for supported Darwin and Linux architectures and checksum-verified Darwin secure-store helpers. Verify file architecture, release input manifest, install/upgrade and rollback with isolated home and secure-store fixtures. Do not tag a candidate merely to produce test artifacts: the current repository treats version tags as a release trigger.
 
+### Same-device continuation release gate
+
+For the first package-only continuation, verify the original approval and the
+exact still-active genesis device, use a fresh Auth-origin passkey assertion,
+and pin the distinct continuation authority. Until the client can prove
+checkpoint ancestry, require the pristine Custody head: first witness event,
+first roster revision, sync sequence zero and the canonical genesis root.
+Do not refresh the original expired grant or relax its existing activation
+check.
+
+Before activation, require separate evidence of the exact package commit and
+of current independent Custody state. The transaction owner can attest only to
+the committed package joined to its continuation record. Custody independently
+checks current state against the same commitment and a fresh client challenge;
+a Custody signature over a Main claim alone is not independent evidence of
+Main storage. If independent durable package authority is a product
+requirement, prove that authority separately before release.
+
+Exercise loss before the commit and loss of the success response after it.
+The first must leave no effective package; the second must recover the same
+commit with a read-only proof, never a second approval or mutation. With a
+committed row inside the approval window, a later readback can use fresh,
+device-bound proof without extending the approval. Revocation, epoch change,
+nonce mismatch, a missing or different package, or stale Custody state must
+not activate the CLI. Repeat process termination before and after secure
+staging, local database commit, and secure cleanup: the persisted intent must
+resume one profile, one roster anchor and the same device and vault data key.
+Do not unlock sync from that intent without a valid live head and revocation
+check. Unwired fixtures and unsigned projections do not meet this release gate.
+The experimental Auth issuer's provider returns a raw signed witness; before
+enabling it, require nonce-bound current Custody state and revocation checks at
+approval finalization and again during consumption. A lost Auth response must
+retrieve the stored exact-intent decision under an Auth-owned, scoped grant;
+do not reapprove or expose general decision lookup.
+
 ## 2. Rehearse the rollout in disposable staging
 
 1. Identify and verify the distinct API and Web origins, Auth origin and RP, authority and witness ownership, Worker and D1 resources, manifest signers, current versions and deploy permissions. Main API must not hold Auth approval or Custody witness signing keys or control their authoritative state.

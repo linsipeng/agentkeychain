@@ -75,3 +75,13 @@ test('withholds a signature if the Custody head advances during signing',async()
  await expect(proveFreshContinuationHead(db,request,policy,{...wSign,sign})).rejects.toThrow('continuation_head_rejected');
  expect(await db.prepare("SELECT count(*) n FROM roster_witness WHERE vault_id='fresh-advancing'").first('n')).toBe(2);
 });
+test('rejects an already-advanced sync head even when the signed roster revision has not changed',async()=>{
+ const {f,request,policy,wSign,apiSign,ledger,witness,cp,zero}=await pending('fresh-already-advanced');
+ const next=await advanceRoot(zero,1,{canonical:'synthetic-activity',signature:'synthetic'});
+ const cp1=await checkpoint(apiSign,f.grant.tenantId,f.grant.vaultId,1,next.root,zero,next.operationDigest);
+ const advanced=await ledger.accept({prior:witness,rosters:[f.roster],checkpoints:[cp,cp1]});
+ expect(JSON.parse(advanced.canonical)).toMatchObject({revision:1,sequence:1});
+ const sign=vi.fn(wSign.sign);
+ await expect(proveFreshContinuationHead(db,request,policy,{...wSign,sign})).rejects.toThrow('continuation_head_rejected');
+ expect(sign).not.toHaveBeenCalled();
+});

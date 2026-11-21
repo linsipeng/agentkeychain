@@ -1,5 +1,5 @@
 import {base64,exactFields,identifier,type SignedManagedOperation} from '../../src/cloud/protocol.ts';
-import type {CheckpointKey,CheckpointSigner} from './checkpoints.ts';
+import {genesisRoot,type CheckpointKey,type CheckpointSigner} from './checkpoints.ts';
 import {digest,verify} from './contracts.ts';
 import {canonicalGrant,canonicalPackage,type EnrollmentGrant,type KeyPackage} from './device-protocol.ts';
 import {verifyContinuationApproval} from './enrollment-continuation.ts';
@@ -62,7 +62,8 @@ export async function proveFreshContinuationHead(
   if(!row||row.revision!==1||row.digest!==expected||row.roster!==JSON.stringify(roster))throw reject();
   const witness=shape(JSON.parse(row.receipt),4096),checkpoint=shape(JSON.parse(row.checkpoint),4096);
   const w=await verifyWitness(witness,policy.witnessKeys,{accountId,tenantId,vaultId,revision:1,digest:expected},checkpoint);
-  if(w.event!==row.event||w.sequence!==row.sequence||w.root!==row.root)throw reject();
+  if(w.event!==1||w.sequence!==0||w.root!==await genesisRoot(tenantId,vaultId)||
+     w.event!==row.event||w.sequence!==row.sequence||w.root!==row.root)throw reject();
   const pin=policy.witnessKeys.find(k=>k.keyId===w.keyId),key=await localWitnessKey.key();
   identifier(policy.authority.keyId);base64(policy.authority.publicKey,32,32);
   if(!pin||pin.keyId!==key.keyId||pin.publicKey!==key.publicKey||

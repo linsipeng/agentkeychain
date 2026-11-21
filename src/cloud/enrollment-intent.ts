@@ -72,6 +72,7 @@ export async function verifyGenesisContinuationPreflight(secure:SecureStore,stor
   throw new Error('cloud_enrollment_intent_conflict');
  await verifyRoster(input.roster,null,now,true);
  const w=await verifyWitness(input.witness,pins,{accountId:g.accountId,tenantId:g.tenantId,vaultId:g.vaultId,revision:1,digest:head});
+ if(w.event!==1||w.sequence!==0||w.root!==await genesisRoot(g.tenantId,g.vaultId))throw new Error('cloud_invalid_continuation_readback');
  const pin=pins.find(k=>k.keyId===w.keyId)!;
  if(pin.publicKey===g.signingKey||pin.publicKey===g.wrappingKey)throw new Error('cloud_continuation_not_provisioned');
  const payloadDigest=await digest(JSON.stringify(['AgentKeychain-enrollment-continuation-package-v1',input.keyPackage.canonical,input.keyPackage.signature]));

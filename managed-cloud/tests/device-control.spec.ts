@@ -537,6 +537,7 @@ test.each(['expiry','revoke'])('concurrent readiness %s and last-device removal 
 });
 
 import {consumeGenesisPackageContinuation} from '../api-worker/genesis-package-continuation.ts';
+import {canonicalGenesisCommitExpectation,readGenesisPackageCommit} from '../api-worker/genesis-package-continuation-readback.ts';
 import {canonicalContinuationIntent,canonicalContinuationReceipt} from '../shared/enrollment-continuation.ts';
 import {WITNESS_DOMAIN} from '../shared/roster-witness.ts';
 async function expiredGenesisPackageFixture(){
@@ -577,7 +578,14 @@ async function expiredGenesisPackageFixture(){
   return {oldGrantCanonical,target:{canonical:intent,signature:await device.sign(intent)},approval:{canonical:receipt,signature:await authority.sign(receipt)},
    keyPackage,witness,roster:{canonical,signature}};
  };
- return {create,grant,pins:{authority:{keyId:'auth',publicKey:authority.signingKey},witnesses:[{keyId:'custody',publicKey:custody.signingKey}]}};
+ const token=crypto.randomUUID(),sessionDigest=await digest(token);
+ await db().prepare('INSERT INTO device_sessions VALUES(?,?,?,?,?,unixepoch()+600,1)').bind(sessionDigest,s.tenant_id,'v',deviceId,s.account_id).run();
+ const context=async (body:string)=>{
+  const url=new URL(origin+'/fixture/continuation-commit'), timestamp=Math.floor(Date.now()/1000),nonce=crypto.randomUUID();
+  const proof=await device.sign(requestProof('POST',url,await digest(body),timestamp,nonce,sessionDigest));
+  return authenticate(db(),new Request(url,{method:'POST',headers:{authorization:'Bearer '+token,'x-device-nonce':nonce,'x-device-proof':proof,'x-device-timestamp':String(timestamp)}}),'v',body);
+ };
+ return {create,grant,context,pins:{authority:{keyId:'auth',publicKey:authority.signingKey},witnesses:[{keyId:'custody',publicKey:custody.signingKey}]}};
 }
 test('unwired genesis continuation commits one exact immutable package despite concurrency and retries',async()=>{
  const f=await expiredGenesisPackageFixture(), input=await f.create();
@@ -601,4 +609,43 @@ test('genesis package continuation does not write under membership, roster, or s
  await expect(reject()).rejects.toThrow('approval_required');
  expect(await db().prepare('SELECT count(*) n FROM device_key_packages').first('n')).toBe(0);
  expect(await db().prepare('SELECT count(*) n FROM genesis_package_continuations').first('n')).toBe(0);
+});
+
+async function continuationReadbackFixture(){
+ const f=await expiredGenesisPackageFixture(),input=await f.create();
+ const target=JSON.parse(input.target.canonical);
+ const expected={continuationId:target.id as string,requestId:target.requestId as string,intentDigest:await digest(input.target.canonical),
+  approvalDigest:await digest(JSON.stringify([input.approval.canonical,input.approval.signature])),payloadDigest:target.payloadDigest as string};
+ const scope=()=>f.context(canonicalGenesisCommitExpectation(expected));
+ return {f,input,expected,scope,commit:()=>consumeGenesisPackageContinuation(db(),input,f.pins)};
+}
+test('commit readback returns exact Main-only metadata only after atomic package commit, without writing',async()=>{
+ const {input,expected,scope,commit}=await continuationReadbackFixture(),ctx=await scope();
+ await expect(readGenesisPackageCommit(db(),ctx,expected)).rejects.toThrow('not_found');
+ await commit();
+ const before=await db().prepare('SELECT * FROM device_audit').all();
+ const receipt=await readGenesisPackageCommit(db(),ctx,expected);
+ expect(receipt).toEqual({...expected,version:1,stage:'put-key-package',committed:true,source:'main-transaction',keyEpoch:1,
+  witnessDigest:await digest(JSON.stringify([input.witness.canonical,input.witness.signature]))});
+ expect(JSON.stringify(receipt)).not.toContain(input.keyPackage.signature);
+ expect(await readGenesisPackageCommit(db(),ctx,expected)).toEqual(receipt);
+ expect(await db().prepare('SELECT * FROM device_audit').all()).toMatchObject({results:before.results});
+ expect(await db().prepare('SELECT count(*) n FROM device_key_packages').first('n')).toBe(1);
+});
+test('commit readback requires the exact authenticated body and exact committed digests',async()=>{
+ const {f,expected,scope,commit}=await continuationReadbackFixture(),ctx=await scope();
+ await commit();
+ const altered={...expected,payloadDigest:'0'.repeat(64)};
+ await expect(readGenesisPackageCommit(db(),ctx,altered)).rejects.toThrow('not_found');
+ const signedAltered=await f.context(canonicalGenesisCommitExpectation(altered));
+ await expect(readGenesisPackageCommit(db(),signedAltered,altered)).rejects.toThrow('not_found');
+});
+test('commit readback rechecks membership and session state in its own query',async()=>{
+ const {expected,scope,commit}=await continuationReadbackFixture(),ctx=await scope();
+ await commit();
+ await db().prepare('UPDATE memberships SET active=0').run();
+ await expect(readGenesisPackageCommit(db(),ctx,expected)).rejects.toThrow('not_found');
+ await db().prepare('UPDATE memberships SET active=1').run();
+ await db().prepare('UPDATE device_sessions SET expires_at=unixepoch()-1').run();
+ await expect(readGenesisPackageCommit(db(),ctx,expected)).rejects.toThrow('not_found');
 });

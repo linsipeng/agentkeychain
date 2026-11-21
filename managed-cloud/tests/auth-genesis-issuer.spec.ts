@@ -77,3 +77,64 @@ test('Auth-owned credentials approve one exact first-device decision, not a Main
  expect((await read()).status).toBe(401);
  expect(await db.prepare('SELECT count(*) FROM auth_genesis_decisions').first('count(*)')).toBe(1);
 });
+
+import {continuationIssuer} from '../auth-trust-worker/experimental/continuation-issuer.ts';
+import {enrollmentFixture,signingFixture} from './synthetic-genesis-approval.ts';
+import {canonicalPackage} from '../shared/device-protocol.ts';
+import {canonicalContinuationIntent,verifyContinuationApproval} from '../shared/enrollment-continuation.ts';
+import {genesisRoot} from '../shared/checkpoints.ts';
+import {WITNESS_DOMAIN} from '../shared/roster-witness.ts';
+
+test('Auth requires a newly verified ceremony for the exact continuation stage and issues once',async()=>{
+ await reset();
+ const {AUTH:db,GENESIS_ISSUER_SCHEMA:schema}=env as unknown as {AUTH:D1Database;GENESIS_ISSUER_SCHEMA:Parameters<typeof applyD1Migrations>[1]};
+ await applyD1Migrations(db,schema);
+ const identity={origin:'https://auth.local.invalid',rpId:'auth.local.invalid'},now=Math.floor(Date.now()/1000);
+ const f=await enrollmentFixture(now-500), [authority,custody]=await Promise.all([signingFixture(),signingFixture()]);
+ const g=f.grant,oldGrantCanonical=canonicalGrant(g),head=await rosterDigest(f.roster),grantDigest=await digest(oldGrantCanonical);
+ const signed=await f.approval({issuedAt:now-400,expiresAt:now-350},oldGrantCanonical,f.roster);
+ const authentic=await virtualAuthenticator(),handle=random(),signup=random();
+ const cred=await webauthn.registration(identity,await digest(signup),await authentic.register(signup,identity));
+ const pin=({keyId,publicKey}:{keyId:string;publicKey:string})=>({keyId,publicKey});
+ let latest:{canonical:string;signature:string}|null=null;
+ const policy={genesis:f.policy,authority:pin(authority),witnesses:[pin(custody)]};
+ const issuer=continuationIssuer(db,identity,policy,{key:async()=>authority,sign:authority.sign},async()=>latest);
+ const make=async (change={})=>{
+  const cipher=canonicalPackage({version:1,vaultId:g.vaultId,targetDeviceId:g.deviceId,keyEpoch:g.keyEpoch,wrappedVDK:btoa('x'.repeat(80)),issuerDeviceId:g.deviceId,grantId:g.requestId});
+  const keyPackage={canonical:cipher,signature:await f.device.sign(cipher)};
+  const payloadDigest=await digest(JSON.stringify(['AgentKeychain-enrollment-continuation-package-v1',cipher,keyPackage.signature]));
+  const c=canonicalContinuationIntent({version:1,domain:'AgentKeychain-enrollment-continuation-intent-v1',id:random(),originalGrantDigest:grantDigest,
+   requestId:g.requestId,accountId:g.accountId,tenantId:g.tenantId,vaultId:g.vaultId,keyEpoch:g.keyEpoch,deviceId:g.deviceId,signingKey:g.signingKey,wrappingKey:g.wrappingKey,
+   issuerDeviceId:null,stage:'put-key-package',payloadDigest,rosterDigest:head,witnessHead:{revision:1,digest:head},expiresAt:now+100,...change});
+  return {input:{oldGrantCanonical,target:{canonical:c,signature:await f.device.sign(c)},roster:f.roster,keyPackage},payloadDigest};
+ };
+ const exact=await make();
+ await expect(issuer.begin(exact.input)).rejects.toThrow('continuation_approval_unavailable');
+ const w=JSON.stringify({version:1,keyId:custody.keyId,accountId:g.accountId,tenantId:g.tenantId,vaultId:g.vaultId,event:1,revision:1,digest:head,sequence:0,
+  root:await genesisRoot(g.tenantId,g.vaultId),checkpointDigest:await digest('checkpoint')});
+ latest={canonical:w,signature:await custody.sign(WITNESS_DOMAIN+w)};
+ await db.batch([
+  db.prepare('INSERT INTO auth_genesis_pins VALUES(?,?,?,?,?,?,?,1)').bind(g.accountId,g.tenantId,g.vaultId,handle,cred.id,encode(cred.publicKey),0),
+  db.prepare('INSERT INTO auth_genesis_challenges VALUES(?,?,?,?,?,?,?,?,?)').bind(signed.data.decisionId,await digest('historical fixture'),g.accountId,g.tenantId,g.vaultId,cred.id,grantDigest,head,now-350),
+  db.prepare('INSERT INTO auth_genesis_decisions VALUES(?,?,?,?)').bind(signed.data.decisionId,grantDigest,signed.proof.canonical,signed.proof.signature),
+ ]);
+ await expect(issuer.begin((await make({stage:'publish-roster'})).input)).rejects.toThrow('continuation_approval_unavailable');
+ const challenge=await issuer.begin(exact.input);
+ expect(challenge.options.userVerification).toBe('required');
+ const assertion=await authentic.assert(challenge.options.challenge,{...identity,counter:1,userHandle:handle});
+ await expect(issuer.complete(challenge.id,(await make()).input,assertion)).rejects.toThrow('continuation_approval_unavailable');
+ const parked=latest;latest=null;
+ await expect(issuer.complete(challenge.id,exact.input,assertion)).rejects.toThrow('continuation_approval_unavailable');
+ latest=parked;
+ await db.prepare('UPDATE auth_genesis_pins SET active=0').run();
+ await expect(issuer.complete(challenge.id,exact.input,assertion)).rejects.toThrow('continuation_approval_unavailable');
+ await db.prepare('UPDATE auth_genesis_pins SET active=1').run();
+ const outcomes=await Promise.allSettled([issuer.complete(challenge.id,exact.input,assertion),issuer.complete(challenge.id,exact.input,assertion)]);
+ const success=outcomes.filter(r=>r.status==='fulfilled');
+ expect(success).toHaveLength(1);
+ await expect(verifyContinuationApproval(exact.input.target,success[0]!.value,{oldGrantCanonical,stage:'put-key-package',payloadDigest:exact.payloadDigest,
+  rosterDigest:head,witnessHead:{revision:1,digest:head},authority:policy.authority,issuer:null,now:Math.floor(Date.now()/1000)})).resolves.toBeUndefined();
+ await expect(issuer.complete(challenge.id,exact.input,assertion)).rejects.toThrow('continuation_approval_unavailable');
+ expect(await db.prepare('SELECT count(*) n FROM auth_continuation_decisions').first('n')).toBe(1);
+ expect(await db.prepare('SELECT counter FROM auth_genesis_pins').first('counter')).toBe(1);
+});

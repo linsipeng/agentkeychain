@@ -148,6 +148,7 @@ test('read-only first-device continuation preflight keeps the protected intent a
  const {canonicalContinuationIntent,canonicalContinuationReceipt}=await import('../managed-cloud/shared/enrollment-continuation.ts');
  const {rosterDigest}=await import('../managed-cloud/shared/roster.ts');
  const {WITNESS_DOMAIN}=await import('../managed-cloud/shared/roster-witness.ts');
+ const {genesisRoot}=await import('../managed-cloud/shared/checkpoints.ts');
  const {verifyGenesisContinuationPreflight,newContinuationReadbackNonce,CONTINUATION_HEAD_DOMAIN,prepareEnrollmentActivation,resumeEnrollmentActivation}=await import('../src/cloud/enrollment-intent.ts');
  const {selfAnchor}=await import('../src/cloud/enrollment.ts');
  const {sealKeyPackage,destroyCloudKeys}=await import('../src/cloud/crypto.ts');
@@ -171,7 +172,7 @@ test('read-only first-device continuation preflight keeps the protected intent a
  const target={canonical:exact,signature:sign(exact,keys.signingPrivate)};
  const receipt=canonicalContinuationReceipt({version:1,domain:'AgentKeychain-enrollment-continuation-approval-v1',intentDigest:await digest(exact),authorityKeyId:'approval',approvedAt:now,expiresAt:now+60});
  const approval={canonical:receipt,signature:sign(receipt,auth.privateKey)};
- const w=JSON.stringify({version:1,keyId:'witness',accountId:'a',tenantId:'t',vaultId:'v',event:1,revision:1,digest:head,sequence:0,root:await digest('root'),checkpointDigest:await digest('cp')});
+ const w=JSON.stringify({version:1,keyId:'witness',accountId:'a',tenantId:'t',vaultId:'v',event:1,revision:1,digest:head,sequence:0,root:await genesisRoot('t','v'),checkpointDigest:await digest('cp')});
  const witness={canonical:w,signature:sign(WITNESS_DOMAIN+w,witnessKey.privateKey)};
  const nonce=newContinuationReadbackNonce();
  const f=JSON.stringify({domain:CONTINUATION_HEAD_DOMAIN,keyId:'witness',nonce,requestId:grant.requestId,
@@ -192,6 +193,11 @@ test('read-only first-device continuation preflight keeps the protected intent a
   await expect(verifyGenesisContinuationPreflight(secure,store,policy,newContinuationReadbackNonce(),input)).rejects.toThrow('cloud_invalid_continuation_readback');
   await expect(verifyGenesisContinuationPreflight(secure,store,policy,nonce,{...input,authorityAppendix:{canonical:appendix,signature:sign(appendix,auth.privateKey)}})).rejects.toThrow('invalid_continuation_authority_pin');
   await expect(verifyGenesisContinuationPreflight(secure,store,policy,nonce,{...input,grant:{...grant,keyEpoch:2}})).rejects.toThrow('cloud_enrollment_intent_conflict');
+  const advanced=JSON.stringify({...JSON.parse(w),event:2,sequence:1,root:await digest('advanced')});
+  const advancedWitness={canonical:advanced,signature:sign(WITNESS_DOMAIN+advanced,witnessKey.privateKey)};
+  const advancedHead=JSON.stringify({...JSON.parse(f),witnessDigest:await digest(JSON.stringify([advanced,advancedWitness.signature]))});
+  await expect(verifyGenesisContinuationPreflight(secure,store,policy,nonce,{...input,witness:advancedWitness,
+   freshHead:{canonical:advancedHead,signature:sign(advancedHead,witnessKey.privateKey)}})).rejects.toThrow('cloud_invalid_continuation_readback');
   // An out-of-band preflight never exempts the old activation contract.
   const enrollment={accountId:grant.accountId,tenantId:grant.tenantId,vaultId:grant.vaultId,deviceId:grant.deviceId,keyEpoch:grant.keyEpoch,
    signingPublic:grant.signingKey,wrappingPublic:grant.wrappingKey,vdk:b64(keys.vdk),roster:trust.roster,
