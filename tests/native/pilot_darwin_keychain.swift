@@ -14,7 +14,9 @@ enum GatePhase: String {
  case snapshotSearch, snapshotSearchDecode, snapshotDefault, snapshotDefaultDecode
  case fixtureBasename, fixtureAbsent, fixtureAlreadyExists, fixtureMetadata
  case filesystemType, filesystemOwner, fixtureFilePermissions, fixtureDirectoryPermissions, filesystemLinkCount
- case fixtureAlias, fixtureOpen, fixtureOpenRef, fixtureIdentity, fixturePairDistinct
+ case fixtureAlias, fixtureOpen, fixtureOpenRef, fixturePairDistinct
+ case fixtureVisibleDevice, fixtureVisibleInode, fixtureVisibleOwner, fixtureVisibleMode
+ case fixtureRetainedDevice, fixtureRetainedInode, fixtureNativePath
  case securityPath, securityPathBuffer, securityPathEncoding, securityStatus, securityFlags
  case createBeforeSnapshot, createAfterSnapshot, createAPI, createRefPath
  case unlockAPI, unlockAfterSnapshot, unlockedFlags, provisionIdentity, provisionFinalSnapshot
@@ -22,17 +24,31 @@ enum GatePhase: String {
  case slotPolicy, itemAdd, itemRead, itemReadDecode, itemDelete
  case ordinaryPolicyCheck, otherNamespacePolicyCheck, itemsInitiallyAbsent, siblingInitiallyAbsent
  case itemsIndependent, siblingAfterPrimaryDeletion, siblingDeleted, finalSnapshot
+ case atomicWriteContents, atomicWritePreferences
+}
+enum FixtureStep: String {
+ case openPrimary, openSibling, ordinaryPolicy, otherNamespacePolicy
+ case initialPrimary, initialSibling, addPrimary, afterAddPrimary, afterPrimaryAddSiblingCheck
+ case addSibling, afterAddSibling, readPrimaryAfterBothAdds, readSiblingAfterBothAdds
+ case removePrimary, afterRemovePrimary, siblingAfterPrimaryRemoval
+ case removeSibling, afterRemoveSibling
 }
 enum GateFailure: Error {
- case denied(GatePhase), osStatus(GatePhase, OSStatus), posix(GatePhase, Int32), mode(GatePhase, UInt32)
+ case denied(GatePhase), osStatus(GatePhase, OSStatus), posix(GatePhase, Int32)
+ indirect case fixture(FixtureStep, GateFailure), mode(GatePhase, UInt32)
  var message: String {
   switch self {
   case .denied(let phase): return "phase=" + phase.rawValue
   case .osStatus(let phase, let value): return "phase=" + phase.rawValue + " osstatus=" + String(value)
   case .posix(let phase, let value): return "phase=" + phase.rawValue + " errno=" + String(value)
+  case .fixture(let step, let nested): return "fixture_step=" + step.rawValue + " " + nested.message
   case .mode(let phase, let value): return "phase=" + phase.rawValue + " mode=" + String(value, radix: 8)
   }
  }
+}
+func fixtureStep<T>(_ step: FixtureStep, _ body: () throws -> T) throws -> T {
+ do { return try body() }
+ catch let failure as GateFailure { throw GateFailure.fixture(step, failure) }
 }
 func require(_ value: Bool, _ phase: GatePhase) throws { if !value { throw GateFailure.denied(phase) } }
 func signedStatus(_ status: OSStatus, _ phase: GatePhase) throws {
@@ -123,7 +139,10 @@ func fixtureMetadata(directory: Int32, name: String, path: String) throws -> sta
  try syscallStatus(name.withCString { fstatat(directory, $0, &row, AT_SYMLINK_NOFOLLOW) }, .childStat)
  try checkPrivateMetadata(row, directory: false)
  let visible = try privateMetadata(path, directory: false)
- try require(sameIdentity(row, visible), .fixtureIdentity)
+ try require(row.st_dev == visible.st_dev, .fixtureVisibleDevice)
+ try require(row.st_ino == visible.st_ino, .fixtureVisibleInode)
+ try require(row.st_uid == visible.st_uid, .fixtureVisibleOwner)
+ try require(row.st_mode == visible.st_mode, .fixtureVisibleMode)
  return row
 }
 
@@ -133,21 +152,15 @@ struct Fixture {
  let directoryFD: Int32
  let keychain: SecKeychain
  let device: dev_t
- let inode: ino_t
+ private(set) var inode: ino_t
  let expectedService: String
+ let outside: [String]
 
  init(directory: String, directoryFD: Int32, basename: String, outside: [String], expectedService: String) throws {
   try require(["pilot-primary.keychain-db", "pilot-sibling.keychain-db"].contains(basename), .fixtureBasename)
   let path = directory + "/" + basename
   let row = try fixtureMetadata(directory: directoryFD, name: basename, path: path)
-  try require(!outside.contains(path), .fixtureAlias)
-  for candidate in outside where !candidate.isEmpty {
-   // A fixture may not alias an existing/default search-list database.
-   var known = stat()
-   if candidate.withCString({ lstat($0, &known) }) == 0 {
-    try require(known.st_dev != row.st_dev || known.st_ino != row.st_ino, .fixtureAlias)
-   }
-  }
+  try Fixture.rejectAliases(path: path, row: row, outside: outside)
   var selected: SecKeychain?
   try signedStatus(path.withCString { SecKeychainOpen($0, &selected) }, .fixtureOpen)
   guard let loaded = selected else { throw GateFailure.denied(.fixtureOpenRef) }
@@ -158,13 +171,48 @@ struct Fixture {
   self.device = row.st_dev
   self.inode = row.st_ino
   self.expectedService = expectedService
+  self.outside = outside
   try recheck()
+ }
+
+ private static func rejectAliases(path: String, row: stat, outside: [String]) throws {
+  try require(!outside.contains(path), .fixtureAlias)
+  for candidate in outside where !candidate.isEmpty {
+   var known = stat()
+   if candidate.withCString({ lstat($0, &known) }) == 0 {
+    try require(known.st_dev != row.st_dev || known.st_ino != row.st_ino, .fixtureAlias)
+   }
+  }
+ }
+
+ // The file-backed provider can atomically replace its own database during a
+ // successful scoped write. This is never an entrypoint for opens or reads.
+ // No other mutation can update the expected identity.
+ func afterSuccessfulScopedWrite(_ service: String, _ account: String, expected: Data?,
+                                 untouchedSibling: Fixture, preferences: [String]) throws -> Fixture {
+  try require(try snapshot() == preferences, .atomicWritePreferences)
+  try untouchedSibling.recheck()
+  let replacement = try fixtureMetadata(directory: directoryFD, name: name, path: path)
+  try require(replacement.st_dev == device, .fixtureRetainedDevice)
+  try require(replacement.st_dev != untouchedSibling.device || replacement.st_ino != untouchedSibling.inode, .fixturePairDistinct)
+  try Fixture.rejectAliases(path: path, row: replacement, outside: outside)
+  var candidate = self
+  candidate.inode = replacement.st_ino
+  try candidate.recheck()
+  let observed = try candidate.read(service, account)
+  try require(observed == expected, .atomicWriteContents)
+  try candidate.recheck()
+  try untouchedSibling.recheck()
+  try require(try snapshot() == preferences, .atomicWritePreferences)
+  return candidate
  }
 
  func recheck() throws {
   let row = try fixtureMetadata(directory: directoryFD, name: name, path: path)
   let explicit = try keychainPath(keychain)
-  try require(row.st_dev == device && row.st_ino == inode && explicit == path, .fixtureIdentity)
+  try require(row.st_dev == device, .fixtureRetainedDevice)
+  try require(row.st_ino == inode, .fixtureRetainedInode)
+  try require(explicit == path, .fixtureNativePath)
   var status: SecKeychainStatus = 0
   try signedStatus(SecKeychainGetStatus(keychain, &status), .securityStatus)
   let expected = kSecUnlockStateStatus | kSecReadPermStatus | kSecWritePermStatus
@@ -193,8 +241,12 @@ struct Fixture {
   query[kSecReturnData as String] = true
   var result: CFTypeRef?
   let status = SecItemCopyMatching(query as CFDictionary, &result)
-  if status == errSecItemNotFound { return nil }
+  if status == errSecItemNotFound {
+   try recheck()
+   return nil
+  }
   try signedStatus(status, .itemRead)
+  try recheck()
   guard let bytes = result as? Data else { throw GateFailure.denied(.itemReadDecode) }
   return bytes
  }
@@ -347,29 +399,64 @@ func run() throws {
               UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
  let service = "agentkeychain.pilot." + suffix
  try require(suffix != String(repeating: "0", count: 64), .randomShape)
- let one = try Fixture(directory: root, directoryFD: location.fd, basename: "pilot-primary.keychain-db", outside: Array(aliases), expectedService: service)
- let two = try Fixture(directory: root, directoryFD: location.fd, basename: "pilot-sibling.keychain-db", outside: Array(aliases), expectedService: service)
+ var one = try fixtureStep(.openPrimary) {
+  try Fixture(directory: root, directoryFD: location.fd, basename: "pilot-primary.keychain-db", outside: Array(aliases), expectedService: service)
+ }
+ var two = try fixtureStep(.openSibling) {
+  try Fixture(directory: root, directoryFD: location.fd, basename: "pilot-sibling.keychain-db", outside: Array(aliases), expectedService: service)
+ }
  try require(one.device != two.device || one.inode != two.inode, .fixturePairDistinct)
  let slot = "synthetic-acceptance-marker", first = Data("synthetic-primary".utf8), second = Data("synthetic-sibling".utf8)
  // Check local policy without submitting an ordinary namespace to Security.
- do { _ = try one.attributes(service: "agentkeychain.vault", account: "master-password"); throw GateFailure.denied(.ordinaryPolicyCheck) }
- catch GateFailure.denied(.slotPolicy) { }
- do { _ = try one.attributes(service: "agentkeychain.pilot." + String(repeating: "0", count: 64), account: slot); throw GateFailure.denied(.otherNamespacePolicyCheck) }
- catch GateFailure.denied(.slotPolicy) { }
- let initiallyOne = try one.read(service, slot), initiallyTwo = try two.read(service, slot)
+ try fixtureStep(.ordinaryPolicy) {
+  do { _ = try one.attributes(service: "agentkeychain.vault", account: "master-password"); throw GateFailure.denied(.ordinaryPolicyCheck) }
+  catch GateFailure.denied(.slotPolicy) { }
+ }
+ try fixtureStep(.otherNamespacePolicy) {
+  do { _ = try one.attributes(service: "agentkeychain.pilot." + String(repeating: "0", count: 64), account: slot); throw GateFailure.denied(.otherNamespacePolicyCheck) }
+  catch GateFailure.denied(.slotPolicy) { }
+ }
+ let initiallyOne = try fixtureStep(.initialPrimary) { try one.read(service, slot) }
+ let initiallyTwo = try fixtureStep(.initialSibling) { try two.read(service, slot) }
  try require(initiallyOne == nil && initiallyTwo == nil, .itemsInitiallyAbsent)
- try one.add(service, slot, first)
- defer { try? one.remove(service, slot) }
- try require(try two.read(service, slot) == nil, .siblingInitiallyAbsent)
- try two.add(service, slot, second)
- defer { try? two.remove(service, slot) }
- let inOne = try one.read(service, slot), inTwo = try two.read(service, slot)
+ try fixtureStep(.addPrimary) {
+  try two.recheck()
+  try one.add(service, slot, first)
+ }
+ one = try fixtureStep(.afterAddPrimary) {
+  try one.afterSuccessfulScopedWrite(service, slot, expected: first, untouchedSibling: two, preferences: before)
+ }
+ try fixtureStep(.afterPrimaryAddSiblingCheck) { try require(try two.read(service, slot) == nil, .siblingInitiallyAbsent) }
+ try fixtureStep(.addSibling) {
+  try one.recheck()
+  try two.add(service, slot, second)
+ }
+ two = try fixtureStep(.afterAddSibling) {
+  try two.afterSuccessfulScopedWrite(service, slot, expected: second, untouchedSibling: one, preferences: before)
+ }
+ let inOne = try fixtureStep(.readPrimaryAfterBothAdds) { try one.read(service, slot) }
+ let inTwo = try fixtureStep(.readSiblingAfterBothAdds) { try two.read(service, slot) }
  try require(inOne == first && inTwo == second, .itemsIndependent)
- try one.remove(service, slot)
- let cleared = try one.read(service, slot), unaffected = try two.read(service, slot)
+ try fixtureStep(.removePrimary) {
+  try two.recheck()
+  try one.remove(service, slot)
+ }
+ one = try fixtureStep(.afterRemovePrimary) {
+  try one.afterSuccessfulScopedWrite(service, slot, expected: nil, untouchedSibling: two, preferences: before)
+ }
+ let cleared = try fixtureStep(.afterRemovePrimary) { try one.read(service, slot) }
+ let unaffected = try fixtureStep(.siblingAfterPrimaryRemoval) { try two.read(service, slot) }
  try require(cleared == nil && unaffected == second, .siblingAfterPrimaryDeletion)
- try two.remove(service, slot)
- try require(try two.read(service, slot) == nil, .siblingDeleted)
+ try fixtureStep(.removeSibling) {
+  try one.recheck()
+  try two.remove(service, slot)
+ }
+ two = try fixtureStep(.afterRemoveSibling) {
+  try two.afterSuccessfulScopedWrite(service, slot, expected: nil, untouchedSibling: one, preferences: before)
+ }
+ try fixtureStep(.afterRemoveSibling) {
+  try require(try two.read(service, slot) == nil && one.read(service, slot) == nil, .siblingDeleted)
+ }
  try require(try snapshot() == before, .finalSnapshot)
  print("PASS disposable Keychain: exact service, explicit store, isolated sibling and unchanged default/search list")
 }
