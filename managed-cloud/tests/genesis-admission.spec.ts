@@ -4,6 +4,10 @@ import {env} from 'cloudflare:workers';
 import {checkpoint,genesisRoot} from '../shared/checkpoints.ts';
 import {canonicalGrant} from '../shared/device-protocol.ts';
 import {admitGenesis} from '../shared/genesis-admission.ts';
+import {custodyAbsenceHeadRequestProof,proveCustodyAbsenceHead} from '../custody-trust-worker/package-absence-head.ts';
+import {digest,verify} from '../shared/contracts.ts';
+import {rosterDigest} from '../shared/roster.ts';
+import {rosterWitness} from '../shared/roster-witness.ts';
 import {enrollmentFixture,signingFixture} from './synthetic-genesis-approval.ts';
 
 const db=env.CUSTODIAN;
@@ -78,4 +82,77 @@ test('rejects a second admission with the same decision ID and leaves its vault 
  expect(await count('genesis_admissions',next.f.grant.vaultId)).toBe(0);
  expect(await count('roster_witness',first.f.grant.vaultId)).toBe(1);
  expect(await count('roster_witness',next.f.grant.vaultId)).toBe(0);
+});
+
+async function absence(vaultId:string){
+ const initialTime=current(),{f,witness,request}=await attempt(initialTime,vaultId);
+ const accepted=await admitGenesis(db,request,f.policy,witness);
+ const [live,other]=await Promise.all([signingFixture(),signingFixture()]);
+ const policy={...f.policy,witness:{keyId:witness.keyId,publicKey:witness.publicKey},currentHead:live,otherReleaseKeys:[other]};
+ const signer={key:async()=>live,sign:vi.fn(live.sign)};
+ const {grant:originalGrant,proof:initialApproval,roster}=request;
+ const requestedAt=f.grant.expiresAt+1,nonce='A'.repeat(43);
+ const deviceSignature=await f.device.sign(custodyAbsenceHeadRequestProof(nonce,requestedAt,f.grant.requestId,await digest(originalGrant),await rosterDigest(roster)));
+ return {f,accepted,signer,live,policy,input:{nonce,requestedAt,deviceSignature,originalGrant,initialApproval,roster}};
+}
+test('Custody signs the current independently admitted origin after historical grant expiry, without writes',async()=>{
+ const {f,accepted,signer,policy,input}=await absence('bound-current-head');
+ const clock=vi.spyOn(Date,'now').mockReturnValue(input.requestedAt*1000);
+ try{
+  const {witness,head}=await proveCustodyAbsenceHead(db,input,policy,signer);
+  expect(witness).toEqual(accepted);
+  const {requestId,accountId,tenantId,vaultId,deviceId,keyEpoch}=f.grant;
+  expect(head.canonical).toBe(JSON.stringify({version:1,domain:'AgentKeychain-enrollment-continuation-package-absence-current-head-v1',
+   keyId:policy.currentHead.keyId,nonce:input.nonce,requestId,grantDigest:await digest(input.originalGrant),rosterDigest:await rosterDigest(input.roster),
+   accountId,tenantId,vaultId,deviceId,keyEpoch,rosterRevision:1,witnessDigest:await digest(JSON.stringify([witness.canonical,witness.signature])),
+   status:'current',issuedAt:input.requestedAt,expiresAt:input.requestedAt+30}));
+  expect(await verify(policy.currentHead.publicKey,head.signature,head.canonical)).toBe(true);
+  expect(await count('roster_witness',vaultId)).toBe(1);
+  expect(await count('genesis_admissions',vaultId)).toBe(1);
+ }finally{clock.mockRestore();}
+});
+test('Custody denies missing independent provenance, wrong scopes, expired challenge and same historical sign role',async()=>{
+ const {f,signer,policy,input}=await absence('bound-provenance');
+ const clock=vi.spyOn(Date,'now').mockReturnValue(input.requestedAt*1000);
+ const deny=()=>expect(signer.sign).not.toHaveBeenCalled();
+ try{
+  const alternate=await f.approval({decisionId:'disjoint-decision'});
+  await expect(proveCustodyAbsenceHead(db,{...input,initialApproval:alternate.proof},policy,signer)).rejects.toThrow('continuation_absence_head_unavailable');
+  await expect(proveCustodyAbsenceHead(db,{...input,nonce:'B'+'A'.repeat(42)},policy,signer)).rejects.toThrow('continuation_absence_head_unavailable');
+  await expect(proveCustodyAbsenceHead(db,input,{...policy,witness:policy.currentHead},signer)).rejects.toThrow('continuation_absence_head_unavailable');
+  // Legacy genesis form can have the exact current witness but no independent admission record.
+  const legacy=await enrollmentFixture(current()-600,'legacy-no-admission'),legacyWitness=await signingFixture();
+  const {tenantId,vaultId}=legacy.grant;
+  const cp=await checkpoint({key:async()=>legacy.policy.checkpointKeys[0]!,sign:legacy.checkpoint.sign},tenantId,vaultId,0,await genesisRoot(tenantId,vaultId),null,null);
+  const originalGrant=canonicalGrant(legacy.grant),{proof}=await legacy.approval();
+  const nonce=input.nonce,requestedAt=input.requestedAt,roster=legacy.roster;
+  const hash=await rosterDigest(roster);
+  await rosterWitness(db,{key:async()=>legacyWitness,sign:legacyWitness.sign},legacy.policy.checkpointKeys,async()=>true,legacy.policy.recoveryAuthorities)
+   .accept({rosters:[roster],checkpoints:[cp]});
+  expect(await count('roster_witness',vaultId)).toBe(1);
+  expect(await count('genesis_admissions',vaultId)).toBe(0);
+  const deviceSignature=await legacy.device.sign(custodyAbsenceHeadRequestProof(nonce,requestedAt,legacy.grant.requestId,await digest(originalGrant),hash));
+  await expect(proveCustodyAbsenceHead(db,{nonce,requestedAt,deviceSignature,originalGrant,initialApproval:proof,roster},
+   {...policy,...legacy.policy,witness:legacyWitness},signer)).rejects.toThrow('continuation_absence_head_unavailable');
+  clock.mockReturnValue((input.requestedAt+30)*1000);
+  await expect(proveCustodyAbsenceHead(db,input,policy,signer)).rejects.toThrow('continuation_absence_head_unavailable');
+  deny();
+ }finally{clock.mockRestore();}
+});
+test('Custody suppresses signed response if an immutable revocation arrives during signing',async()=>{
+ const {f,signer,live,policy,input}=await absence('during-signer-veto');
+ const clock=vi.spyOn(Date,'now').mockReturnValue(input.requestedAt*1000);
+ const {tenantId,vaultId,deviceId}=f.grant;
+ try{
+  signer.sign.mockImplementationOnce(async bytes=>{
+   await db.prepare("INSERT INTO recovery_revocation_witness(tenant_id,vault_id,device_id,package_id,checkpoint,canonical,receipt) VALUES(?,?,?,'test','test','test','test')")
+    .bind(tenantId,vaultId,deviceId).run();
+   return live.sign(bytes);
+  });
+  await expect(proveCustodyAbsenceHead(db,input,policy,signer)).rejects.toThrow('continuation_absence_head_unavailable');
+  expect(signer.sign).toHaveBeenCalledTimes(1);
+  signer.sign.mockClear();
+  await expect(proveCustodyAbsenceHead(db,input,policy,signer)).rejects.toThrow('continuation_absence_head_unavailable');
+  expect(signer.sign).not.toHaveBeenCalled();
+ }finally{clock.mockRestore();}
 });

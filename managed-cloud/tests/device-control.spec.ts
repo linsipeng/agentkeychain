@@ -828,3 +828,46 @@ test('closed Auth preview withholds the decision when independent Custody vetoes
  expect(await db.prepare('SELECT count(*) n FROM auth_continuation_view_grants').first('n')).toBe(0);
  expect(await db.prepare('SELECT counter FROM auth_genesis_pins').first('counter')).toBe(counter);
 });
+
+import {canonicalGenesisPackageAbsence,MAIN_GENESIS_PACKAGE_ABSENCE_DOMAIN,observeGenesisPackageAbsence,proveGenesisPackageAbsence} from '../api-worker/genesis-package-absence.ts';
+test('same-device absence observation requires the exact acknowledged roster, and ceases after package commit',async()=>{
+ const {f,input,expected,commit}=await continuationReadbackFixture();
+ const request={nonce:'A'.repeat(43),requestId:expected.requestId,grantDigest:await digest(input.oldGrantCanonical),
+  rosterDigest:JSON.parse(input.target.canonical).rosterDigest as string};
+ const probe=async(x=request)=>observeGenesisPackageAbsence(db(),await f.context(canonicalGenesisPackageAbsence(x)),x,f.pins.witnesses);
+ const before=await db().prepare('SELECT * FROM device_audit').all();
+ expect(await probe()).toMatchObject({...request,source:'main-local-observation',packagePresent:false,rosterRevision:1,keyEpoch:1});
+ expect(await db().prepare('SELECT * FROM device_audit').all()).toMatchObject({results:before.results});
+ await expect(probe({...request,rosterDigest:'0'.repeat(64)})).rejects.toThrow('not_found');
+ const wrongBody=await f.context(canonicalGenesisPackageAbsence({...request,nonce:'B'.repeat(43)}));
+ await expect(observeGenesisPackageAbsence(db(),wrongBody,request,f.pins.witnesses)).rejects.toThrow('not_found');
+ const originalScope=await f.context(canonicalGenesisPackageAbsence(request));
+ await expect(observeGenesisPackageAbsence(db(),originalScope,request,[f.pins.authority])).rejects.toThrow('not_found');
+
+ await db().prepare("UPDATE roster_witness_sagas SET state='pending'").run();
+ await expect(probe()).rejects.toThrow('not_found');
+ await db().prepare("UPDATE roster_witness_sagas SET state='acknowledged'").run();
+ await commit();
+ await expect(probe()).rejects.toThrow('not_found');
+});
+
+test('Main signs only the exact scoped absence and withholds the result after a concurrent atomic commit',async()=>{
+ const {f,input,expected,commit}=await continuationReadbackFixture();
+ const request={nonce:'A'.repeat(43),requestId:expected.requestId,grantDigest:await digest(input.oldGrantCanonical),
+  rosterDigest:JSON.parse(input.target.canonical).rosterDigest as string};
+ const signer=await identity(),mainAbsenceAuthority={keyId:await digest(signer.signingKey),publicKey:signer.signingKey};
+ const pins={mainAbsenceAuthority,witnesses:f.pins.witnesses,otherReleaseKeys:[f.pins.authority]};
+ const context=()=>f.context(canonicalGenesisPackageAbsence(request));
+ const local={key:async()=>mainAbsenceAuthority,sign:signer.sign};
+ const proof=await proveGenesisPackageAbsence(db(),await context(),request,pins,local),p=JSON.parse(proof.canonical);
+ expect(await verify(mainAbsenceAuthority.publicKey,proof.signature,proof.canonical)).toBe(true);
+ expect(p).toMatchObject({...request,domain:MAIN_GENESIS_PACKAGE_ABSENCE_DOMAIN,version:1,rosterRevision:1,status:'absent'});
+ expect(p.expiresAt-p.issuedAt).toBeGreaterThan(0);
+ expect(p.expiresAt-p.issuedAt).toBeLessThanOrEqual(30);
+ await expect(proveGenesisPackageAbsence(db(),await context(),request,{...pins,otherReleaseKeys:[mainAbsenceAuthority]},local)).rejects.toThrow('not_found');
+ await expect(proveGenesisPackageAbsence(db(),await context(),request,pins,{...local,sign:async canonical=>{
+  await commit();
+  return local.sign(canonical);
+ }})).rejects.toThrow('not_found');
+ await expect(proveGenesisPackageAbsence(db(),await context(),request,pins,local)).rejects.toThrow('not_found');
+});

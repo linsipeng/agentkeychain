@@ -69,6 +69,24 @@ after the short approval window; safely recovering an older committed
 decision requires a separate time-of-commit contract, not replaying an
 expired approval.
 
+### Original device with no local pending package
+
+Do not treat a missing local package or a generic service 404 as proof that a
+new package can safely be generated. The isolated prototype uses two scoped,
+nonce-bound observations: Main checks the exact acknowledged roster and that
+its primary transaction store has neither a package nor a continuation
+record; Custody independently confirms the exact original genesis admission,
+the current roster and its veto state. Each proof expires within 30 seconds
+and the client checks matching scope, roster and original grant. Together
+these are observations, not a reservation or authorization to write.
+
+If a package exists, require a separate authenticated byte-exact readback;
+never reseal a substitute. Without exact independent genesis provenance or
+an acknowledged original roster, this branch does not proceed. Future
+activation still needs a fresh Auth approval over the new exact stage and an
+atomic Main absence check at commit. No live routes or key generation are
+added by these observations.
+
 ## 2. Rehearse the rollout in disposable staging
 
 1. Identify and verify the distinct API and Web origins, Auth origin and RP, authority and witness ownership, Worker and D1 resources, manifest signers, current versions and deploy permissions. Main API must not hold Auth approval or Custody witness signing keys or control their authoritative state.
