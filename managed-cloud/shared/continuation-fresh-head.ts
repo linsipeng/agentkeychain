@@ -7,6 +7,8 @@ import {rosterDigest,verifyRoster} from './roster.ts';
 import {verifyWitness} from './roster-witness.ts';
 
 export const CONTINUATION_HEAD_DOMAIN='AgentKeychain-enrollment-continuation-current-head-v1';
+export const MAIN_CONTINUATION_COMMIT_DOMAIN='AgentKeychain-enrollment-continuation-main-commit-v1';
+export const CUSTODY_CONTINUATION_POST_COMMIT_DOMAIN='AgentKeychain-enrollment-continuation-custody-post-commit-v1';
 export interface ContinuationFreshHeadRequest {
  readonly nonce:string; readonly grant:string;
  readonly target:SignedManagedOperation; readonly approval:SignedManagedOperation;
@@ -30,14 +32,7 @@ const shape=(value:unknown,max:number):SignedManagedOperation=>{
 };
 const bytesDigest=(value:SignedManagedOperation)=>digest(JSON.stringify([value.canonical,value.signature]));
 
-/** Internal Custody read model. This function creates a typed, expiring
- * assertion, not an activation authorization. `localWitnessKey` is a
- * Custody-local capability, never a generic RPC or caller-supplied key. */
-export async function proveFreshContinuationHead(
- db:D1Database, request:ContinuationFreshHeadRequest, policy:CustodyPolicy, localWitnessKey:CheckpointSigner,
-):Promise<{witness:SignedManagedOperation;freshHead:SignedManagedOperation}>{
- try{
-  exactFields(request,['nonce','grant','target','approval','roster','keyPackage']);
+async function approvedCurrentHead(db:D1Database,request:ContinuationFreshHeadRequest,policy:CustodyPolicy,localWitnessKey:CheckpointSigner){
   const {nonce,grant}=request;
   if(typeof nonce!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(nonce)||typeof grant!=='string'||grant.length===0||grant.length>4096)throw reject();
   const target=shape(request.target,4096),approval=shape(request.approval,1024),roster=shape(request.roster,64*1024),keyPackage=shape(request.keyPackage,4096);
@@ -74,15 +69,83 @@ export async function proveFreshContinuationHead(
   const issuedAt=nowSeconds();
   await verifyContinuationApproval(target,approval,{oldGrantCanonical:grant,stage:'put-key-package',payloadDigest,
    rosterDigest:expected,witnessHead:{revision:w.revision,digest:w.digest},authority:policy.authority,issuer:null,now:issuedAt});
-  const approvalWindow=JSON.parse(approval.canonical) as {expiresAt:number};
+  const approvalWindow=JSON.parse(approval.canonical) as {approvedAt:number;expiresAt:number};
   const expiresAt=Math.min(issuedAt+60,approvalWindow.expiresAt,r.expiresAt);
+  const stillCurrent=async()=>{
+   const after=await head();
+   return !!after&&after.event===row.event&&after.receipt===row.receipt&&after.digest===row.digest;
+  };
+  return {g,w,pin,witness,target,approval,approvalWindow,nonce,issuedAt,expiresAt,payloadDigest,stillCurrent};
+}
+
+/** Internal read-only preflight; the local signer remains unexposed. */
+export async function proveFreshContinuationHead(
+ db:D1Database, request:ContinuationFreshHeadRequest, policy:CustodyPolicy, localWitnessKey:CheckpointSigner,
+):Promise<{witness:SignedManagedOperation;freshHead:SignedManagedOperation}>{
+ try{
+  exactFields(request,['nonce','grant','target','approval','roster','keyPackage']);
+  const {g,w,pin,witness,approval,nonce,issuedAt,expiresAt,payloadDigest,stillCurrent}=await approvedCurrentHead(db,request,policy,localWitnessKey);
   if(expiresAt<=issuedAt)throw reject();
   const canonical=JSON.stringify({domain:CONTINUATION_HEAD_DOMAIN,keyId:w.keyId,nonce,requestId:g.requestId,
    witnessDigest:await bytesDigest(witness),approvalDigest:await bytesDigest(approval),payloadDigest,issuedAt,expiresAt});
   const signature=await localWitnessKey.sign(canonical);
   if(!await verify(pin.publicKey,signature,canonical))throw reject();
-  const after=await head();
-  if(!after||after.event!==row.event||after.receipt!==row.receipt||after.digest!==row.digest||nowSeconds()>=expiresAt)throw reject();
+  if(!await stillCurrent()||nowSeconds()>=expiresAt)throw reject();
   return {witness,freshHead:{canonical,signature}};
+ }catch{throw reject();}
+}
+
+/** Separate internal post-commit Custody assertion. Authenticating Main's
+ * purpose-specific signed claim precedes the independent Custody snapshot.
+ * This proves the sample occurred after that claim, not independent storage.
+ * Pins/keys are local Custody configuration; no HTTP, RPC or write path. */
+export async function provePostCommitContinuationHead(
+ db:D1Database, request:ContinuationFreshHeadRequest,
+ priorFreshHead:SignedManagedOperation, mainCommit:SignedManagedOperation,
+ policy:CustodyPolicy&{readonly mainCommitAuthority:CheckpointKey;readonly otherReleaseKeys:readonly CheckpointKey[]},
+ localWitnessKey:CheckpointSigner,
+):Promise<SignedManagedOperation>{
+ try{
+  exactFields(request,['nonce','grant','target','approval','roster','keyPackage']);
+  const main=shape(mainCommit,4096),prior=shape(priorFreshHead,2048),mainPin=policy.mainCommitAuthority;
+  identifier(mainPin.keyId);base64(mainPin.publicKey,32,32);
+  if([policy.authority,...policy.witnessKeys,...policy.checkpointKeys,...policy.recoveryAuthorities,...policy.otherReleaseKeys]
+    .some(pin=>pin.keyId===mainPin.keyId||pin.publicKey===mainPin.publicKey)||
+    !await verify(mainPin.publicKey,main.signature,main.canonical))throw reject();
+  const c:unknown=JSON.parse(main.canonical),observedAt=nowSeconds();
+  exactFields(c,['version','domain','keyId','nonce','continuationId','requestId','accountId','tenantId','vaultId','deviceId','keyEpoch',
+   'stage','intentDigest','approvalDigest','payloadDigest','witnessDigest','custodyFreshHeadDigest','issuedAt','expiresAt']);
+  if(c.version!==1||c.domain!==MAIN_CONTINUATION_COMMIT_DOMAIN||c.keyId!==mainPin.keyId||
+     typeof c.nonce!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(c.nonce)||c.nonce===request.nonce||
+     typeof c.issuedAt!=='number'||typeof c.expiresAt!=='number'||!Number.isSafeInteger(c.issuedAt)||!Number.isSafeInteger(c.expiresAt)||
+     c.issuedAt>observedAt||c.expiresAt<=observedAt||c.expiresAt-c.issuedAt>60||
+     await bytesDigest(prior)!==c.custodyFreshHeadDigest)throw reject();
+
+  // New read after authenticating the signed transaction-owner claim.
+  const {g,w,pin,witness,target,approval,approvalWindow,nonce,issuedAt,expiresAt,payloadDigest,stillCurrent}=await approvedCurrentHead(db,request,policy,localWitnessKey);
+  if(mainPin.publicKey===g.signingKey||mainPin.publicKey===g.wrappingKey||c.issuedAt<approvalWindow.approvedAt||c.expiresAt>approvalWindow.expiresAt)throw reject();
+  const {id:continuationId}=JSON.parse(target.canonical) as {id:string};
+  const witnessDigest=await bytesDigest(witness),approvalDigest=await bytesDigest(approval),intentDigest=await digest(target.canonical);
+  if(main.canonical!==JSON.stringify({version:1,domain:MAIN_CONTINUATION_COMMIT_DOMAIN,keyId:mainPin.keyId,nonce:c.nonce,continuationId,
+   requestId:g.requestId,accountId:g.accountId,tenantId:g.tenantId,vaultId:g.vaultId,deviceId:g.deviceId,keyEpoch:g.keyEpoch,
+   stage:'put-key-package',intentDigest,approvalDigest,payloadDigest,witnessDigest,custodyFreshHeadDigest:await bytesDigest(prior),
+   issuedAt:c.issuedAt,expiresAt:c.expiresAt}))throw reject();
+
+  const f:unknown=JSON.parse(prior.canonical);
+  exactFields(f,['domain','keyId','nonce','requestId','witnessDigest','approvalDigest','payloadDigest','issuedAt','expiresAt']);
+  if(typeof f.issuedAt!=='number'||typeof f.expiresAt!=='number'||!Number.isSafeInteger(f.issuedAt)||!Number.isSafeInteger(f.expiresAt)||
+     f.issuedAt<approvalWindow.approvedAt||f.issuedAt>c.issuedAt||c.expiresAt>f.expiresAt||
+     f.expiresAt>approvalWindow.expiresAt||f.expiresAt-f.issuedAt>60||
+     prior.canonical!==JSON.stringify({domain:CONTINUATION_HEAD_DOMAIN,keyId:w.keyId,nonce:c.nonce,requestId:g.requestId,
+      witnessDigest,approvalDigest,payloadDigest,issuedAt:f.issuedAt,expiresAt:f.expiresAt})||
+     !await verify(pin.publicKey,prior.signature,prior.canonical))throw reject();
+  const postExpiry=Math.min(expiresAt,c.expiresAt);
+  if(!await stillCurrent()||nowSeconds()>=postExpiry)throw reject();
+  const canonical=JSON.stringify({version:1,domain:CUSTODY_CONTINUATION_POST_COMMIT_DOMAIN,keyId:w.keyId,nonce,
+   mainCommitDigest:await bytesDigest(main),requestId:g.requestId,continuationId,accountId:g.accountId,tenantId:g.tenantId,vaultId:g.vaultId,
+   deviceId:g.deviceId,keyEpoch:g.keyEpoch,witnessDigest,payloadDigest,issuedAt,expiresAt:postExpiry});
+  const signature=await localWitnessKey.sign(canonical);
+  if(!await verify(pin.publicKey,signature,canonical)||!await stillCurrent()||nowSeconds()>=postExpiry)throw reject();
+  return {canonical,signature};
  }catch{throw reject();}
 }

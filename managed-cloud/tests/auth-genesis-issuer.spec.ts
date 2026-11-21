@@ -79,6 +79,7 @@ test('Auth-owned credentials approve one exact first-device decision, not a Main
 });
 
 import {continuationReadback,continuationReadbackIntent} from '../auth-trust-worker/experimental/continuation-readback.ts';
+import {continuationApprovalUi} from '../auth-trust-worker/experimental/continuation-ui.ts';
 import {continuationIssuer} from '../auth-trust-worker/experimental/continuation-issuer.ts';
 import {enrollmentFixture,signingFixture} from './synthetic-genesis-approval.ts';
 import {canonicalPackage} from '../shared/device-protocol.ts';
@@ -97,9 +98,9 @@ test('Auth requires a newly verified ceremony for the exact continuation stage a
  const authentic=await virtualAuthenticator(),handle=random(),signup=random();
  const cred=await webauthn.registration(identity,await digest(signup),await authentic.register(signup,identity));
  const pin=({keyId,publicKey}:{keyId:string;publicKey:string})=>({keyId,publicKey});
- let latest:{canonical:string;signature:string}|null=null;
+ let latest:{canonical:string;signature:string}|null=null, headReadsBeforeLoss:number|undefined;
  const policy={genesis:f.policy,authority:pin(authority),witnesses:[pin(custody)]};
- const issuer=continuationIssuer(db,identity,policy,{key:async()=>authority,sign:authority.sign},async()=>latest);
+ const issuer=continuationIssuer(db,identity,policy,{key:async()=>authority,sign:authority.sign},async()=>headReadsBeforeLoss!==undefined&&headReadsBeforeLoss--<=0?null:latest);
  const make=async (change={})=>{
   const cipher=canonicalPackage({version:1,vaultId:g.vaultId,targetDeviceId:g.deviceId,keyEpoch:g.keyEpoch,wrappedVDK:btoa('x'.repeat(80)),issuerDeviceId:g.deviceId,grantId:g.requestId});
   const keyPackage={canonical:cipher,signature:await f.device.sign(cipher)};
@@ -171,5 +172,41 @@ test('Auth requires a newly verified ceremony for the exact continuation stage a
  await db.prepare('UPDATE auth_continuation_view_grants SET issued=?,expires=?').bind(now-60,now-1).run();
  expect((await ask()).status).toBe(401);
  expect(await db.prepare('SELECT count(*) n FROM auth_continuation_decisions').first('n')).toBe(1);
+
+ const stage=(await make()).input,ui=continuationApprovalUi(identity.origin,issuer);
+ const post=(path:string,value:unknown,extra:Record<string,string>={})=>ui(new Request(identity.origin+'/v1/auth/continuation-approval/'+path,{
+  method:'POST',headers:{origin:identity.origin,'content-type':'application/json',...extra},body:JSON.stringify(value),
+ }));
+ const begin=await post('begin',{stage},{cookie:'__Host-akc_genesis_session='+random()});
+ expect(begin.status).toBe(200);
+ const setCookie=begin.headers.get('set-cookie')!;
+ const token=/__Host-akc_genesis_session=([A-Za-z0-9_-]{43})/.exec(setCookie)![1]!,csrf=/__Host-akc_genesis_csrf=([A-Za-z0-9_-]{43})/.exec(setCookie)![1]!;
+ expect(setCookie).toMatch(/__Host-akc_genesis_session=[^;]+; Path=\/; Secure; HttpOnly; SameSite=Strict; Max-Age=120/);
+ expect(setCookie).not.toContain('Domain=');
+ const opened=await begin.json() as {id:string;options:{challenge:string};display:{purpose:string;deviceId:string}};
+ expect(opened.display).toMatchObject({purpose:'continue-original-device-key-package',deviceId:g.deviceId});
+ const cookieHeaders={cookie:'__Host-akc_genesis_session='+token+'; __Host-akc_genesis_csrf='+csrf,'x-csrf-token':csrf};
+ const recover=()=>read(new Request(identity.origin+'/v1/auth/continuation-receipt',{
+  method:'POST',headers:{origin:identity.origin,'content-type':'application/json',...cookieHeaders},
+  body:JSON.stringify({decisionId:opened.id,oldGrantCanonical,target:stage.target}),
+ }));
+ expect(await db.prepare('SELECT count(*) n FROM auth_genesis_view_sessions WHERE session_digest=?').bind(await digest(token)).first('n')).toBe(0);
+ expect((await recover()).status).toBe(401);
+ const freshAssertion=await authentic.assert(opened.options.challenge,{...identity,counter:2,userHandle:handle});
+ const body={id:opened.id,stage,assertion:freshAssertion};
+ expect((await post('complete',body)).status).toBe(401);
+ expect((await post('complete',body,{...cookieHeaders,'x-csrf-token':random()})).status).toBe(401);
+ expect((await post('complete',body,{...cookieHeaders,origin:'https://another.invalid'})).status).toBe(401);
+ headReadsBeforeLoss=1; // Known head during lookup, unavailable after Passkey verification.
+ expect((await post('complete',body,cookieHeaders)).status).toBe(401);
+ headReadsBeforeLoss=undefined;
+ expect((await recover()).status).toBe(401);
+ expect(await db.prepare('SELECT counter FROM auth_genesis_pins').first('counter')).toBe(1);
+ const completed=await post('complete',body,cookieHeaders);expect(completed.status).toBe(200);
+ // Pretend the approval response was lost. Return the committed bytes, not a new signature.
+ const recovered=await recover();expect(recovered.status).toBe(200);
+ expect(await recovered.json()).toEqual(await db.prepare('SELECT canonical,signature FROM auth_continuation_decisions WHERE id=?').bind(opened.id).first());
+ expect((await post('complete',body,cookieHeaders)).status).toBe(401);
+ expect(await db.prepare('SELECT counter FROM auth_genesis_pins').first('counter')).toBe(2);
 
 });

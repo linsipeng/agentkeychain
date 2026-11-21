@@ -42,16 +42,18 @@ The experimental Auth issuer's provider returns a raw signed witness; before
 enabling it, require nonce-bound current Custody state and revocation checks at
 approval finalization and again during consumption. The experimental Auth
 readback can return a byte-identical committed approval to a current session
-with an exact ceremony/credential-bound read grant; the real independent UI
-and grant-mint lifecycle are not wired. Do not reapprove or expose general
-decision lookup.
+with an exact ceremony/credential-bound read grant. Its isolated Auth
+transport grants that scope atomically with a successful passkey ceremony;
+the independently hosted browser origin, production transport and policy
+are not wired. Do not reapprove or expose general decision lookup.
 
 The internal Main proof binds one currently valid approval, exact durable
 package and scoped device request to a nonce and a separately signed Custody
-assertion. It neither proves independent package storage nor guarantees
-Custody was sampled after Main's commit. Production transport must obtain
-Custody state after the exact commit and make the ordering auditable, with
-revocation checks before activation and unlock. This revision fails closed
+assertion. The separate experimental post-commit Custody check then
+authenticates the exact Main claim before independently reading the latest
+state, using a new activation nonce. It does not prove independent package
+storage. Production transport and the normal CLI need to enforce this order
+and recheck revocation before activation and unlock. This revision fails closed
 after the short approval window; safely recovering an older committed
 decision requires a separate time-of-commit contract, not replaying an
 expired approval.
@@ -86,3 +88,14 @@ does not renew authorization, and must not be used to unlock synchronization.
 Production integration still needs a fresh revocation/head check and an
 exclusive cross-process enrollment lease before any local write that activates
 the profile. The native secure store does not expose compare-and-swap.
+
+The isolated local-finalization slice additionally requests a new Custody
+challenge after acquiring an enrolled-database lease. It verifies the current
+post-commit signature over the exact staged Main receipt, device, witness and
+package. Scope is the unchanged genesis head only. The same secure intent owns
+partial roster/checkpoint writes; the profile and its exact intent digest
+marker commit atomically. As long as protected intent cleanup is pending the
+runtime will not open, even with a written profile. Retrying cleanup still
+requires a new live Custody proof in the supported window. This slice is not
+called by the shipping CLI and other enrollment writers do not yet share its
+lease; do not enable it until all writers use a compatible exclusive guard.

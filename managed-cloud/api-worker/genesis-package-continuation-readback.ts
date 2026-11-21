@@ -5,7 +5,8 @@ import {canonicalGrant,canonicalPackage,type EnrollmentGrant,type KeyPackage} fr
 import {canonicalContinuationIntent,canonicalContinuationReceipt} from '../shared/enrollment-continuation.ts';
 import {genesisRoot,type CheckpointKey,type CheckpointSigner} from '../shared/checkpoints.ts';
 import {verifyWitness} from '../shared/roster-witness.ts';
-import {CONTINUATION_HEAD_DOMAIN} from '../shared/continuation-fresh-head.ts';
+import {CONTINUATION_HEAD_DOMAIN,MAIN_CONTINUATION_COMMIT_DOMAIN} from '../shared/continuation-fresh-head.ts';
+export { MAIN_CONTINUATION_COMMIT_DOMAIN };
 
 interface Expectation {
  readonly continuationId:string;
@@ -107,7 +108,6 @@ export async function readGenesisPackageCommit(db:D1Database,scope:DeviceContext
 
 const signedDigest=(value:SignedManagedOperation)=>digest(JSON.stringify([value.canonical,value.signature]));
 const nowSeconds=()=>Math.floor(Date.now()/1000);
-export const MAIN_CONTINUATION_COMMIT_DOMAIN='AgentKeychain-enrollment-continuation-main-commit-v1';
 interface ProofExpectation {readonly commit:Expectation;readonly nonce:string;readonly custodyFreshHeadDigest:string}
 interface ProofPins {
  readonly mainCommitAuthority:CheckpointKey;

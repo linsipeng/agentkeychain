@@ -149,7 +149,7 @@ test('read-only first-device continuation preflight keeps the protected intent a
  const {rosterDigest}=await import('../managed-cloud/shared/roster.ts');
  const {WITNESS_DOMAIN}=await import('../managed-cloud/shared/roster-witness.ts');
  const {genesisRoot}=await import('../managed-cloud/shared/checkpoints.ts');
- const {verifyGenesisContinuationPreflight,newContinuationReadbackNonce,CONTINUATION_HEAD_DOMAIN,prepareEnrollmentActivation,resumeEnrollmentActivation,stageGenesisContinuation,readStagedGenesisContinuation}=await import('../src/cloud/enrollment-intent.ts');
+ const {verifyGenesisContinuationPreflight,newContinuationReadbackNonce,CONTINUATION_HEAD_DOMAIN,prepareEnrollmentActivation,resumeEnrollmentActivation,stageGenesisContinuation,readStagedGenesisContinuation,finalizeGenesisContinuation}=await import('../src/cloud/enrollment-intent.ts');
  const {selfAnchor}=await import('../src/cloud/enrollment.ts');
  const {sealKeyPackage,destroyCloudKeys}=await import('../src/cloud/crypto.ts');
  const keys=await createCloudKeys(),secure=new MemorySecureStore(), b64=(v:Uint8Array)=>Buffer.from(v).toString('base64');
@@ -242,6 +242,58 @@ test('read-only first-device continuation preflight keeps the protected intent a
   await prepareEnrollmentActivation(secure,store,keys,{enrollment,signedRoster:roster,evidence:{grant,keyPackage,witness,acceptedAt:now}});
   await expect(resumeEnrollmentActivation(secure,store,policy)).rejects.toThrow('cloud_enrollment_intent_conflict');
   expect(store.get('state','enrollment')).toBeNull();
+  // Independent disposable database exercises interruptions in the new phase.
+  const activationDb=new Database(':memory:'), activationStore=new CloudStore(activationDb,keys.csk);
+  class FaultBoundary extends MemorySecureStore {
+   checkpoint=false;cleanup=false;
+   override async put(account:SecureAccount,value:Uint8Array){
+    await super.put(account,value);
+    if(account==='checkpoint-anchor'&&this.checkpoint){this.checkpoint=false;throw new Error('test_interrupted_before_local_commit');}
+   }
+   override async remove(account:SecureAccount){
+    if(account==='enrollment-intent'&&this.cleanup){this.cleanup=false;throw new Error('test_interrupted_after_local_commit');}
+    await super.remove(account);
+   }
+  }
+  const local=new FaultBoundary();
+  const makePostProof=async (challenge:string)=>{
+   const bytes=JSON.stringify({version:1,domain:'AgentKeychain-enrollment-continuation-custody-post-commit-v1',keyId:'witness',nonce:challenge,
+    mainCommitDigest:await digest(JSON.stringify([commit.canonical,commit.signature])),requestId:grant.requestId,continuationId:'a'.repeat(43),
+    accountId:grant.accountId,tenantId:grant.tenantId,vaultId:grant.vaultId,deviceId:grant.deviceId,keyEpoch:grant.keyEpoch,
+    witnessDigest:await digest(JSON.stringify([w,witness.signature])),payloadDigest,issuedAt:now,expiresAt:now+20});
+   return {canonical:bytes,signature:sign(bytes,witnessKey.privateKey)};
+  };
+  try{
+   await protectEnrollmentKeys(local,keys);
+   for(const id of ['pending','pending-approved','pending-self-roster','pending-package'])activationStore.put('state',id,store.get('state',id));
+   await stageGenesisContinuation(local,activationStore,policy,nonce,verified);
+   await expect(finalizeGenesisContinuation(local,activationStore,policy,()=>makePostProof(nonce))).rejects.toThrow('cloud_invalid_continuation_commit');
+   expect(activationStore.get('state','enrollment')).toBeNull();
+   expect(await local.get('roster-anchor')).toBeNull();
+   local.checkpoint=true;
+   await expect(finalizeGenesisContinuation(local,activationStore,policy,async challenge=>{
+    await expect(finalizeGenesisContinuation(local,activationStore,policy,makePostProof)).rejects.toThrow('cloud_enrollment_busy');
+    return makePostProof(challenge);
+   })).rejects.toThrow('test_interrupted_before_local_commit');
+   expect(activationStore.get('state','enrollment')).toBeNull();
+   expect(activationStore.get('state','roster-current')).toEqual(roster);
+   expect(await local.get('enrollment-intent')).not.toBeNull();
+   local.cleanup=true;
+   await expect(finalizeGenesisContinuation(local,activationStore,policy,makePostProof)).rejects.toThrow('test_interrupted_after_local_commit');
+   expect(activationStore.get('state','enrollment')).toEqual(enrollment);
+   const {openCloudRuntime}=await import('../src/cloud/runtime.ts');
+   await expect(openCloudRuntime(activationDb,new Uint8Array(32),{policy,secure:local})).rejects.toThrow('cloud_enrollment_pending');
+   const expired=spyOn(Date,'now').mockReturnValue((now+21)*1000);
+   try{
+    await expect(finalizeGenesisContinuation(local,activationStore,policy,makePostProof)).rejects.toThrow('cloud_invalid_continuation_commit');
+    await expect(openCloudRuntime(activationDb,new Uint8Array(32),{policy,secure:local})).rejects.toThrow('cloud_enrollment_pending');
+   }finally{expired.mockRestore();}
+   expect(await finalizeGenesisContinuation(local,activationStore,policy,makePostProof)).toBe(true);
+   expect(await local.get('enrollment-intent')).toBeNull();
+   expect(await finalizeGenesisContinuation(local,activationStore,policy,makePostProof)).toBe(false);
+   expect(activationStore.get('state','enrollment')).toEqual(enrollment);
+   expect(activationStore.all('pins')).toHaveLength(1);
+  }finally{activationStore.destroy();activationDb.close();}
   before?.fill(0);
  }finally{destroyCloudKeys(keys);store.destroy();db.close();}
 });

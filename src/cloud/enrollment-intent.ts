@@ -56,17 +56,17 @@ export const CONTINUATION_HEAD_DOMAIN='AgentKeychain-enrollment-continuation-cur
 export async function verifyGenesisContinuationPreflight(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,nonce:string,input:GenesisContinuationPreflight):Promise<void>{
  await validateGenesisContinuationPreflight(secure,store,policy,nonce,input,Math.floor(Date.now()/1000));
 }
-async function validateGenesisContinuationPreflight(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,nonce:string,input:GenesisContinuationPreflight,now:number){
+async function validateGenesisContinuationPreflight(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,nonce:string,input:GenesisContinuationPreflight,now:number,reconcileCommitted=false){
  assertVerifiedPolicy(policy);
  const g=input.grant,pins=policy.witnessKeys;
  if(!pins?.length||g.issuerDeviceId!==null||!/^[A-Za-z0-9_-]{43}$/.test(nonce))throw new Error('cloud_continuation_not_provisioned');
  const authority=await verifyContinuationAuthority(policy,input.authorityAppendix);
  const previous=await load(secure),pending=store.get<{requestId:string;deviceId:string}>('state','pending'),approved=store.get<{requestId:string;deviceId:string;vaultId:string}>('state','pending-approved');
- if(!previous||previous.activation||!pending||!approved||store.get('state','enrollment')||
+ if(!previous||previous.activation||previous.keys.signingPublic!==g.signingKey||previous.keys.wrappingPublic!==g.wrappingKey)throw new Error('cloud_enrollment_intent_conflict');
+ if(!reconcileCommitted&&(!pending||!approved||store.get('state','enrollment')||
     pending.requestId!==g.requestId||pending.deviceId!==g.deviceId||approved.requestId!==g.requestId||approved.deviceId!==g.deviceId||approved.vaultId!==g.vaultId||
-    previous.keys.signingPublic!==g.signingKey||previous.keys.wrappingPublic!==g.wrappingKey||
     JSON.stringify(store.get('state','pending-self-roster'))!==JSON.stringify(input.roster)||
-    JSON.stringify(store.get('state','pending-package'))!==JSON.stringify(input.keyPackage))throw new Error('cloud_enrollment_intent_conflict');
+    JSON.stringify(store.get('state','pending-package'))!==JSON.stringify(input.keyPackage)))throw new Error('cloud_enrollment_intent_conflict');
  const r=parseRoster(input.roster),head=await rosterDigest(input.roster);
  if(r.revision!==1||r.accountId!==g.accountId||r.tenantId!==g.tenantId||r.vaultId!==g.vaultId||r.keyEpoch!==g.keyEpoch||
     r.issuer.kind!=='device'||r.issuer.id!==g.deviceId||r.active.length!==1||r.revoked.length||
@@ -159,15 +159,96 @@ export async function stageGenesisContinuation(secure:SecureStore,store:CloudSto
  * This is not renewed authorization: any future activation needs a separate
  * live Custody head and revocation check and an exclusive enrollment lease. */
 export async function readStagedGenesisContinuation(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy){
+ const verified=await validatedStage(secure,store,policy);
+ if(!verified)return null;
+ const {stage}=verified;
+ return {kind:stage.kind,acceptedAt:stage.acceptedAt,requestId:stage.evidence.grant.requestId,deviceId:stage.evidence.grant.deviceId} as const;
+}
+const commitMarker='genesis-continuation-local-commit';
+const continuationPending=['pending','pending-keys','pending-approved','pending-package','pending-self-roster','enrollment-intent'];
+const localConflict=()=>new Error('cloud_enrollment_intent_conflict');
+async function validatedStage(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy){
  const intent=await load(secure),stage=intent?.continuation;
- if(!stage)return null;
+ if(!stage||!intent)return null;
  exactFields(stage,['kind','acceptedAt','nonce','evidence']);
- if(intent?.activation||stage.kind!=='genesis-package-continuation-v1'||!Number.isSafeInteger(stage.acceptedAt)||stage.acceptedAt<1||
+ if(intent.activation||stage.kind!=='genesis-package-continuation-v1'||!Number.isSafeInteger(stage.acceptedAt)||stage.acceptedAt<1||
     stage.acceptedAt>Math.floor(Date.now()/1000)||Buffer.byteLength(JSON.stringify(stage),'utf8')>24_000)throw denied();
  exactFields(stage.evidence,['grant','target','approval','authorityAppendix','witness','freshHead','roster','keyPackage','commit','commitAppendix']);
- await validateGenesisContinuationPreflight(secure,store,policy,stage.nonce,stage.evidence,stage.acceptedAt);
+ const stageDigest=await digest(JSON.stringify(stage)),marker=store.get<{stageDigest:string}>('state',commitMarker);
+ const profile=store.get<CloudEnrollment>('state','enrollment');
+ if((marker&&marker.stageDigest!==stageDigest)||!!profile!==!!marker)throw localConflict();
+ await validateGenesisContinuationPreflight(secure,store,policy,stage.nonce,stage.evidence,stage.acceptedAt,!!marker);
  await validateCommitProof(policy,stage.nonce,stage.evidence,stage.acceptedAt);
- return {kind:stage.kind,acceptedAt:stage.acceptedAt,requestId:stage.evidence.grant.requestId,deviceId:stage.evidence.grant.deviceId} as const;
+ return {intent,stage,stageDigest,marker,profile};
+}
+const postCommitDomain='AgentKeychain-enrollment-continuation-custody-post-commit-v1';
+async function validatePostCommit(policy:ManagedEndpointPolicy,e:ContinuationEvidence,nonce:string,proof:SignedManagedOperation){
+ exactFields(proof,['canonical','signature']);base64(proof.signature,64,64);
+ if(typeof proof.canonical!=='string'||proof.canonical.length>3072)throw denied();
+ const input:unknown=JSON.parse(proof.canonical);
+ exactFields(input,['version','domain','keyId','nonce','mainCommitDigest','requestId','continuationId','accountId','tenantId','vaultId','deviceId','keyEpoch','witnessDigest','payloadDigest','issuedAt','expiresAt']);
+ const g=e.grant,w=JSON.parse(e.witness.canonical) as {keyId:string};
+ const main=JSON.parse(e.commit.canonical) as {continuationId:string;issuedAt:number;expiresAt:number;payloadDigest:string};
+ const pin=policy.witnessKeys?.find(k=>k.keyId===w.keyId);
+ const {issuedAt,expiresAt}=input,now=Math.floor(Date.now()/1000);
+ if(!pin||typeof issuedAt!=='number'||typeof expiresAt!=='number'||!Number.isSafeInteger(issuedAt)||!Number.isSafeInteger(expiresAt)||
+    issuedAt<main.issuedAt||issuedAt>now||expiresAt<=now||expiresAt>main.expiresAt||expiresAt-issuedAt>60)throw denied();
+ const expected={version:1,domain:postCommitDomain,keyId:pin.keyId,nonce,mainCommitDigest:await bytesDigest(e.commit),
+  requestId:g.requestId,continuationId:main.continuationId,accountId:g.accountId,tenantId:g.tenantId,vaultId:g.vaultId,
+  deviceId:g.deviceId,keyEpoch:g.keyEpoch,witnessDigest:await bytesDigest(e.witness),payloadDigest:main.payloadDigest,issuedAt,expiresAt};
+ if(JSON.stringify(expected)!==proof.canonical||!await verify(pin.publicKey,proof.signature,proof.canonical))throw denied();
+ return expiresAt*1000;
+}
+
+/** Isolated continuation activation. No production caller. The supplied transport
+ * must obtain a new post-commit Custody response for the generated challenge.
+ * Before any wider integration all enrollment writers must honor this lease. */
+// eslint-disable-next-line no-unused-vars -- callback argument is a typed transport contract
+export async function finalizeGenesisContinuation(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,obtain:(nonce:string)=>Promise<SignedManagedOperation>):Promise<boolean>{
+ const owner=newContinuationReadbackNonce(),leaseMs=30_000;
+ store.db.exec('CREATE TABLE IF NOT EXISTS cloud_enrollment_lock(id INTEGER PRIMARY KEY CHECK(id=1),owner TEXT NOT NULL,expires INTEGER NOT NULL)');
+ store.transaction(()=>{
+  const row=store.db.query('SELECT expires FROM cloud_enrollment_lock WHERE id=1').get() as {expires:number}|null;
+  if(row&&row.expires>Date.now())throw new Error('cloud_enrollment_busy');
+  store.db.run('INSERT INTO cloud_enrollment_lock VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires=excluded.expires',[owner,Date.now()+leaseMs]);
+ });
+ const fence=()=>{
+  const row=store.db.query('SELECT owner,expires FROM cloud_enrollment_lock WHERE id=1').get() as {owner:string;expires:number}|null;
+  if(row?.owner!==owner||row.expires<=Date.now()+6000)throw new Error('cloud_lease_lost');
+ };
+ try{
+  const validated=await validatedStage(secure,store,policy);if(!validated)return false;
+  const {intent,stage,stageDigest,marker,profile}=validated;
+  const {evidence:e}=stage,g=e.grant,s=e.roster,roster=rosterPins(parseRoster(s));
+  const expected:CloudEnrollment={accountId:g.accountId,tenantId:g.tenantId,vaultId:g.vaultId,deviceId:g.deviceId,keyEpoch:g.keyEpoch,
+   signingPublic:g.signingKey,wrappingPublic:g.wrappingKey,vdk:intent.keys.vdk,roster,checkpointKeys:policy.checkpointKeys,releaseId:policy.releaseId,apiOrigin:policy.apiOrigin};
+  const anchor={sequence:0,root:await genesisRoot(g.tenantId,g.vaultId)};
+  const nextCursor={...anchor,requiredThrough:0},cursor=store.get('state','cursor'),current=store.get('state','roster-current');
+  if((profile&&JSON.stringify(profile)!==JSON.stringify(expected))||(cursor&&JSON.stringify(cursor)!==JSON.stringify(nextCursor))||
+     (current&&JSON.stringify(current)!==JSON.stringify(s))||(marker&&(!cursor||!current)))throw localConflict();
+  const nonce=newContinuationReadbackNonce();
+  if(nonce===stage.nonce)throw denied();
+  const deadline=await validatePostCommit(policy,e,nonce,await obtain(nonce));
+  const stillLive=()=>{fence();if(Date.now()+6000>=deadline)throw denied();};
+  stillLive();
+  await new RosterStore(store,secure).initialize(s);
+  stillLive();
+  await store.checkAnchor(secure,anchor,[anchor],true);
+  const same=await load(secure);
+  if(!same||JSON.stringify(same)!==JSON.stringify(intent))throw localConflict();
+  stillLive();
+  if(!marker)store.transaction(()=>{
+   stillLive();
+   if(store.get('state','enrollment')||store.get('state',commitMarker))throw localConflict();
+   store.put('state','enrollment',expected);store.put('state','cursor',nextCursor);
+   for(const id of continuationPending)store.remove('state',id);
+   store.put('state',commitMarker,{stageDigest});store.put('state','health',{state:'idle'});
+  });
+  // Runtime already refuses to open while this protected intent exists.
+  stillLive();
+  await secure.remove('enrollment-intent');
+  return true;
+ }finally{store.db.run('DELETE FROM cloud_enrollment_lock WHERE id=1 AND owner=?',[owner]);}
 }
 /** Called only after the local SAS/trust/package checks have succeeded. */
 export async function prepareEnrollmentActivation(secure:SecureStore,store:CloudStore,keys:CloudKeys,activation:Activation){

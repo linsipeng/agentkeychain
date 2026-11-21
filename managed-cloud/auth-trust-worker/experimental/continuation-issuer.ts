@@ -7,10 +7,12 @@ import {canonicalContinuationIntent,canonicalContinuationReceipt,CONTINUATION_WI
 import {verifyGenesisApproval,type GenesisApprovalPolicy} from '../../shared/genesis-approval.ts';
 import {rosterDigest,verifyRoster} from '../../shared/roster.ts';
 import {verifyWitness} from '../../shared/roster-witness.ts';
+import {continuationReadbackIntent} from './continuation-readback.ts';
 import {decode,random,webauthn,type WebAuthnPolicy} from '../../api-worker/webauthn.ts';
 
-type StageInput={oldGrantCanonical:string;target:SignedManagedOperation;roster:SignedManagedOperation;keyPackage:SignedManagedOperation};
+export type StageInput={oldGrantCanonical:string;target:SignedManagedOperation;roster:SignedManagedOperation;keyPackage:SignedManagedOperation};
 type Pin={credential:string;handle:string;cose_key:string;counter:number};
+type StagedBrowser={sessionDigest:string;csrfDigest:string};
 type Prior={id:string;canonical:string;signature:string};
 const unavailable=()=>new Error('continuation_approval_unavailable');
 /** Unwired Auth-only issuer. The caller must be a separate authenticated UI which
@@ -58,46 +60,69 @@ export function continuationIssuer(db:D1Database,identity:WebAuthnPolicy,policy:
   return {scope,prior,now,head,payloadDigest,expires:Math.min(target.expiresAt,now+120),intentDigest:await digest(input.target.canonical)};
  }
  return {
-  async begin(input:StageInput){
+  async begin(input:StageInput,browser?:StagedBrowser){
    try{
     const {scope,prior,expires,intentDigest}=await validate(input);
     const pin=await db.prepare('SELECT credential FROM auth_genesis_pins WHERE account=? AND tenant=? AND vault=? AND active=1').bind(...scope).first<Pin>();
     if(!pin)throw unavailable();
     const id=random(),challenge=random();
-    await db.prepare('INSERT INTO auth_continuation_challenges VALUES(?,?,?,?,?,?,?,?,?)').bind(id,await digest(challenge),...scope,pin.credential,prior.id,intentDigest,expires).run();
+    await db.batch([
+     db.prepare('INSERT INTO auth_continuation_challenges VALUES(?,?,?,?,?,?,?,?,?)').bind(id,await digest(challenge),...scope,pin.credential,prior.id,intentDigest,expires),
+     ...(browser?[db.prepare('INSERT INTO auth_continuation_browser_stages VALUES(?,?,?)').bind(id,browser.sessionDigest,browser.csrfDigest)]:[]),
+    ]);
     const options=await webauthn.authenticationOptions(identity,challenge);
     return {id,options:{...options,allowCredentials:[{id:pin.credential,type:'public-key' as const}]}};
    }catch{throw unavailable();}
   },
-  async complete(id:string,input:StageInput,assertion:AuthenticationResponseJSON){
+  async complete(id:string,input:StageInput,assertion:AuthenticationResponseJSON,browser?:StagedBrowser){
    try{
     if(typeof id!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(id)||JSON.stringify(assertion).length>32768)throw unavailable();
-    const {scope,prior,now,head,payloadDigest,expires,intentDigest}=await validate(input);
+    const {scope,prior,head,payloadDigest,expires,intentDigest}=await validate(input);
     const row=await db.prepare(`SELECT c.challenge_digest,c.expires,p.credential,p.handle,p.cose_key,p.counter
      FROM auth_continuation_challenges c JOIN auth_genesis_pins p USING(account,tenant,vault,credential)
+     LEFT JOIN auth_continuation_browser_stages b ON b.challenge_id=c.id
      WHERE c.id=? AND c.account=? AND c.tenant=? AND c.vault=? AND c.prior_decision_id=? AND c.intent_digest=? AND c.expires>unixepoch()
+      AND b.session_digest IS ? AND b.csrf_digest IS ?
       AND p.active=1 AND NOT EXISTS(SELECT 1 FROM auth_continuation_decisions d WHERE d.id=c.id OR d.intent_digest=c.intent_digest)`)
-      .bind(id,...scope,prior.id,intentDigest).first<Pin&{challenge_digest:string;expires:number}>();
+      .bind(id,...scope,prior.id,intentDigest,browser?.sessionDigest??null,browser?.csrfDigest??null).first<Pin&{challenge_digest:string;expires:number}>();
     if(!row||(assertion.response.userHandle&&assertion.response.userHandle!==row.handle))throw unavailable();
     const counter=await webauthn.authentication(identity,row.challenge_digest,assertion,{id:row.credential,publicKey:decode(row.cose_key),counter:row.counter});
     if((counter||row.counter)&&counter<=row.counter)throw unavailable();
+    // Revalidate the independently sourced Custody head after user verification.
+    // The consumer independently checks it again before the real write.
+    const final=await validate(input);
+    if(final.intentDigest!==intentDigest||final.prior.id!==prior.id||final.head!==head||final.payloadDigest!==payloadDigest)throw unavailable();
     const pin=await signer.key();
     if(pin.keyId!==authority.keyId||pin.publicKey!==authority.publicKey)throw unavailable();
-    const expiresAt=Math.min(expires,row.expires);
-    const canonical=canonicalContinuationReceipt({version:1,domain:'AgentKeychain-enrollment-continuation-approval-v1',intentDigest,authorityKeyId:pin.keyId,approvedAt:now,expiresAt});
+    const expiresAt=Math.min(expires,row.expires,final.expires);
+    const canonical=canonicalContinuationReceipt({version:1,domain:'AgentKeychain-enrollment-continuation-approval-v1',intentDigest,authorityKeyId:pin.keyId,approvedAt:final.now,expiresAt});
     const signature=await signer.sign(canonical);
     await verifyContinuationApproval(input.target,{canonical,signature},{oldGrantCanonical:input.oldGrantCanonical,stage:'put-key-package',payloadDigest,
-     rosterDigest:head,witnessHead:{revision:1,digest:head},authority,issuer:null,now});
+     rosterDigest:head,witnessHead:{revision:1,digest:head},authority,issuer:null,now:final.now});
     const [decision]=await db.batch([
      db.prepare(`INSERT INTO auth_continuation_decisions
       SELECT c.id,c.intent_digest,?,? FROM auth_continuation_challenges c JOIN auth_genesis_pins p USING(account,tenant,vault,credential)
       JOIN auth_genesis_decisions old ON old.id=c.prior_decision_id
+      LEFT JOIN auth_continuation_browser_stages b ON b.challenge_id=c.id
       WHERE c.id=? AND c.intent_digest=? AND old.canonical=? AND old.signature=? AND c.expires>unixepoch() AND ?>unixepoch()
-       AND p.active=1 AND p.counter=? AND p.cose_key=? AND p.handle=? RETURNING id`)
-      .bind(canonical,signature,id,intentDigest,prior.canonical,prior.signature,expiresAt,row.counter,row.cose_key,row.handle),
+       AND p.active=1 AND p.counter=? AND p.cose_key=? AND p.handle=?
+       AND b.session_digest IS ? AND b.csrf_digest IS ? RETURNING id`)
+      .bind(canonical,signature,id,intentDigest,prior.canonical,prior.signature,expiresAt,row.counter,row.cose_key,row.handle,browser?.sessionDigest??null,browser?.csrfDigest??null),
      db.prepare(`UPDATE auth_genesis_pins SET counter=? WHERE account=? AND tenant=? AND vault=? AND credential=?
       AND EXISTS(SELECT 1 FROM auth_continuation_decisions WHERE id=? AND canonical=? AND signature=?)`)
       .bind(counter,...scope,row.credential,id,canonical,signature),
+     ...(browser?[
+      db.prepare(`INSERT INTO auth_genesis_view_sessions
+       SELECT b.session_digest,b.csrf_digest,c.account,c.tenant,c.vault,1,0,?
+       FROM auth_continuation_browser_stages b JOIN auth_continuation_challenges c ON c.id=b.challenge_id
+        JOIN auth_continuation_decisions d ON d.id=c.id AND d.canonical=? AND d.signature=? WHERE c.id=?`)
+       .bind(expiresAt,canonical,signature,id),
+      db.prepare(`INSERT INTO auth_continuation_view_grants
+       SELECT b.session_digest,?,c.credential,unixepoch(),?
+       FROM auth_continuation_browser_stages b JOIN auth_continuation_challenges c ON c.id=b.challenge_id
+        JOIN auth_continuation_decisions d ON d.id=c.id AND d.canonical=? AND d.signature=? WHERE c.id=?`)
+       .bind(await continuationReadbackIntent(id,await digest(input.oldGrantCanonical),intentDigest),expiresAt,canonical,signature,id),
+     ]:[]),
     ]);
     if(!decision?.results.length)throw unavailable();
     return {canonical,signature};

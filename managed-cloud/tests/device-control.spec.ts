@@ -541,7 +541,7 @@ import {canonicalGenesisCommitExpectation,readGenesisPackageCommit,canonicalGene
 import {canonicalContinuationIntent,canonicalContinuationReceipt} from '../shared/enrollment-continuation.ts';
 import {rosterWitness} from '../shared/roster-witness.ts';
 import {checkpoint,genesisRoot} from '../shared/checkpoints.ts';
-import {proveFreshContinuationHead} from '../shared/continuation-fresh-head.ts';
+import {CUSTODY_CONTINUATION_POST_COMMIT_DOMAIN,proveFreshContinuationHead,provePostCommitContinuationHead} from '../shared/continuation-fresh-head.ts';
 async function expiredGenesisPackageFixture(){
  const schema=(env as unknown as {GENESIS_PACKAGE_SCHEMA:Parameters<typeof applyD1Migrations>[1]}).GENESIS_PACKAGE_SCHEMA;
  await applyD1Migrations(db(),schema);
@@ -591,10 +591,16 @@ async function expiredGenesisPackageFixture(){
   const proof=await device.sign(requestProof('POST',url,await digest(body),timestamp,nonce,sessionDigest));
   return authenticate(db(),new Request(url,{method:'POST',headers:{authorization:'Bearer '+token,'x-device-nonce':nonce,'x-device-proof':proof,'x-device-timestamp':String(timestamp)}}),'v',body);
  };
- const fresh=(input:Awaited<ReturnType<typeof create>>,nonce:string)=>proveFreshContinuationHead(custodyDb,{nonce,grant:input.oldGrantCanonical,
-  target:input.target,approval:input.approval,roster:input.roster,keyPackage:input.keyPackage},
-  {authority:approvalAuthority,witnessKeys:[custodyPin],checkpointKeys:roster.checkpointKeys,recoveryAuthorities:[]},wSign);
- return {create,grant,context,fresh,checkpointPins:roster.checkpointKeys,pins:{authority:approvalAuthority,witnesses:[custodyPin]}};
+ const custodyInput=(input:Awaited<ReturnType<typeof create>>,nonce:string)=>({nonce,grant:input.oldGrantCanonical,
+  target:input.target,approval:input.approval,roster:input.roster,keyPackage:input.keyPackage});
+ const custodyPolicy={authority:approvalAuthority,witnessKeys:[custodyPin],checkpointKeys:roster.checkpointKeys,recoveryAuthorities:[]};
+ const fresh=(input:Awaited<ReturnType<typeof create>>,nonce:string)=>proveFreshContinuationHead(custodyDb,custodyInput(input,nonce),custodyPolicy,wSign);
+ const post=(input:Awaited<ReturnType<typeof create>>,nonce:string,priorFreshHead:typeof witness,main:typeof witness,
+  mainCommitAuthority:{keyId:string;publicKey:string},beforeSign?:()=>Promise<unknown>)=>
+  provePostCommitContinuationHead(custodyDb,custodyInput(input,nonce),priorFreshHead,main,{...custodyPolicy,mainCommitAuthority,otherReleaseKeys:[]},
+   {...wSign,sign:async canonical=>{await beforeSign?.();return wSign.sign(canonical);}});
+ const veto=()=>custodyDb.prepare('INSERT INTO trust_devices VALUES(?,?,?,?,?,1,unixepoch()+600)').bind(s.account_id,s.tenant_id,'v',deviceId,device.signingKey).run();
+ return {create,grant,context,fresh,post,veto,checkpointPins:roster.checkpointKeys,pins:{authority:approvalAuthority,witnesses:[custodyPin]}};
 }
 test('unwired genesis continuation commits one exact immutable package despite concurrency and retries',async()=>{
  const f=await expiredGenesisPackageFixture(), input=await f.create();
@@ -692,4 +698,26 @@ test('transaction proof fails closed for mismatched nonce, role pin and revoked 
  await expect(proveGenesisPackageCommit(db(),ctx,expectation,custody,{...pins,otherReleaseKeys:[pins.mainCommitAuthority]},signer)).rejects.toThrow('not_found');
  const sign=async(canonical:string)=>{await db().prepare('UPDATE memberships SET active=0').run();return signer.sign(canonical);};
  await expect(proveGenesisPackageCommit(db(),ctx,expectation,custody,pins,{...signer,sign})).rejects.toThrow('not_found');
+});
+
+test('Custody issues its separate fresh activation assertion after the exact Main transaction proof',async()=>{
+ const {f,input,custody,expectation,context,commit,signer,pins}=await continuationProofFixture(),scope=await context(),nonce='B'.repeat(43);
+ await commit();
+ const main=await proveGenesisPackageCommit(db(),scope,expectation,custody,pins,signer);
+ const result=await f.post(input,nonce,custody.freshHead,main,pins.mainCommitAuthority),{issuedAt,expiresAt}=JSON.parse(result.canonical),g=f.grant;
+ expect(result.canonical).toBe(JSON.stringify({version:1,domain:CUSTODY_CONTINUATION_POST_COMMIT_DOMAIN,keyId:pins.witnesses[0]!.keyId,nonce,
+  mainCommitDigest:await digest(JSON.stringify([main.canonical,main.signature])),requestId:g.requestId,continuationId:expectation.commit.continuationId,
+  accountId:g.accountId,tenantId:g.tenantId,vaultId:g.vaultId,deviceId:g.deviceId,keyEpoch:g.keyEpoch,
+  witnessDigest:await digest(JSON.stringify([custody.witness.canonical,custody.witness.signature])),payloadDigest:expectation.commit.payloadDigest,issuedAt,expiresAt}));
+ expect(await verify(pins.witnesses[0]!.publicKey,result.signature,result.canonical)).toBe(true);
+ expect(expiresAt).toBeLessThanOrEqual(JSON.parse(main.canonical).expiresAt);
+});
+test('Custody post-commit rejects reused nonce, alternate reference and revocation during signing',async()=>{
+ const {f,input,custody,expectation,context,commit,signer,pins}=await continuationProofFixture(),scope=await context(),nonce='B'.repeat(43);
+ await commit();
+ const main=await proveGenesisPackageCommit(db(),scope,expectation,custody,pins,signer),prior=custody.freshHead;
+ await expect(f.post(input,expectation.nonce,prior,main,pins.mainCommitAuthority)).rejects.toThrow('continuation_head_rejected');
+ await expect(f.post(input,nonce,prior,main,pins.approvalAuthority)).rejects.toThrow('continuation_head_rejected');
+ await expect(f.post(input,nonce,{...prior,signature:main.signature},main,pins.mainCommitAuthority)).rejects.toThrow('continuation_head_rejected');
+ await expect(f.post(input,nonce,prior,main,pins.mainCommitAuthority,f.veto)).rejects.toThrow('continuation_head_rejected');
 });
