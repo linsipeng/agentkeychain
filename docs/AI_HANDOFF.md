@@ -56,6 +56,8 @@ Sam will not cooperate with repeated login/Passkey attempts. First complete synt
 - Inspect repo rules, dirty diff, test isolation and generated artifacts; preserve other agents' changes.
 - Audit pending-state handling: approved remote device must survive local retry/expiry without replacing its request ID or VDK, orphaning devices, or generating phantom second devices. Historical retries overwrote pending state after expiry.
 - Test resume after browser approval, Worker/response failures, process restart, grant expiry, denied requests and lost ACK; no automatic destructive cleanup.
+- Expired-enrollment reconciliation is read-only: the original device signs a short-lived check tied to its request, device and original keys. A retained expired request can be classified as previously approved, never approved, or ambiguous. Missing rows and uncertain evidence never authorize replacement or automatic retry. A separate, purpose-signed retirement can atomically mark an expired, never-approved request terminal and return the same retained decision after response loss. Reapproval for approved identities and idempotent allocation of a successor remain unfinished.
+- 过期请求对账只读：原设备用原密钥签名查询。服务端记录可区分“已批准”“未批准”“不确定”；找不到记录不能当作未批准。不会自动替换原请求，也不会延长原授权。独立签名的终止操作可以原子终止过期且未批准的请求，丢响应后仍可读取同一结果。已批准设备的重新批准及后继请求的幂等创建仍待实现。
 - Investigate why browser `/session` becomes 401 after successful login. Correlate actual same browser/profile/tab and response body with bootstrap/session cookie lifecycle; deployment alone is not a proven cause. No cookie/token logging.
 - Fix expiry/poll error handling and frontend generic "request changed" error masking 503/401/Passkey cancellation. Do not send users through a click loop.
 

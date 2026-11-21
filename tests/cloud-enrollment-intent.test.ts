@@ -78,8 +78,26 @@ test('first device keeps the same request, keys and roster when publish fails an
   expect(store.get('state','pending-keys')).toEqual(savedKeys);
   // An older interrupted client might have missed the approval response entirely.
   store.remove('state','pending-approved');store.remove('state','pending-self-roster');
-  await expect(loginCloud(db,ui,{policy,secure,network:async url=>{paths.push(new URL(url).pathname);throw new Error('unexpected network');}})).rejects.toThrow('cloud_enrollment_expired_requires_reconcile');
-  expect(paths).toEqual([]);expect(opened).toEqual([]);
+  const {enrollmentReconcileProof}=await import('../managed-cloud/shared/device-protocol.ts');
+  for(const [state,expected] of [
+   ['expired_approved','cloud_enrollment_expired_approved_requires_reapproval'],
+   ['expired_unapproved','cloud_enrollment_expired_unapproved_requires_retirement'],
+   ['unknown','cloud_enrollment_expired_requires_reconcile'],
+   ['mismatched','cloud_enrollment_expired_requires_reconcile'],
+   ['missing','cloud_enrollment_expired_requires_reconcile'],
+  ] as const){
+   paths.length=0;
+   await expect(loginCloud(db,ui,{policy,secure,network:async (url,init)=>{
+    const path=new URL(url).pathname;paths.push(path);
+    expect(path).toBe('/v1/devices/enrollment-reconcile');
+    const body=JSON.parse(String(init.body));
+    expect(body.requestId).toBe('req');expect(body.deviceId).toBe('d');
+    expect(sodium.crypto_sign_verify_detached(Buffer.from(body.signature,'base64'),enrollmentReconcileProof(body.requestId,body.deviceId,b64(keys.signingPublic),b64(keys.wrappingPublic),body.timestamp),keys.signingPublic)).toBe(true);
+    if(state==='missing')return Response.json({error:{code:'unauthorized'}},{status:401});
+    return Response.json({state:state==='mismatched'?'expired_unapproved':state,requestId:state==='mismatched'?'other':'req',deviceId:'d'});
+   }})).rejects.toThrow(expected);
+   expect(paths).toEqual(['/v1/devices/enrollment-reconcile']);expect(opened).toEqual([]);
+  }
   expect(store.get('state','pending')).toEqual({...authorization,deadline:0});
   expect(store.get('state','pending-keys')).toEqual(savedKeys);
  }finally{store.destroy();db.close();}

@@ -21,7 +21,7 @@ test('proof binds normalized query, timestamp and session identifier', () => {
 import { deviceFetch } from '../api-worker/device-http.ts';
 import { deviceRepository } from '../api-worker/device-repository.ts';
 import { digest, verify } from '../shared/contracts.ts';
-import { enrollmentProof, actionDigest, challengeProof } from '../shared/device-protocol.ts';
+import { enrollmentProof, enrollmentReconcileProof, enrollmentRetireProof, actionDigest, challengeProof } from '../shared/device-protocol.ts';
 import { authenticate } from '../api-worker/auth.ts';
 import type { SessionRow } from '../api-worker/browser-repository.ts';
 const origin = 'https://local.invalid';
@@ -363,6 +363,71 @@ test('signed enrollment resume recovers delivered identity without reusing beare
  expect(result.status).toBe(200);expect(await result.json()).toMatchObject({state:'approved',vaultId:'v',deviceId:d.deviceId,requestId:d.requestId});
  expect((await api('resume',{...request,timestamp:timestamp-301,signature:await d.sign(message)})).status).not.toBe(200);
  await expect(deviceRepository(db()).poll(await digest(d.deviceCode))).rejects.toThrow();
+});
+
+test('expired enrollment classification is signed, minimal and creates no activation authority',async()=>{
+ const s=await account(),k=await identity(),timestamp=Math.floor(Date.now()/1000);
+ const create=async (state:string,expiry:number)=>{
+  const requestId=crypto.randomUUID(),deviceId=crypto.randomUUID();
+  await db().prepare("INSERT INTO device_requests(id,code_digest,verification_digest,phrase,device_id,signing_key,wrapping_key,platform,expires_at,state,account_id,tenant_id,vault_id) VALUES(?,?,?,'synthetic fixture',?,?,?,'linux',unixepoch()+?,?,?,?,?)")
+   .bind(requestId,await digest('code:'+requestId),await digest('verify:'+requestId),deviceId,k.signingKey,k.wrappingKey,expiry,state,s.account_id,s.tenant_id,'v').run();
+  return {requestId,deviceId};
+ };
+ const lookup=async (ids:{requestId:string;deviceId:string}, time=timestamp, wrappingKey=k.wrappingKey, sign=k.sign)=>
+  api('enrollment-reconcile',{...ids,timestamp:time,signature:await sign(enrollmentReconcileProof(ids.requestId,ids.deviceId,k.signingKey,wrappingKey,time))});
+ const expired=await create('bound',-1),live=await create('bound',300),ambiguous=await create('approved',-1),approved=await create('delivered',-1);
+ const expiresAt=await db().prepare('SELECT expires_at FROM device_requests WHERE id=?').bind(approved.requestId).first<number>('expires_at');
+ const grant={version:1,requestId:approved.requestId,accountId:s.account_id,tenantId:s.tenant_id,vaultId:'v',deviceId:approved.deviceId,signingKey:k.signingKey,wrappingKey:k.wrappingKey,issuerDeviceId:null,keyEpoch:1,expiresAt};
+ await db().batch([
+  db().prepare('INSERT INTO devices(tenant_id,id,account_id,public_key,active) VALUES(?,?,?,?,1)').bind(s.tenant_id,approved.deviceId,s.account_id,k.signingKey),
+  db().prepare('INSERT INTO device_keys VALUES(?,?,?)').bind(s.tenant_id,approved.deviceId,k.wrappingKey),
+  db().prepare('INSERT INTO vault_devices VALUES(?,?,?,1)').bind(s.tenant_id,'v',approved.deviceId),
+  db().prepare('INSERT INTO enrollment_grants VALUES(?,?,?,?,?,?,?,NULL)').bind(approved.requestId,s.tenant_id,'v',approved.deviceId,null,1,canonicalGrant(grant)),
+ ]);
+ for(const [ids,state] of [[expired,'expired_unapproved'],[live,'not_expired'],[ambiguous,'unknown'],[approved,'expired_approved']] as const){
+  const r=await lookup(ids);expect(r.status).toBe(200);expect(await r.json()).toEqual({...ids,state});
+ }
+ const other=await identity();
+ for(const r of [await lookup(expired,timestamp,k.wrappingKey,other.sign),await lookup(expired,timestamp,other.wrappingKey),await lookup(expired,timestamp-301),await lookup({...expired,deviceId:live.deviceId})])
+  expect(r.status).toBe(401);
+ await db().prepare('DELETE FROM device_requests WHERE id=?').bind(expired.requestId).run();
+ expect((await lookup(expired)).status).toBe(401);
+ expect(await db().prepare('SELECT count(*) FROM enrollment_grants').first()).toEqual({'count(*)':1});
+ expect(await db().prepare('SELECT count(*) FROM device_sessions').first()).toEqual({'count(*)':0});
+});
+
+test('signed retirement is terminal, idempotent and does not allocate a successor',async()=>{
+ const keys=await identity(),timestamp=Math.floor(Date.now()/1000);
+ const fresh=await authorize(),s=await account(),approved=await enroll(s);
+ const make=async (state:string)=>{
+  const requestId=crypto.randomUUID(),deviceId=crypto.randomUUID();
+  await db().prepare("INSERT INTO device_requests(id,code_digest,verification_digest,phrase,device_id,signing_key,wrapping_key,platform,expires_at,state) VALUES(?,?,?,'synthetic fixture',?,?,?,'linux',unixepoch()-90000,?)")
+   .bind(requestId,await digest('retire:'+requestId),await digest('pair:'+requestId),deviceId,keys.signingKey,keys.wrappingKey,state).run();
+  return {requestId,deviceId};
+ };
+ const target=await make('pending'),unknown=await make('approved');
+ const payload=async (ids:{requestId:string;deviceId:string},who=keys,proof=enrollmentRetireProof)=>({
+  requestId:ids.requestId,deviceId:ids.deviceId,timestamp,signature:await who.sign(proof(ids.requestId,ids.deviceId,who.signingKey,who.wrappingKey,timestamp)),
+ });
+ expect((await api('enrollment-retire',await payload(target,await identity()))).status).toBe(401);
+ expect((await api('enrollment-retire',await payload(target,keys,enrollmentReconcileProof))).status).toBe(401);
+ expect((await api('enrollment-retire',await payload(unknown))).status).toBe(404);
+ expect((await api('enrollment-retire',await payload(fresh,fresh))).status).toBe(404);
+ expect((await api('enrollment-retire',await payload(approved,approved))).status).toBe(404);
+ // Drop the first JSON response deliberately; simultaneous and restarted
+ // callers learn the same decision, without a second write.
+ const proof=await payload(target);
+ for (const response of await Promise.all([api('enrollment-retire',proof),api('enrollment-retire',proof)]))
+  expect(response.status).toBe(200);
+ expect(await (await api('enrollment-retire',proof)).json()).toEqual({...target,state:'retired_unapproved'});
+ expect(await (await api('enrollment-reconcile',await payload(target,keys,enrollmentReconcileProof))).json()).toEqual({...target,state:'retired_unapproved'});
+ expect(await db().prepare('SELECT count(*) n FROM enrollment_retirements').first('n')).toBe(1);
+ expect(await db().prepare('SELECT count(*) n FROM device_requests').first('n')).toBe(4);
+ expect(await db().prepare('SELECT count(*) n FROM enrollment_grants').first('n')).toBe(1);
+ expect(await db().prepare('SELECT count(*) n FROM device_sessions').first('n')).toBe(0);
+ expect(await db().prepare('SELECT state FROM device_requests WHERE id=?').bind(target.requestId).first('state')).toBe('denied');
+ await deviceRepository(db()).cleanup();
+ expect(await db().prepare('SELECT state FROM device_requests WHERE id=?').bind(target.requestId).first('state')).toBe('denied');
 });
 
 import {rosterRepository} from '../api-worker/roster-repository.ts';

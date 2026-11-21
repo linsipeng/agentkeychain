@@ -121,10 +121,8 @@ function Action({ reference, title, warning, onDone, requiresPasskey = true }: {
         catch (cause) {
             if (cause instanceof PasskeyIncompleteError || (cause instanceof DOMException && ['NotAllowedError', 'AbortError'].includes(cause.name)))
                 setError('actionPasskeyIncomplete');
-            else if (cause instanceof ApiError && [404, 409, 410].includes(cause.status))
+            else if (cause instanceof ApiError && [401, 404, 409, 410].includes(cause.status))
                 setError('changed');
-            else if (cause instanceof ApiError && cause.status === 401)
-                setError('actionSignIn');
             else
                 setError(executing ? 'actionOutcomeUnknown' : 'actionUnavailable');
         }
@@ -163,12 +161,20 @@ function VerifyBanner({ query, showVerified = false }: { query?: ReturnType<type
     return showVerified && state === 'verified' ? <Message>{t('verified')}</Message> : null;
 }
 const needsAttention = (d: Item) => !!d.active && ['stale', 'waiting', 'paused', 'unavailable'].includes(d.status ?? 'unavailable');
+const isPairingCode = (code: unknown): code is string => typeof code === 'string' && /^(?:[A-Za-z0-9_-]{12}|[A-Za-z0-9_-]{43})$/.test(code);
+function pairingReturn(pathname: string, search: string) {
+    if (pathname !== '/app/devices/add')
+        return undefined;
+    const codes = new URLSearchParams(search).getAll('code');
+    return codes.length === 1 && isPairingCode(codes[0]) ? codes[0] : undefined;
+}
 function Shell() {
-    const t = useContext(Copy), navigate = useNavigate(), cache = useQueryClient(), risk = useContext(Risk), [more, setMore] = useState(false), [error, setError] = useState(false);
+    const t = useContext(Copy), navigate = useNavigate(), location = useLocation(), cache = useQueryClient(), risk = useContext(Risk), [more, setMore] = useState(false), [error, setError] = useState(false);
     const session = useQuery({ queryKey: ['session'], queryFn: () => api<{
             authenticated: boolean;
         }>('session') });
-    useEffect(() => { const expired = () => { cache.clear(); risk.setFailed(false); navigate('/sign-in', { replace: true, state: { signInRequired: true } }); }; window.addEventListener('session-expired', expired); return () => window.removeEventListener('session-expired', expired); }, [navigate, cache, risk.setFailed]);
+    const pairingCode = pairingReturn(location.pathname, location.search);
+    useEffect(() => { const expired = () => { cache.clear(); risk.setFailed(false); navigate('/sign-in', { replace: true, state: { signInRequired: true, pairingCode } }); }; window.addEventListener('session-expired', expired); return () => window.removeEventListener('session-expired', expired); }, [navigate, cache, risk.setFailed, pairingCode]);
     async function logout() { try {
         await api('logout', {});
         cache.clear();
@@ -180,8 +186,10 @@ function Shell() {
     } }
     if (session.isPending)
         return <Message>{t('loading')}</Message>;
+    if (session.isError && !(session.error instanceof ApiError && session.error.status === 401))
+        return <><Message error>{t('error')}</Message><button onClick={() => void session.refetch()}>{t('retry')}</button></>;
     if (session.isError || !session.data?.authenticated)
-        return <Navigate to="/sign-in" replace/>;
+        return <Navigate to="/sign-in" replace state={{signInRequired:session.isError,pairingCode}}/>;
     const links = (keys: Key[]) => keys.map(k => <NavLink key={k} end={k === 'home'} onClick={() => setMore(false)} to={k === 'home' ? '/app' : '/app/' + k}>{t(k)}</NavLink>);
     return <div className="shell"><aside className="sidebar"><nav aria-label={t('more')}>{links(['home', 'requests', 'devices', 'activity', 'account', 'help'])}<button onClick={() => void logout()}>{t('signOut')}</button></nav><p>{t('noSecrets')}</p></aside><div className="content">{error && <Message error>{t('error')}</Message>}<Outlet /></div><nav className="mobile-nav" aria-label={t('home')}>{links(['home', 'requests', 'devices'])}<button aria-expanded={more} onClick={() => setMore(true)}>{t('more')}</button></nav>{more && <Dialog title="more" onClose={() => setMore(false)}><nav className="sheet-nav">{links(['activity', 'account', 'help'])}<button onClick={() => void logout()}>{t('signOut')}</button></nav></Dialog>}</div>;
 }
@@ -226,7 +234,8 @@ function SignIn() { const t = useContext(Copy), location = useLocation(), [email
     }>('authentication/options', { email });
     await api('authentication/verify', { challengeId: o.challengeId, response: await passkey(o.options) });
     cache.clear();
-    nav('/app');
+    const code: unknown = location.state?.pairingCode;
+    nav(isPairingCode(code) ? '/app/devices/add?code=' + encodeURIComponent(code) : '/app', {replace:true});
 }
 catch {
     setError(true);

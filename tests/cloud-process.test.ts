@@ -9,6 +9,7 @@ import {join,resolve} from 'node:path';
 import {randomBytes,randomUUID,createHash} from 'node:crypto';
 import sodium from 'libsodium-wrappers-sumo';
 import {canonicalManifest} from '../src/cloud/config.ts';
+import {wakeCloud} from '../src/cloud/daemon.ts';
 import {migrate} from '../src/db/migrate.ts';
 import {initVault} from '../src/cli/init.ts';
 const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -181,7 +182,18 @@ test('compiled CLI clients enroll via HTTP, compare SAS, capture, sync, retry an
   for(const fault of ['daemon:acquired','daemon:renewed','sync:committed']){
    const crashed=cli(a,['cloud','service','run'],fault);expect(await crashed.done,fault+' '+crashed.err()).toBe(fault.startsWith('daemon:')?100:98);await pause(600);
   }
-  const daemonA=cli(a,['cloud','service','run']),daemonB=cli(b,['cloud','service','run']);await until(()=>existsSync(join(a,'cloud.sock'))&&existsSync(join(b,'cloud.sock')));
+  const daemonA=cli(a,['cloud','service','run']),daemonB=cli(b,['cloud','service','run']);
+  // A faulted daemon can leave a socket inode. Only a protocol response proves it restarted.
+  const awaitDaemon=async(home:string,daemon:ReturnType<typeof cli>,label:string)=>{
+   const end=Date.now()+15000;
+   while(Date.now()<end){
+    if(daemon.p.exitCode!==null||daemon.p.signalCode!==null)throw new Error('daemon_'+label+'_start_failed '+daemon.err());
+    if(await wakeCloud(home))return;
+    await pause(30);
+   }
+   throw new Error('daemon_'+label+'_ipc_timeout '+daemon.err());
+  };
+  await Promise.all([awaitDaemon(a,daemonA,'A'),awaitDaemon(b,daemonB,'B')]);
   const automaticValue=randomUUID(),automatic=cli(a,['store','automatic-synthetic','--scopes','test']);automatic.p.stdin.end(automaticValue+'\n');expect(await automatic.done).toBe(0);
   await until(()=>{const db=new Database(join(b,'vault.db'),{readonly:true});try{return !!db.query("SELECT 1 FROM secrets WHERE name='automatic-synthetic'").get();}finally{db.close();}});
   const automaticGet=cli(b,['get','automatic-synthetic']);expect(await automaticGet.done).toBe(0);expect(automaticGet.out().trim()===automaticValue).toBe(true);

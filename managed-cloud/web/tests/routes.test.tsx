@@ -128,9 +128,53 @@ test('leaves a sign-in notice after the approval session is rejected', async () 
     mount('/app/requests/request-one');
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Allow once' }));
+    session = false;
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Confirm' }));
     await screen.findByText('Sign in again before continuing.');
     expect(calls.filter(c => c.route === 'web/execute')).toHaveLength(0);
+});
+test('action rejection leaves a still-authenticated user in the app without replay', async () => {
+    actionFailure = { route: 'web/options', status: 401 };
+    mount('/app/requests/request-one');
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Allow once' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Confirm' }));
+    await screen.findByText('The request changed or is no longer available. Review it again.');
+    expect(screen.queryByRole('heading', {name:'Sign in with passkey'})).toBeNull();
+    expect(calls.filter(c=>c.route === 'session')).toHaveLength(2);
+    expect(calls.filter(c=>c.route === 'web/execute')).toHaveLength(0);
+});
+test('session 503 offers a retry instead of sending the user into a login loop', async () => {
+    actionFailure = {route:'session',status:503};
+    mount('/app');
+    const retry=await screen.findByRole('button',{name:'Try again'});
+    expect(screen.queryByRole('heading', {name:'Sign in with passkey'})).toBeNull();
+    actionFailure=undefined;
+    await userEvent.click(retry);
+    await screen.findByRole('heading',{name:'Home',level:1});
+    expect(calls.filter(c=>c.route==='authentication/verify')).toHaveLength(0);
+});
+test('sign-in returns to the CLI pairing route with its valid code, without auto-approving', async () => {
+    session = false;
+    mount('/app/devices/add?code=pairing-code');
+    const user=userEvent.setup();
+    await screen.findByRole('heading',{name:'Sign in with passkey'});
+    session = true;
+    await user.type(screen.getByLabelText('Email address'),'synthetic@example.invalid');
+    await user.click(screen.getByRole('button',{name:'Sign in with passkey'}));
+    await waitFor(()=>expect(screen.getByDisplayValue('pairing-code')).toBeTruthy());
+    expect(calls.filter(c=>c.route.startsWith('web/') && c.route!=='web/query')).toHaveLength(0);
+});
+test.each(['pairing-code&code=another-code', 'incorrect-length'])('does not forward an invalid or ambiguous pairing parameter %s',async query=>{
+    session=false;
+    mount('/app/devices/add?code='+query);
+    const user=userEvent.setup();
+    await screen.findByRole('heading',{name:'Sign in with passkey'});
+    session=true;
+    await user.type(screen.getByLabelText('Email address'),'synthetic@example.invalid');
+    await user.click(screen.getByRole('button',{name:'Sign in with passkey'}));
+    await screen.findByRole('heading',{name:'Home',level:1});
+    expect(calls.filter(c=>c.route==='web/pairing')).toHaveLength(0);
 });
 test('an interrupted passkey prompt does not verify or execute the action', async () => {
     vi.mocked(navigator.credentials.get).mockRejectedValueOnce(new DOMException('synthetic browser detail', 'NotAllowedError'));

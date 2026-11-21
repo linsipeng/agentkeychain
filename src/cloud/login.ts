@@ -12,7 +12,7 @@ import type {Database} from 'bun:sqlite';
 import {createCloudKeys,destroyCloudKeys,openKeyPackage,sealKeyPackage} from './crypto.ts';
 import {ManagedHttpClient,CloudHttpError} from './http.ts';
 import {CloudStore} from './persistence.ts';
-import {canonicalGrant,enrollmentProof,type EnrollmentGrant} from '../../managed-cloud/shared/device-protocol.ts';
+import {canonicalGrant,enrollmentProof,enrollmentReconcileProof,type EnrollmentGrant} from '../../managed-cloud/shared/device-protocol.ts';
 import {openTrustedEnrollment,previewEnrollmentPhrase,selfAnchor,type TrustedEnrollmentBundle} from './enrollment.ts';
 import {productionComposition,type CloudComposition,type CloudEnrollment,openCloudRuntime} from './runtime.ts';
 import {hasCloudState} from './coordinator.ts';
@@ -76,8 +76,15 @@ export async function loginCloud(db:Database,ui:LoginUI,composition:CloudComposi
   let authorization=store.get<PendingAuthorization>('state','pending');
   if(authorization&&authorization.deadline<=Date.now()){
    assertCanReplaceEnrollmentRequest(store);
-   // An expired request cannot prove it was never approved: the current
-   // signed resume endpoint no longer returns its state after expiry.
+   const {requestId,deviceId}=authorization,timestamp=Math.floor(Date.now()/1000);
+   const signature=b64(sodium.crypto_sign_detached(enrollmentReconcileProof(requestId,deviceId,b64(keys.signingPublic),b64(keys.wrappingPublic),timestamp),keys.signingPrivate));
+   let readback:{state?:string;requestId?:string;deviceId?:string}|null=null;
+   try{readback=await http.publicCall('/v1/devices/enrollment-reconcile',{requestId,deviceId,timestamp,signature}) as {state?:string;requestId?:string;deviceId?:string};}
+   catch{ /* A missing/expired server record or unavailable service is not proof of non-approval. */ }
+   if(readback&&readback.requestId===requestId&&readback.deviceId===deviceId){
+    if(readback.state==='expired_approved')throw new Error('cloud_enrollment_expired_approved_requires_reapproval');
+    if(readback.state==='expired_unapproved')throw new Error('cloud_enrollment_expired_unapproved_requires_retirement');
+   }
    throw new Error('cloud_enrollment_expired_requires_reconcile');
   }
   if(!authorization){

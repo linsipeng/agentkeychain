@@ -9,10 +9,19 @@ export class PasskeyIncompleteError extends Error {
     constructor() { super('Passkey confirmation did not finish'); }
 }
 let activityReceipt: string | 0 = 0;
+let sessionGeneration = 0;
+function expireSession(generation: number) {
+    if (generation !== sessionGeneration)
+        return;
+    sessionGeneration++;
+    activityReceipt = 0;
+    queryClient.clear();
+    window.dispatchEvent(new Event('session-expired'));
+}
 export async function api<T = Record<string, unknown>>(route: string, body?: unknown): Promise<T> {
     if (!routes.has(route))
         throw new Error('Invalid route');
-    const previousReceipt = activityReceipt;
+    const previousReceipt = activityReceipt, generation = sessionGeneration;
     const input = body as {
         view?: string;
     } | undefined;
@@ -21,17 +30,30 @@ export async function api<T = Record<string, unknown>>(route: string, body?: unk
     const csrf = document.cookie.split(';').map(x => x.trim()).find(x => x.startsWith('__Host-akc_csrf='))?.slice(16) ?? '';
     const r = await fetch('/v1/auth/' + route, { method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', headers: body === undefined ? {} : { 'content-type': 'application/json', 'x-csrf-token': csrf }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     if (!r.ok) {
-        if (r.status === 401 && (route === 'session' || route.startsWith('web/'))) {
-            activityReceipt = 0;
-            queryClient.clear();
-            window.dispatchEvent(new Event('session-expired'));
+        if (r.status === 401 && generation === sessionGeneration) {
+            if (route === 'session')
+                expireSession(generation);
+            else if (route.startsWith('web/')) {
+                // A rejected action can be stale or have a superseded CSRF
+                // token even while the browser's current login remains valid.
+                try {
+                    const current = await api<{authenticated: boolean}>('session');
+                    if (current.authenticated === false)
+                        expireSession(generation);
+                } catch {
+                    // A real session 401 already ended the session. A network
+                    // failure or 503 is not evidence that the user signed out.
+                }
+            }
         }
         throw new ApiError(r.status);
     }
     const value = await r.json();
-    if (['logout', 'authentication/verify', 'registration/verify', 'bootstrap'].includes(route))
+    if (['logout', 'authentication/verify', 'registration/verify'].includes(route)) {
+        sessionGeneration++;
         activityReceipt = 0;
-    if (activityReceipt === previousReceipt && route === 'web/query' && value.verification === 'verified' && typeof value.receipt === 'string')
+    }
+    if (generation === sessionGeneration && activityReceipt === previousReceipt && route === 'web/query' && value.verification === 'verified' && typeof value.receipt === 'string')
         activityReceipt = value.receipt;
     if ((route.startsWith('web/') && route !== 'web/options') || route.startsWith('recovery/')) assertSafeView(value);
     return value as T;

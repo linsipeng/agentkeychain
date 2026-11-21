@@ -1,0 +1,17 @@
+# Managed Cloud v0.7: completion and release gates
+
+Scope follows [the v0.7 PRD](PRD_MANAGED_CLOUD_V0.7.md). A draft PR, synthetic success, staging acceptance, and production release are different milestones. The v0.7 PRD excludes production rollout, public registration, and GitHub Release.
+
+| Gate | Required evidence | Current status on the takeover branch |
+| --- | --- | --- |
+| Account and Web session | Isolated real-Worker flow verifies invitation, passkey registration/sign-in, session rotation, logout, and current-session behavior after concurrent bootstrap. Separate browser/host profiles must not share state. | Virtual authenticator bundle path passed on the initial takeover patch. Web regressions cover rejected actions, unavailable sessions and pairing return. Real-browser cookie ordering and the historical staging 401 remain unverified. |
+| First and second device | Both compiled clients go from request to approved, activated, synchronized; a lost response or restart preserves device/keys. Expired requests must finish via a safe terminal reset or fresh approval of the original device. | Read-only proof of retained server state and local preservation exist. Safe continuation after an already-approved generation expires is still open. |
+| Independent first-device approval | Custody verifies a purpose-limited approval the Main API cannot issue or forge, admits only the exact device, and persists decision and witness atomically. Test absence and protected continuity in the actual worker graph. | Dedicated RPC narrows the callable surface but Main is still the source of device approval. See [the proposed independent design](GENESIS_APPROVAL_DESIGN.md). |
+| Signed sync and privileged actions | Two native clients check writes, history, conflict ordering, offline resume, tombstones and revocation. Actions require exact scoped, short-lived, one-use approval; verify deny/expiry and lost response without replay. | Local generated Worker-bundle path passed. The compiled Phase 45 process suite must finish on a runner with Unix-domain socket support. |
+| Independent recovery | Local CLI plus actual Worker binaries verify approvals, split key handling, interruption boundaries, no rollback, revocation, no plaintext output, and reentry on the restored device. | 52 synthetic compiled cases passed on the initial patch. Rerun against the final candidate and test an authorized staging account, without production Vault access. |
+| Supported operating systems and compatibility | Linux checks, native macOS store/build checks using isolated environments/test stubs, and v0.6.2 compatibility, with no writes to real local Vaults. | Linux CLI compiled; native macOS store acceptance and independent final security review remain open. |
+| Final candidate | Lint, types, builds, both service bundles, tests, independent security review and isolated staging end-to-end register two devices and complete recovery. | Not ready. Do not merge or deploy solely from local test results. |
+
+## Staging verification boundary
+
+Use a disposable test account and test values, preferably isolated from the existing staging data. Record versions, timestamps, safe error category, HTTP status and property presence rather than credentials, cookie values, raw assertion bodies or plaintext. Never bypass a real passkey or reuse or reset an existing Vault. Confirm the staging target and rollback plan before operating it; production remains separately authorized.
