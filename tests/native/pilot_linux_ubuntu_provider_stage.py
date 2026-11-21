@@ -289,7 +289,7 @@ APT::Get::AllowUnauthenticated "false";
             try:
                 with display["owned_private_display"](prompt=True) as (display_env, secret_display):
                     verify_provider((prompter_image, prompter_stat, display_env,
-                                     lambda: display["screen_windows"](secret_display)))
+                                     lambda mark: display["screen_windows"](secret_display, mark)))
             except Exception:
                 if not phase.startswith("private-peer-"):
                     phase = display["owned_private_display"].__wrapped__.__globals__["phase"]

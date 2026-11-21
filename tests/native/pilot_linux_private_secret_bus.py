@@ -110,11 +110,16 @@ def wait_owner(conn, name, process, image, snapshot):
     raise RuntimeError("fixture role owner unavailable")
 
 
-def show_then_cancel(bus, owner, offer, prompter_pid, windows):
+def show_then_cancel(bus, owner, offer, prompter_pid, windows, liveness):
     global phase
     need(offer == FIRST_PROMPT)
-    phase = "prompt-clean-screen"
-    need(not windows())
+    def observed(step):
+        def mark(stage):
+            global phase
+            phase = "prompt-" + step + "-" + stage
+        return windows(mark)
+
+    need(not observed("clean-screen"))
     context = GLib.MainContext.default()
     completed = []
 
@@ -128,12 +133,17 @@ def show_then_cancel(bus, owner, offer, prompter_pid, windows):
         phase = "public-prompt-rpc"
         bus.call_sync(owner, offer, PROMPT_IFACE, "Prompt", GLib.Variant("(s)", ("",)),
                       GLib.VariantType.new("()"), Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
-        phase = "prompt-visible-pinned-pid"
-        for _ in range(60):
+        for attempt in range(60):
             context.iteration(False)
-            need(not completed)
-            visible = windows()
+            if completed:
+                phase = "prompt-completed-before-visible"
+                need(len(completed) == 1 and completed[0].get_type_string() == "(bv)")
+                phase += "-dismissed" if completed[0].get_child_value(0).get_boolean() else "-accepted"
+                raise RuntimeError("fixture completed before visible")
+            liveness(attempt)
+            visible = observed("visible")
             if visible:
+                phase = "prompt-visible-foreign-pid"
                 need(visible == {prompter_pid})
                 break
             time.sleep(0.05)
@@ -154,7 +164,7 @@ def show_then_cancel(bus, owner, offer, prompter_pid, windows):
              variant.get_type_string() == "o" and variant.get_string() == "/")
         phase = "prompt-closed-screen"
         for _ in range(60):
-            if not windows():
+            if not observed("closed-screen"):
                 break
             time.sleep(0.05)
         else:
@@ -472,7 +482,19 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                         verify_mapped_libraries(prompter, staged_libraries)
                     offer = verify_collection_offer(conn, owner)
                     if prompt:
-                        show_then_cancel(conn, owner, offer, prompter.pid, windows)
+                        def prompt_liveness(attempt):
+                            global phase
+                            phase = "prompt-provider-process"
+                            owned_image(provider, provider_path, staged_provider)
+                            phase = "prompt-gcr-process"
+                            owned_image(prompter, image, snapshot)
+                            if attempt in (0, 59):
+                                phase = "prompt-provider-owner-live"
+                                need(call(conn, "GetNameOwner", SERVICE, "(s)") == owner)
+                                phase = "prompt-gcr-owner-live"
+                                need(call(conn, "GetNameOwner", PROMPTER, "(s)") == prompt_owner)
+
+                        show_then_cancel(conn, owner, offer, prompter.pid, windows, prompt_liveness)
                         phase = "prompter-owner-after"
                         need(wait_owner(conn, PROMPTER, prompter, image, snapshot) == prompt_owner)
                     phase = "collection-offer-owner"

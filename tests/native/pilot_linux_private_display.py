@@ -140,10 +140,11 @@ def verify_private_display():
         pass
 
 
-def screen_windows(display):
+def screen_windows(display, mark):
     # Read only normal X11/XRes metadata over a strictly pinned socket, without
     # trusting client-controlled _NET_WM_PID or screenshot/title matches.
     child, executable, endpoint, endpoint_identity, cookie = display
+    mark("unix-peer")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
         conn.settimeout(2)
         need(child.poll() is None and identity(os.stat(f"/proc/{child.pid}/exe")) == executable)
@@ -161,50 +162,61 @@ def screen_windows(display):
                 result.extend(data)
             return result
 
+        mark("x11-setup")
         conn.sendall(x11_setup(cookie))
         status, _, major, minor, length = struct.unpack("<BBHHH", read(8))
         need((status, major, minor) == (1, 11, 0))
+        mark("x11-setup-frame")
         setup = read(length * 4)
+        need(len(setup) >= 32)
         vendor, = struct.unpack_from("<H", setup, 16)
         need(setup[20] == 1)
         screen = 32 + ((vendor + 3) & ~3) + setup[21] * 8
         root, = struct.unpack_from("<I", setup, screen)
         sequence = 0
 
-        def reply(opcode, data=b"", minor=0):
+        def reply(label, opcode, data=b"", minor=0):
             nonlocal sequence
             sequence += 1
             need(len(data) % 4 == 0)
+            mark(label + "-rpc")
             conn.sendall(struct.pack("<BBH", opcode, minor, 1 + len(data) // 4) + data)
             header = read(32)
+            mark(label + "-frame")
             need(header[0] == 1 and struct.unpack_from("<H", header, 2)[0] == sequence)
             return header, read(struct.unpack_from("<I", header, 4)[0] * 4)
 
         query = b"X-Resource"
-        extension, _ = reply(98, struct.pack("<H2x", len(query)) + padded(query))
+        extension, _ = reply("xres-extension", 98, struct.pack("<H2x", len(query)) + padded(query))
+        mark("xres-extension-unavailable")
         need(extension[8] == 1 and extension[9] >= 128)
         opcode = extension[9]
-        tree, children = reply(15, struct.pack("<I", root))
+        tree, children = reply("x11-tree", 15, struct.pack("<I", root))
         count, = struct.unpack_from("<H", tree, 16)
+        mark("x11-tree-shape")
         need(count <= 32 and len(children) == count * 4)
         result = []
         for (window,) in struct.iter_unpack("<I", children):
-            attr_head, attributes = reply(3, struct.pack("<I", window))
+            attr_head, attributes = reply("x11-attributes", 3, struct.pack("<I", window))
+            mark("x11-attributes-shape")
             need(len(attributes) == 12)
             if attr_head[26] != 2:  # IsViewable
                 continue
             result.append(window)
         resolved = set()
         for window in result:
-            head, body = reply(opcode, struct.pack("<III", 1, window, 2), minor=4)
+            head, body = reply("xres-client-id", opcode, struct.pack("<III", 1, window, 2), minor=4)
             ids, = struct.unpack_from("<I", head, 8)
+            mark("xres-client-id-shape")
             need(ids == 1 and len(body) == 16)
             resource, mask, length, local_pid = struct.unpack("<IIII", body)
             # Xorg ConstructClientIdValue reports the client's resource base,
             # not the queried window XID. The checked X server resolves the
             # exact request to a single local PID; reject missing/extra IDs.
+            mark("xres-local-pid")
             need(resource != 0 and mask == 2 and length == 4 and local_pid > 0)
             resolved.add(local_pid)
+        mark("mapped" if resolved else "no-viewable-top-level" if count else "no-top-level")
         return resolved
 
 
