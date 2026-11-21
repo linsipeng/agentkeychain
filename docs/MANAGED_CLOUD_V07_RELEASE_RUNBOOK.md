@@ -99,3 +99,16 @@ runtime will not open, even with a written profile. Retrying cleanup still
 requires a new live Custody proof in the supported window. This slice is not
 called by the shipping CLI and other enrollment writers do not yet share its
 lease; do not enable it until all writers use a compatible exclusive guard.
+
+The local process regression `bun test tests/cloud-continuation-process.test.ts`
+builds a nonshipping Bun client with a signed isolated release fixture, then
+runs the actual CLI staging/finalization and runtime checks in distinct OS
+processes against a disposable SQLite file. The fixture controller calls the actual Main
+transaction and proof reader; a token-protected localhost shim calls the actual
+post-commit proof function against a separate SQLite Custody ledger. The test
+injects secure-store and Auth/signing fixtures, and emulates stale lease expiry
+only after observing an exited process. It verifies both sides of the local
+profile commit and that an unavailable Custody proof leaves sync locked. This
+is not a production route, native OS keychain, deployment or cross-operator
+staging check. Auth credential enrollment and the Cloudflare Worker routing
+remain covered or gated separately.

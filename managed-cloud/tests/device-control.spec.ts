@@ -542,10 +542,18 @@ import {canonicalContinuationIntent,canonicalContinuationReceipt} from '../share
 import {rosterWitness} from '../shared/roster-witness.ts';
 import {checkpoint,genesisRoot} from '../shared/checkpoints.ts';
 import {CUSTODY_CONTINUATION_POST_COMMIT_DOMAIN,proveFreshContinuationHead,provePostCommitContinuationHead} from '../shared/continuation-fresh-head.ts';
-async function expiredGenesisPackageFixture(){
+import {canonicalFixturePost,fixtureTransportOrigin} from './continuation-transport-contract.ts';
+import {rpcData} from '../shared/rpc-data.ts';
+function fixtureRoleSigner(material:string,pin:{keyId:string;publicKey:string}){
+ const privateKey=crypto.subtle.importKey('pkcs8',Uint8Array.from(atob(material),c=>c.charCodeAt(0)),'Ed25519',false,['sign']);
+ return {key:async()=>pin,sign:async(value:string)=>bytes(await crypto.subtle.sign('Ed25519',await privateKey,new TextEncoder().encode(value)))};
+}
+
+async function expiredGenesisPackageFixture(workerTransport=false){
  const schema=(env as unknown as {GENESIS_PACKAGE_SCHEMA:Parameters<typeof applyD1Migrations>[1]}).GENESIS_PACKAGE_SCHEMA;
  await applyD1Migrations(db(),schema);
  const s=await account(), device=await identity(), authority=await identity(), custody=await identity(), checkpointIdentity=await identity();
+ const transportPins=JSON.parse(env.TRANSPORT_PINS) as Record<'main'|'witness'|'approval'|'checkpoint',{keyId:string;publicKey:string}>;
  const now=Math.floor(Date.now()/1000),requestId='original-request',deviceId='original-device',expiresAt=now-10;
  const grant={version:1,requestId,deviceId,accountId:s.account_id,tenantId:s.tenant_id,vaultId:'v',keyEpoch:1,issuerDeviceId:null,
   signingKey:device.signingKey,wrappingKey:device.wrappingKey,expiresAt};
@@ -560,16 +568,19 @@ async function expiredGenesisPackageFixture(){
  ]);
  const roster:TrustedDeviceRoster={version:1,revision:1,previousDigest:null,keyEpoch:1,accountId:s.account_id,tenantId:s.tenant_id,vaultId:'v',
   active:[{deviceId,signingKey:device.signingKey,wrappingKey:device.wrappingKey}],revoked:[],issuer:{kind:'device',id:deviceId},issuedAt:now,expiresAt:now+86400,
-  checkpointKeys:[{keyId:'checkpoint',publicKey:checkpointIdentity.signingKey}],recoveryAuthorities:[],recovery:null};
+  checkpointKeys:[workerTransport?transportPins.checkpoint:{keyId:'checkpoint',publicKey:checkpointIdentity.signingKey}],recoveryAuthorities:[],recovery:null};
  const canonical=canonicalRoster(roster),signature=await device.sign(ROSTER_DOMAIN+canonical),head=await rosterDigest({canonical,signature});
  await db().prepare('INSERT INTO signed_rosters VALUES(?,?,?,?,?,?,?,?,?)').bind(s.tenant_id,'v',s.account_id,1,head,null,deviceId,canonical,signature).run();
  const custodyDb=env.CUSTODIAN_TEST;
  await applyD1Migrations(custodyDb,env.CUSTODIAN_MIGRATIONS);
- const custodyPin={keyId:'custody',publicKey:custody.signingKey},approvalAuthority={keyId:'auth',publicKey:authority.signingKey};
+ const custodyPin=workerTransport?transportPins.witness:{keyId:'custody',publicKey:custody.signingKey};
+ const approvalAuthority=workerTransport?transportPins.approval:{keyId:'auth',publicKey:authority.signingKey};
+ const approvalSigner=workerTransport?fixtureRoleSigner(env.TRANSPORT_APPROVAL_FIXTURE_KEY,approvalAuthority):authority;
  const wSign={key:async()=>custodyPin,sign:custody.sign};
  const ledger=rosterWitness(custodyDb,wSign,roster.checkpointKeys,async()=>true,[]);
- const cp=await checkpoint({key:async()=>roster.checkpointKeys[0]!,sign:checkpointIdentity.sign},s.tenant_id,'v',0,await genesisRoot(s.tenant_id,'v'),null,null);
- const witness=await ledger.accept({rosters:[{canonical,signature}],checkpoints:[cp]});
+ const cpSigner=workerTransport?fixtureRoleSigner(env.TRANSPORT_CHECKPOINT_FIXTURE_KEY,transportPins.checkpoint):{key:async()=>roster.checkpointKeys[0]!,sign:checkpointIdentity.sign};
+ const cp=await checkpoint(cpSigner,s.tenant_id,'v',0,await genesisRoot(s.tenant_id,'v'),null,null),initial={rosters:[{canonical,signature}],checkpoints:[cp]};
+ const witness=workerTransport?await rpcData(env.TRANSPORT_CUSTODY.fixtureInitialWitness(initial)):await ledger.accept(initial);
  await db().prepare("UPDATE roster_witness_sagas SET state='acknowledged',receipt=? WHERE tenant_id=? AND vault_id='v' AND revision=1").bind(JSON.stringify(witness),s.tenant_id).run();
  const create=async(id='a'.repeat(43),cipher='x')=>{
   const bytes=canonicalPackage({version:1,vaultId:'v',targetDeviceId:deviceId,keyEpoch:1,wrappedVDK:btoa(cipher.repeat(80)),issuerDeviceId:deviceId,grantId:requestId});
@@ -580,16 +591,20 @@ async function expiredGenesisPackageFixture(){
    signingKey:device.signingKey,wrappingKey:device.wrappingKey,issuerDeviceId:null,keyEpoch:1,stage:'put-key-package',
    payloadDigest,rosterDigest:head,witnessHead:{revision:1,digest:head},expiresAt:now+60});
   const receipt=canonicalContinuationReceipt({version:1,domain:'AgentKeychain-enrollment-continuation-approval-v1',
-   intentDigest:await digest(intent),approvedAt:now,expiresAt:now+60,authorityKeyId:'auth'});
-  return {oldGrantCanonical,target:{canonical:intent,signature:await device.sign(intent)},approval:{canonical:receipt,signature:await authority.sign(receipt)},
+   intentDigest:await digest(intent),approvedAt:now,expiresAt:now+60,authorityKeyId:approvalAuthority.keyId});
+  return {oldGrantCanonical,target:{canonical:intent,signature:await device.sign(intent)},approval:{canonical:receipt,signature:await approvalSigner.sign(receipt)},
    keyPackage,witness,roster:{canonical,signature}};
  };
  const token=crypto.randomUUID(),sessionDigest=await digest(token);
  await db().prepare('INSERT INTO device_sessions VALUES(?,?,?,?,?,unixepoch()+600,1)').bind(sessionDigest,s.tenant_id,'v',deviceId,s.account_id).run();
- const context=async (body:string)=>{
-  const url=new URL(origin+'/fixture/continuation-commit'), timestamp=Math.floor(Date.now()/1000),nonce=crypto.randomUUID();
+ const signedHeaders=async (url:URL,body:string)=>{
+  const timestamp=Math.floor(Date.now()/1000),nonce=crypto.randomUUID();
   const proof=await device.sign(requestProof('POST',url,await digest(body),timestamp,nonce,sessionDigest));
-  return authenticate(db(),new Request(url,{method:'POST',headers:{authorization:'Bearer '+token,'x-device-nonce':nonce,'x-device-proof':proof,'x-device-timestamp':String(timestamp)}}),'v',body);
+  return {authorization:'Bearer '+token,'x-device-nonce':nonce,'x-device-proof':proof,'x-device-timestamp':String(timestamp)};
+ };
+ const context=async (body:string)=>{
+  const url=new URL(origin+'/fixture/continuation-commit'),headers=await signedHeaders(url,body);
+  return authenticate(db(),new Request(url,{method:'POST',headers}),'v',body);
  };
  const custodyInput=(input:Awaited<ReturnType<typeof create>>,nonce:string)=>({nonce,grant:input.oldGrantCanonical,
   target:input.target,approval:input.approval,roster:input.roster,keyPackage:input.keyPackage});
@@ -600,7 +615,7 @@ async function expiredGenesisPackageFixture(){
   provePostCommitContinuationHead(custodyDb,custodyInput(input,nonce),priorFreshHead,main,{...custodyPolicy,mainCommitAuthority,otherReleaseKeys:[]},
    {...wSign,sign:async canonical=>{await beforeSign?.();return wSign.sign(canonical);}});
  const veto=()=>custodyDb.prepare('INSERT INTO trust_devices VALUES(?,?,?,?,?,1,unixepoch()+600)').bind(s.account_id,s.tenant_id,'v',deviceId,device.signingKey).run();
- return {create,grant,context,fresh,post,veto,checkpointPins:roster.checkpointKeys,pins:{authority:approvalAuthority,witnesses:[custodyPin]}};
+ return {create,grant,context,fresh,post,veto,signedHeaders,custodyInput,transportPins,checkpointPins:roster.checkpointKeys,pins:{authority:approvalAuthority,witnesses:[custodyPin]}};
 }
 test('unwired genesis continuation commits one exact immutable package despite concurrency and retries',async()=>{
  const f=await expiredGenesisPackageFixture(), input=await f.create();
@@ -626,8 +641,8 @@ test('genesis package continuation does not write under membership, roster, or s
  expect(await db().prepare('SELECT count(*) n FROM genesis_package_continuations').first('n')).toBe(0);
 });
 
-async function continuationReadbackFixture(){
- const f=await expiredGenesisPackageFixture(),input=await f.create();
+async function continuationReadbackFixture(workerTransport=false){
+ const f=await expiredGenesisPackageFixture(workerTransport),input=await f.create();
  const target=JSON.parse(input.target.canonical);
  const expected={continuationId:target.id as string,requestId:target.requestId as string,intentDigest:await digest(input.target.canonical),
   approvalDigest:await digest(JSON.stringify([input.approval.canonical,input.approval.signature])),payloadDigest:target.payloadDigest as string};
@@ -720,4 +735,29 @@ test('Custody post-commit rejects reused nonce, alternate reference and revocati
  await expect(f.post(input,nonce,prior,main,pins.approvalAuthority)).rejects.toThrow('continuation_head_rejected');
  await expect(f.post(input,nonce,{...prior,signature:main.signature},main,pins.mainCommitAuthority)).rejects.toThrow('continuation_head_rejected');
  await expect(f.post(input,nonce,prior,main,pins.mainCommitAuthority,f.veto)).rejects.toThrow('continuation_head_rejected');
+});
+
+test('separate closed Worker roles carry same-device proof requests and recover a lost Main response',async()=>{
+ const {f,input,expected,commit}=await continuationReadbackFixture(true);
+ const {TRANSPORT_MAIN:mainTransport,TRANSPORT_CUSTODY:custodyTransport}=env,preNonce='A'.repeat(43),postNonce='B'.repeat(43);
+ expect((await mainTransport.fetch('https://continuation-transport.fixture.invalid/')).status).toBe(404);
+ expect((await custodyTransport.fetch('https://continuation-transport.fixture.invalid/')).status).toBe(404);
+ const custody=await rpcData(custodyTransport.fresh(f.custodyInput(input,preNonce)));
+ const hashSigned=async(v:{canonical:string;signature:string})=>digest(JSON.stringify([v.canonical,v.signature]));
+ const mainBody=canonicalGenesisCommitProofExpectation({commit:expected,nonce:preNonce,custodyFreshHeadDigest:await hashSigned(custody.freshHead)});
+ const sign=(path:string,body:string)=>f.signedHeaders(new URL(fixtureTransportOrigin+path),body);
+ const proveMain=async()=>rpcData(mainTransport.commitProof(await sign('/commit-proof',mainBody),mainBody,custody));
+ await expect(proveMain()).rejects.toThrow('fixture_continuation_unavailable');
+ await commit();
+ await proveMain(); // client dropped the first signed response, no durable retry write
+ const main=await proveMain(),postRequest=f.custodyInput(input,postNonce);
+ const postBody=canonicalFixturePost({nonce:postNonce,requestDigest:await digest(JSON.stringify(postRequest)),mainCommitDigest:await hashSigned(main),
+  priorFreshHeadDigest:await hashSigned(custody.freshHead)});
+ const postHeaders=await sign('/post-commit-proof',postBody);
+ const proof=await rpcData(mainTransport.postProof(postHeaders,postBody,postRequest,custody.freshHead,main));
+ expect(JSON.parse(proof.canonical)).toMatchObject({nonce:postNonce,mainCommitDigest:await hashSigned(main),domain:CUSTODY_CONTINUATION_POST_COMMIT_DOMAIN});
+ expect(await verify(f.transportPins.witness.publicKey,proof.signature,proof.canonical)).toBe(true);
+ expect(await db().prepare('SELECT count(*) n FROM genesis_package_continuations').first('n')).toBe(1);
+ await f.veto();
+ await expect(rpcData(mainTransport.postProof(postHeaders,postBody,postRequest,custody.freshHead,main))).rejects.toThrow('fixture_continuation_unavailable');
 });

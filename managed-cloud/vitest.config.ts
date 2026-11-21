@@ -1,6 +1,15 @@
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin';
 import { defineConfig } from 'vitest/config';
 import { build } from 'esbuild';
+import {createHash,generateKeyPairSync} from 'node:crypto';
+function ephemeralTransportKey(){
+ const key=generateKeyPairSync('ed25519');
+ const publicKey=key.publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('base64');
+ return {pin:{keyId:createHash('sha256').update(publicKey).digest('hex'),publicKey},privateKey:key.privateKey.export({format:'der',type:'pkcs8'}).toString('base64')};
+}
+const transportMain=ephemeralTransportKey(),transportCustody=ephemeralTransportKey(),transportApproval=ephemeralTransportKey(),transportCheckpoint=ephemeralTransportKey();
+const transportPins=JSON.stringify({main:transportMain.pin,witness:transportCustody.pin,approval:transportApproval.pin,checkpoint:transportCheckpoint.pin});
+await build({entryPoints:['tests/continuation-transport.fixture.ts'],outfile:'dist/test-continuation-transport.mjs',bundle:true,format:'esm',platform:'neutral',external:['cloudflare:workers','node:buffer'],target:'es2022'});
 await build({
     entryPoints: ['recovery-worker/index.ts'], outfile: 'dist/recovery.mjs',
     bundle: true, format: 'esm', platform: 'neutral',
@@ -19,9 +28,14 @@ export default defineConfig({
                         miniflare: {
                             compatibilityDate: '2026-07-16', compatibilityFlags: ['nodejs_compat'],
                             d1Databases: { MAIN: 'main-db', CUSTODIAN_TEST: 'custodian-db' },
-                            bindings: { MIGRATIONS: await readD1Migrations('api-worker/migrations'), GENESIS_PACKAGE_SCHEMA: await readD1Migrations('api-worker/experimental'), CUSTODIAN_MIGRATIONS: await readD1Migrations('recovery-worker/migrations') },
-                            serviceBindings: { CUSTODIAN_TEST_WITNESS_SIGNER:{name:'custody-recovery',entrypoint:'RosterWitnessSigner'}, CUSTODIAN_TEST_TRUST_SIGNER:{name:'custody-recovery',entrypoint:'RecoveryTrustSigner'}, RECOVERY_RELEASE_SIGNER:{name:'api-recovery',entrypoint:'RecoveryReleaseSigner'},CUSTODIAN_TEST_RELEASE:{name:'custody-recovery',entrypoint:'RecoveryReleaseSigner'}, RECOVERY_AUTH:{name:'api-recovery',entrypoint:'RecoveryTestService'},RECOVERY_KEYS:{name:'api-recovery',entrypoint:'RecoveryTestService'}, CUSTODIAN_TEST_TRUST:{name:'custody-recovery',entrypoint:'RecoveryTestService'}, CHECKPOINT_SIGNER: { name: 'checkpoint', entrypoint: 'CheckpointSigner' }, RECOVERY: { name: 'custodian', entrypoint: 'Custodian' } },
-                            workers: [{name:'api-recovery',modules:true,scriptPath:'dist/test-recovery.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat']},{name:'custody-recovery',modules:true,scriptPath:'dist/test-recovery.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat']},{ name: 'checkpoint', modules: true, scriptPath: 'dist/test-checkpoint.mjs', compatibilityDate: '2026-07-16', compatibilityFlags: ['nodejs_compat'] }, {
+                            bindings: { TRANSPORT_PINS:transportPins,TRANSPORT_APPROVAL_FIXTURE_KEY:transportApproval.privateKey,TRANSPORT_CHECKPOINT_FIXTURE_KEY:transportCheckpoint.privateKey,MIGRATIONS: await readD1Migrations('api-worker/migrations'), GENESIS_PACKAGE_SCHEMA: await readD1Migrations('api-worker/experimental'), CUSTODIAN_MIGRATIONS: await readD1Migrations('recovery-worker/migrations') },
+                            serviceBindings: { TRANSPORT_MAIN:{name:'fixture-continuation-main',entrypoint:'MainContinuationTransport'},TRANSPORT_CUSTODY:{name:'fixture-continuation-custody',entrypoint:'CustodyContinuationTransport'},CUSTODIAN_TEST_WITNESS_SIGNER:{name:'custody-recovery',entrypoint:'RosterWitnessSigner'}, CUSTODIAN_TEST_TRUST_SIGNER:{name:'custody-recovery',entrypoint:'RecoveryTrustSigner'}, RECOVERY_RELEASE_SIGNER:{name:'api-recovery',entrypoint:'RecoveryReleaseSigner'},CUSTODIAN_TEST_RELEASE:{name:'custody-recovery',entrypoint:'RecoveryReleaseSigner'}, RECOVERY_AUTH:{name:'api-recovery',entrypoint:'RecoveryTestService'},RECOVERY_KEYS:{name:'api-recovery',entrypoint:'RecoveryTestService'}, CUSTODIAN_TEST_TRUST:{name:'custody-recovery',entrypoint:'RecoveryTestService'}, CHECKPOINT_SIGNER: { name: 'checkpoint', entrypoint: 'CheckpointSigner' }, RECOVERY: { name: 'custodian', entrypoint: 'Custodian' } },
+                            workers: [
+                                {name:'fixture-continuation-main',modules:true,scriptPath:'dist/test-continuation-transport.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat'],
+                                 bindings:{ROLE_KEY:transportMain.privateKey,PINS:transportPins},d1Databases:{MAIN:'main-db'},serviceBindings:{CUSTODY:{name:'fixture-continuation-custody',entrypoint:'CustodyContinuationTransport'}}},
+                                {name:'fixture-continuation-custody',modules:true,scriptPath:'dist/test-continuation-transport.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat'],
+                                 bindings:{ROLE_KEY:transportCustody.privateKey,PINS:transportPins},d1Databases:{CUSTODIAN:'custodian-db'}},
+                                {name:'api-recovery',modules:true,scriptPath:'dist/test-recovery.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat']},{name:'custody-recovery',modules:true,scriptPath:'dist/test-recovery.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat']},{ name: 'checkpoint', modules: true, scriptPath: 'dist/test-checkpoint.mjs', compatibilityDate: '2026-07-16', compatibilityFlags: ['nodejs_compat'] }, {
                                     name: 'custodian', modules: true, scriptPath: 'dist/recovery.mjs',
                                     compatibilityDate: '2026-07-16', compatibilityFlags: ['nodejs_compat'], d1Databases: { CUSTODIAN: 'custodian-db' }, serviceBindings:{ROSTER_WITNESS_SIGNER:{name:'custody-recovery',entrypoint:'RosterWitnessSigner'},RECOVERY_TRUST_SIGNER:{name:'custody-recovery',entrypoint:'RecoveryTrustSigner'},RECOVERY_TRUST_POLICY:{name:'custody-recovery',entrypoint:'RecoveryTrustSigner'},RECOVERY_RELEASE_SIGNER:{name:'custody-recovery',entrypoint:'RecoveryReleaseSigner'},RECOVERY_AUTH:{name:'custody-recovery',entrypoint:'RecoveryTestService'},GENESIS_AUTH:{name:'api-recovery',entrypoint:'RosterGenesisAuthority'},RECOVERY_KEYS:{name:'custody-recovery',entrypoint:'RecoveryTestService'}},
                                 }],
