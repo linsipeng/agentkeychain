@@ -22,6 +22,13 @@ static sqlite3_vfs callbacks(struct run *r) {
         .xOpen=open_file,.xDelete=delete_file,.xAccess=access_file,.xFullPathname=canonical_path,.xRandomness=randomness,
         .xSleep=sleep_for,.xCurrentTime=clock_now};
 }
+#ifdef AKC_DB_ACTIVATION_REHEARSAL
+static bool activation_receipt_matches(sqlite3 *db) {
+    return scalar(db,"SELECT count(*) FROM activation_commit a JOIN snapshot s ON s.id=a.id "
+        "AND s.operation=a.operation WHERE s.generation=2 AND s.operation='" ADVANCE "' AND s.frame='" ADVANCE_FRAME "' AND "
+        "a.canonical='" ACTIVATION_DB_RECEIPT "'")==1;
+}
+#endif
 static enum outcome advance(sqlite3 *db,const char *operation,const char *frame,const char *answer) {
     sqlite3_stmt *stmt=NULL;
     sql(db,"BEGIN IMMEDIATE");
@@ -31,9 +38,12 @@ static enum outcome advance(sqlite3 *db,const char *operation,const char *frame,
     int hit=sqlite3_step(stmt);
     if(hit==SQLITE_ROW){
         CHECK(sqlite3_column_type(stmt,0)==SQLITE_TEXT);
-        const bool exact=sqlite3_column_int(stmt,1)==2&&!strcmp((const char *)sqlite3_column_text(stmt,0),answer)&&
+        bool exact=sqlite3_column_int(stmt,1)==2&&!strcmp((const char *)sqlite3_column_text(stmt,0),answer)&&
             sqlite3_column_type(stmt,2)==SQLITE_TEXT&&!strcmp((const char *)sqlite3_column_text(stmt,2),frame);
         CHECK(sqlite3_step(stmt)==SQLITE_DONE&&sqlite3_finalize(stmt)==SQLITE_OK);
+#ifdef AKC_DB_ACTIVATION_REHEARSAL
+        exact=exact&&activation_receipt_matches(db);
+#endif
         sql(db,"ROLLBACK");return exact?replayed:denied;
     }
     CHECK(hit==SQLITE_DONE&&sqlite3_finalize(stmt)==SQLITE_OK);
@@ -47,6 +57,12 @@ static enum outcome advance(sqlite3 *db,const char *operation,const char *frame,
     CHECK(sqlite3_bind_text(stmt,1,operation,-1,SQLITE_STATIC)==SQLITE_OK);
     CHECK(sqlite3_bind_text(stmt,2,answer,-1,SQLITE_STATIC)==SQLITE_OK);
     CHECK(sqlite3_step(stmt)==SQLITE_DONE&&sqlite3_finalize(stmt)==SQLITE_OK);
+#ifdef AKC_DB_ACTIVATION_REHEARSAL
+    /* This exact synthetic projection and its canonical local commit receipt
+     * join and commit together. No provider operation exists here. */
+    CHECK(!strcmp(operation,ADVANCE)&&!strcmp(frame,ADVANCE_FRAME)&&!strcmp(answer,ADVANCE_RECEIPT));
+    sql(db,"INSERT INTO activation_commit VALUES(1,'" ADVANCE "','" ACTIVATION_DB_RECEIPT "')");
+#endif
     sql(db,"COMMIT"); /* synthetic barrier can pause before this call returns */
     return written;
 }
@@ -80,6 +96,10 @@ static void inspect(sqlite3 *db,int generation) {
         CHECK(scalar(db,"SELECT count(*) FROM snapshot WHERE id=1 AND generation=2 AND operation='" ADVANCE "' AND frame='" ADVANCE_FRAME "'")==1);
         CHECK(scalar(db,"SELECT count(*) FROM receipt WHERE generation=2 AND operation='" ADVANCE "' AND canonical='" ADVANCE_RECEIPT "'")==1);
     }
+#ifdef AKC_DB_ACTIVATION_REHEARSAL
+    CHECK(scalar(db,"SELECT count(*) FROM activation_commit")==generation-1);
+    if(generation==2)CHECK(activation_receipt_matches(db));
+#endif
     CHECK(scalar(db,"SELECT count(*) FROM pragma_integrity_check WHERE integrity_check='ok'")==1);
 }
 static void kill_at(struct run r,enum fence barrier) {
@@ -131,6 +151,13 @@ int main(void) {
         "CREATE TABLE receipt(generation INTEGER PRIMARY KEY,operation TEXT NOT NULL UNIQUE,canonical TEXT NOT NULL);"
         "CREATE TRIGGER no_receipt_update BEFORE UPDATE ON receipt BEGIN SELECT raise(ABORT,'receipt immutable');END;"
         "CREATE TRIGGER no_receipt_delete BEFORE DELETE ON receipt BEGIN SELECT raise(ABORT,'receipt immutable');END;");
+#ifdef AKC_DB_ACTIVATION_REHEARSAL
+    sql(seed,"CREATE TABLE activation_commit(id INTEGER PRIMARY KEY CHECK(id=1),operation TEXT NOT NULL,canonical TEXT NOT NULL);"
+        "CREATE TRIGGER no_activation_replace BEFORE INSERT ON activation_commit "
+        "WHEN EXISTS(SELECT 1 FROM activation_commit) BEGIN SELECT raise(ABORT,'activation immutable');END;"
+        "CREATE TRIGGER no_activation_update BEFORE UPDATE ON activation_commit BEGIN SELECT raise(ABORT,'activation immutable');END;"
+        "CREATE TRIGGER no_activation_delete BEFORE DELETE ON activation_commit BEGIN SELECT raise(ABORT,'activation immutable');END;");
+#endif
     sqlite3_int64 n=0;unsigned char *payload=sqlite3_serialize(seed,"main",&n,0);
     CHECK(payload&&n>0&&n<=maximum);
     const int mainfd=gate_open(&r.scope,main_name,true,true);
@@ -168,6 +195,12 @@ int main(void) {
     CHECK(sqlite3_extended_errcode(db)==SQLITE_CONSTRAINT_TRIGGER);
     CHECK(sqlite3_exec(db,"DELETE FROM receipt WHERE generation=2",NULL,NULL,NULL)==SQLITE_CONSTRAINT);
     CHECK(sqlite3_extended_errcode(db)==SQLITE_CONSTRAINT_TRIGGER);
+#ifdef AKC_DB_ACTIVATION_REHEARSAL
+    CHECK(sqlite3_exec(db,"INSERT OR REPLACE INTO activation_commit VALUES(1,'foreign','foreign')",NULL,NULL,NULL)==SQLITE_CONSTRAINT);
+    CHECK(sqlite3_extended_errcode(db)==SQLITE_CONSTRAINT_TRIGGER);
+    CHECK(sqlite3_exec(db,"UPDATE activation_commit SET canonical='foreign'",NULL,NULL,NULL)==SQLITE_CONSTRAINT);
+    CHECK(sqlite3_exec(db,"DELETE FROM activation_commit",NULL,NULL,NULL)==SQLITE_CONSTRAINT);
+#endif
     inspect(db,2);CHECK(r.deletions==0);close_exact(&r,&v,db);
 
 #endif
@@ -177,6 +210,18 @@ int main(void) {
 #else
     inspect(db,2);
 #endif
+#ifdef AKC_DB_ACTIVATION_REHEARSAL
+    char durable[2049];sqlite3_stmt *proof=NULL;
+    CHECK(sqlite3_db_readonly(db,"main")==1);
+    CHECK(sqlite3_prepare_v2(db,"SELECT a.canonical FROM activation_commit a JOIN snapshot s "
+        "ON s.id=a.id AND s.operation=a.operation WHERE s.generation=2",-1,&proof,NULL)==SQLITE_OK);
+    CHECK(sqlite3_step(proof)==SQLITE_ROW&&sqlite3_column_type(proof,0)==SQLITE_TEXT);
+    const int proof_size=sqlite3_column_bytes(proof,0);
+    const unsigned char *proof_bytes=sqlite3_column_text(proof,0);
+    CHECK(proof_size>0&&(size_t)proof_size<sizeof durable&&proof_bytes);
+    memcpy(durable,proof_bytes,(size_t)proof_size);durable[proof_size]='\0';
+    CHECK(sqlite3_step(proof)==SQLITE_DONE&&sqlite3_finalize(proof)==SQLITE_OK);
+#endif
     close_exact(&r,&v,db);
     CHECK(gate_access(&r.scope,rollback_name)==0);
     CHECK(acquire(&r.scope,top,r.lock_inode,&r.lease)==lease_held);
@@ -184,7 +229,9 @@ int main(void) {
     CHECK(unlinkat(dir,main_name,0)==0&&unlinkat(dir,lease_name,0)==0);
     close_checked(r.lease);close_checked(dir);CHECK(unlinkat(top,"pilot",AT_REMOVEDIR)==0);
     close_checked(top);CHECK(rmdir(temp)==0);
-#if defined(AKC_NATIVE_INSPECT_ONLY)
+#if defined(AKC_DB_ACTIVATION_REHEARSAL)
+    puts(durable);
+#elif defined(AKC_NATIVE_INSPECT_ONLY)
     puts("PASS authenticated canonical native inspect returns exact read-only durable snapshot; signed mutation denied (fixture only)");
 #elif defined(AKC_COMBINED_BRIDGE)
     puts("PASS native peer + signed fixed handoff + descriptor-relative durable receipt replay (synthetic only)");

@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/pilot-sqlite-fixture.yml'
       - 'tests/native/pilot_sqlite*.c'
+      - 'tests/native/pilot_sqlite_activation_receipt_rehearsal.ts'
       - 'tests/native/pilot_broker_unix_peer.c'
       - 'tests/native/pilot_broker_unix_receipt.c'
       - 'tests/native/pilot_broker_unix_inspect.c'
@@ -150,3 +151,4 @@ jobs:
           pkg-config --atleast-version=3.0.0 libcrypto
           bun install --frozen-lockfile --ignore-scripts
           bun test ./tests/native/pilot_linux_installed_inspect_rehearsal.ts
+          bun test ./tests/native/pilot_sqlite_activation_receipt_rehearsal.ts
