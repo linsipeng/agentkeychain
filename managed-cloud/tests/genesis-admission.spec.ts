@@ -4,6 +4,7 @@ import {env} from 'cloudflare:workers';
 import {checkpoint,genesisRoot} from '../shared/checkpoints.ts';
 import {canonicalGrant} from '../shared/device-protocol.ts';
 import {deviceRepository} from '../api-worker/device-repository.ts';
+import {PILOT_MAIN_MAPPING_ALLOWLIST,resolvePilotMainExistingMapping} from '../api-worker/pilot-main-existing-mapping.ts';
 import {stagePilotGenesisMainBinding} from '../api-worker/genesis-main-binding-stage.ts';
 import {admitGenesis} from '../shared/genesis-admission.ts';
 import {PILOT_MAIN_INVITE_LINK,verifyPendingPilotMainInviteLink} from '../shared/pilot-main-invite-link.ts';
@@ -259,7 +260,20 @@ test('stages one independently approved Main link atomically without standard de
   main.prepare('SELECT count(*) n FROM '+table).first<number>('n');
  // A genuine approved Custody ledger cannot synthesize a Main account or a
  // pending device identity. Only test-owned existing auth metadata is seeded.
- await admitGenesis(db,request,f.policy,witness);
+ const custodyReceipt=await admitGenesis(db,request,f.policy,witness);
+ const operator=await signingFixture(),operatorPin={publicKey:operator.publicKey,keyId:operator.keyId};
+ const installation={installationDigest:'a'.repeat(64),profileDigest:'b'.repeat(64),
+  authOrigin:'https://auth-pilot-mapping.fixture.invalid',rpId:'auth-pilot-mapping.fixture.invalid',installationExpiresAt:current()+60};
+ const issuedAt=current(),mapping={version:1,domain:PILOT_MAIN_MAPPING_ALLOWLIST,keyId:operator.keyId,attemptDigest,
+  grantDigest:await digest(grant),custodyReceiptDigest:await digest(JSON.stringify(custodyReceipt)),...installation,issuedAt,expiresAt:issuedAt+30};
+ const signedMapping=async(data:object,key=operator)=>{
+  const canonical=JSON.stringify(data);return {canonical,signature:await key.sign(canonical)};
+ };
+ const config={mode:'existing-mapping-v1' as const,operator:operatorPin,reservedRolePins:[f.policy.authority,policy.witness],
+  installation,allowlist:await signedMapping(mapping)};
+ const mappingError='pilot_main_existing_mapping_unavailable';
+ await expect(resolvePilotMainExistingMapping(main)).rejects.toThrow(mappingError);
+ await expect(resolvePilotMainExistingMapping(main,config)).rejects.toThrow(mappingError);
  await expect(stagePilotGenesisMainBinding(port,policy,raw)).rejects.toThrow(reject);
  expect(await countMain('accounts')).toBe(0);
  await main.batch([
@@ -279,6 +293,13 @@ test('stages one independently approved Main link atomically without standard de
  expect(await Promise.all([stagePilotGenesisMainBinding(port,policy,raw),stagePilotGenesisMainBinding(port,policy,raw)])).toEqual([expected,expected]);
  expect(await stagePilotGenesisMainBinding(port,policy,await make('E'.repeat(43)))).toEqual(expected);
  expect(await countMain('pilot_genesis_main_binding_stage')).toBe(1);
+ expect(await resolvePilotMainExistingMapping(main,config)).toEqual({...installation,grantCanonical:grant,installationExpiresAt:mapping.expiresAt});
+ for(const claim of [{attemptDigest:'c'.repeat(64)},{grantDigest:'c'.repeat(64)},{custodyReceiptDigest:'c'.repeat(64)},
+  {installationDigest:'c'.repeat(64)},{profileDigest:'c'.repeat(64)},{expiresAt:installation.installationExpiresAt+1}]){
+  await expect(resolvePilotMainExistingMapping(main,{...config,allowlist:await signedMapping({...mapping,...claim})})).rejects.toThrow(mappingError);
+ }
+ await expect(resolvePilotMainExistingMapping(main,{...config,allowlist:await signedMapping(mapping,f.authority)})).rejects.toThrow(mappingError);
+ await expect(resolvePilotMainExistingMapping(main,{...config,reservedRolePins:[operatorPin]})).rejects.toThrow(mappingError);
  for(const t of ['devices','device_keys','vault_devices','device_sessions','enrollment_grants','device_challenges'] as const)
   expect(await countMain(t)).toBe(0);
  expect(await main.prepare('SELECT state FROM device_requests WHERE id=?').bind(g.requestId).first('state')).toBe('bound');
@@ -288,6 +309,7 @@ test('stages one independently approved Main link atomically without standard de
   .rejects.toThrow('pilot_genesis_binding_immutable');
  // A change in Main eligibility even after an exact stage is not a replay authorization.
  await main.prepare('UPDATE memberships SET active=0 WHERE tenant_id=? AND account_id=?').bind(g.tenantId,g.accountId).run();
+ await expect(resolvePilotMainExistingMapping(main,config)).rejects.toThrow(mappingError);
  await expect(stagePilotGenesisMainBinding(port,policy,raw)).rejects.toThrow(reject);
  expect(await countMain('pilot_genesis_main_binding_stage')).toBe(1);
  expect(await countMain('device_challenges')).toBe(0);
