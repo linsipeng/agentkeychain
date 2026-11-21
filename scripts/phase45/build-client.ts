@@ -34,10 +34,14 @@ const result=await Bun.build({entrypoints:['scripts/phase45/client.ts'],compile:
  });
  build.onLoad({filter:/src\/transfer\.ts$/},async({path})=>({loader:'ts',contents:`import {bootstrap} from ${JSON.stringify(bootstrap)};\n`+(await readFile(path,'utf8')).replace('      const payload = [',"      if(bootstrap.fault==='export:before-payload')process.exit(95);const payload = [")}));
  build.onLoad({filter:/src\/cloud\/enrollment-intent\.ts$/},async({path})=>{
-  let contents=await readFile(path,'utf8');
-  const points=[['before-sqlite'," store.transaction(()=>{\n  store.put('state','enrollment',e);"],['after-sqlite'," await secure.remove('enrollment-intent');"]];
-  for(const [stage,needle] of points){if(!contents.includes(needle!))throw new Error('enrollment_injection_missing_'+stage);contents=contents.replace(needle!,`if(bootstrap.fault==='enrollment:${stage}')process.exit(96);`+needle);}
-  return {loader:'ts',contents:`import {bootstrap} from ${JSON.stringify(bootstrap)};\n`+contents};
+  const source=await readFile(path,'utf8');
+  // Inject only into normal enrollment; continuation has its own crash tests.
+  const [before,legacy,...duplicates]=source.split('export async function resumeEnrollmentActivation(');
+  if(before===undefined||legacy===undefined||duplicates.length)throw new Error('enrollment_injection_missing_legacy_resume');
+  let contents=legacy;
+  const points=[['before-sqlite'," store.transaction(()=>{\n  store.put('state','enrollment',e);"],['after-sqlite'," await secure.remove('enrollment-intent');return true;"]];
+  for(const [stage,needle] of points){if(contents.split(needle!).length!==2)throw new Error('enrollment_injection_nonunique_'+stage);contents=contents.replace(needle!,`if(bootstrap.fault==='enrollment:${stage}')process.exit(96);`+needle);}
+  return {loader:'ts',contents:`import {bootstrap} from ${JSON.stringify(bootstrap)};\n`+before+'export async function resumeEnrollmentActivation('+contents};
  });
  build.onLoad({filter:/src\/cloud\/roster\.ts$/},async({path})=>({loader:'ts',contents:(await readFile(path,'utf8')).replaceAll('Date.now()+30000','Date.now()+500').replaceAll('Date.now()+6000','Date.now()')}));
  build.onLoad({filter:/src\/cloud\/login\.ts$/},async({path})=>{
