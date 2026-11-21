@@ -124,9 +124,31 @@ def prompt_cancel_policy():
     return "\n".join(rules)
 
 
+def prompter_timeout_class(conn, process):
+    """Classify only the disposable broker's small authenticated connection set."""
+    try:
+        reply = conn.call_sync(DBUS, "/org/freedesktop/DBus", DBUS, "ListNames", GLib.Variant("()", ()),
+                               GLib.VariantType.new("(as)"), Gio.DBusCallFlags.NO_AUTO_START, 1000, None)
+        names = reply.unpack()[0]
+        if len(names) > 12:
+            return "prompter-owner-timeout-bus-inventory-unexpected"
+        for name in names:
+            if not re.fullmatch(r":[0-9]+\.[0-9]+", name):
+                continue
+            credentials = call(conn, "GetConnectionCredentials", name, "(a{sv})")
+            if credentials.get("UnixUserID") == os.getuid() and credentials.get("ProcessID") == process.pid:
+                return "prompter-owner-timeout-connected-to-private-bus"
+    except GLib.Error:
+        return "prompter-owner-timeout-bus-inventory-unavailable"
+    return "prompter-owner-timeout-not-connected-to-private-bus"
+
+
 def wait_owner(conn, name, process, image, snapshot):
     global phase
-    for _ in range(60):
+    # GCR initializes GTK before requesting its bus name. Allow bounded
+    # startup jitter but never start another prompter or accept a late owner.
+    expires = time.monotonic() + 6
+    while time.monotonic() < expires:
         phase = "prompter-process"
         exit_code = process.poll()
         if exit_code is not None:
@@ -160,10 +182,15 @@ def wait_owner(conn, name, process, image, snapshot):
             need(credentials.get("ProcessID") == process.pid)
             phase = "prompter-process-image-recheck"
             owned_image(process, image, snapshot)
+            if time.monotonic() >= expires:
+                phase = "prompter-owner-timeout-late"
+                raise RuntimeError("fixture role owner arrived after deadline")
             return owner
         phase = "prompter-owner-pending"
         time.sleep(0.05)
     phase = "prompter-owner-timeout"
+    owned_image(process, image, snapshot)
+    phase = prompter_timeout_class(conn, process)
     raise RuntimeError("fixture role owner unavailable")
 
 
