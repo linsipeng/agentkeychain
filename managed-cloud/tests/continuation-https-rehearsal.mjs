@@ -13,6 +13,7 @@ import {randomUUID} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import {fileURLToPath} from 'node:url';
 import {build} from 'esbuild';
+import {createCompiledPilotBrowserFixture,pilotBrowserHost,pilotBrowserOrigin,verifyCompiledPilotBrowser} from './compiled-pilot-browser-fixture.mjs';
 import {chromiumTestPipe} from './chromium-test-pipe.mjs';
 import {webauthn,random} from '../api-worker/webauthn.ts';
 import {digest} from '../shared/contracts.ts';
@@ -24,12 +25,13 @@ const dir=mkdtempSync(join(tmpdir(),'akc-https-'));
 const file=name=>join(dir,name);
 const run=(program,args,environment=process.env)=>execFileSync(program,args,{env:environment,stdio:'pipe',timeout:20_000});
 const names=['auth','api','web'].map(role=>role+'.akc-rehearsal.invalid');
-let server;
+let server,pilot;
 try{
  run('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-keyout',file('ca.key'),'-out',file('ca.pem'),'-days','1','-subj','/CN=AgentKeychain ephemeral test CA','-addext','basicConstraints=critical,CA:TRUE']);
  run('openssl',['req','-newkey','rsa:2048','-nodes','-keyout',file('server.key'),'-out',file('request.pem'),'-subj','/CN='+names[0]]);
- writeFileSync(file('ext'),['basicConstraints=critical,CA:FALSE','extendedKeyUsage=serverAuth','subjectAltName='+names.map(host=>'DNS:'+host).join(',')].join('\n'));
+ writeFileSync(file('ext'),['basicConstraints=critical,CA:FALSE','extendedKeyUsage=serverAuth','subjectAltName='+[...names,pilotBrowserHost].map(host=>'DNS:'+host).join(',')].join('\n'));
  run('openssl',['x509','-req','-in',file('request.pem'),'-CA',file('ca.pem'),'-CAkey',file('ca.key'),'-CAcreateserial','-out',file('server.pem'),'-days','1','-extfile',file('ext')]);
+ if(browser)pilot=await createCompiledPilotBrowserFixture(file('pilot-test-invitation.json'));
  const bundle=(await build({entryPoints:[fileURLToPath(new URL('../web/src/continuation-approval-browser.ts',import.meta.url))],bundle:true,format:'esm',write:false})).outputFiles[0].text;
  let origins,handle;
  const received=[];
@@ -42,6 +44,28 @@ try{
 
  server=createServer({key:readFileSync(file('server.key')),cert:readFileSync(file('server.pem'))},async(req,res)=>{
   try{
+   if(pilot&&req.headers.host===pilotBrowserHost){
+    if(!req.url?.startsWith('/')||req.url.startsWith('//')||!['GET','POST'].includes(req.method)){res.writeHead(404).end();return;}
+    const url=new URL(req.url,pilotBrowserOrigin),headers=new Headers();
+    const allowedHeaders=new Set(['origin','sec-fetch-site','content-type','cookie','x-csrf-token']);
+    for(let i=0;i<req.rawHeaders.length;i+=2)if(allowedHeaders.has(req.rawHeaders[i].toLowerCase()))
+     headers.append(req.rawHeaders[i],req.rawHeaders[i+1]);
+    let body;
+    if(req.method==='POST'){
+     const chunks=[];let bytes=0;
+     for await(const chunk of req){bytes+=chunk.length;if(bytes>64*1024){res.writeHead(413).end();return;}chunks.push(chunk);}
+     body=Buffer.concat(chunks);
+    }
+    // Tunnel only the loopback socket; forward browser Origin/Fetch-Metadata and
+    // cookies byte-for-byte, not synthesized headers from a Node client.
+    const response=await pilot.dispatch(url.toString(),{method:req.method,headers,body});
+    const output=Object.fromEntries(response.headers);
+    for(const field of ['set-cookie','transfer-encoding','content-length','connection','content-encoding'])delete output[field];
+    if(response.headers.getSetCookie().length)output['set-cookie']=response.headers.getSetCookie();
+    received.push({origin:pilotBrowserOrigin,path:url.pathname,cookie:!!req.headers.cookie,status:response.status});
+    res.writeHead(response.status,output).end(Buffer.from(await response.arrayBuffer()));
+    return;
+   }
    const origin=origins.find(o=>new URL(o).host===req.headers.host);
    if(!origin||!req.url?.startsWith('/')||req.url.startsWith('//')){res.writeHead(404).end();return;}
    const u=new URL(req.url,origin);
@@ -143,8 +167,8 @@ try{
  const {port}=server.address();origins=names.map(host=>'https://'+host+':'+port);
  handle=continuationApprovalPage(origins[0],bundle);
  const ca=readFileSync(file('ca.pem'));
- const get=(host,path,trust=true)=>new Promise((resolve,reject)=>{
-  const req=request({hostname:host,port,path,agent:false,ca:trust?ca:undefined,
+ const get=(host,path,trust=true,hostHeader)=>new Promise((resolve,reject)=>{
+  const req=request({hostname:host,port,path,agent:false,ca:trust?ca:undefined,headers:hostHeader?{host:hostHeader}:undefined,
    lookup:(_host,options,cb)=>options.all?cb(null,[{address:'127.0.0.1',family:4}]):cb(null,'127.0.0.1',4)},res=>{
    let body='';res.setEncoding('utf8').on('data',chunk=>body+=chunk).on('end',()=>resolve({status:res.statusCode,headers:res.headers,body}));
   });
@@ -163,13 +187,20 @@ try{
  console.log('PASS real HTTPS: scoped CA, hostname verification, exact Auth assets and origin isolation');
 
  if(browser){
+  const compiled=await get(pilotBrowserHost,'/pilot/genesis',true,pilotBrowserHost);
+  assert.equal(compiled.status,200);
+  assert.match(compiled.body,/id="register" disabled/);
+  assert.match(compiled.headers['content-security-policy'],/frame-ancestors 'none'/);
+  assert.equal(compiled.headers['permissions-policy'],'publickey-credentials-get=(self), publickey-credentials-create=(self)');
+  const wrongPort=await get(pilotBrowserHost,'/pilot/genesis');
+  assert.equal(wrongPort.status,404);
   const home=file('home'),db=join(home,'.pki','nssdb');
   mkdirSync(db,{recursive:true});
   const env={...process.env,HOME:home,XDG_CONFIG_HOME:file('config'),XDG_DATA_HOME:file('data'),XDG_CACHE_HOME:file('cache')};
   run('certutil',['-N','-d','sql:'+db,'--empty-password'],env);
   run('certutil',['-A','-d','sql:'+db,'-n','akc-disposable-root','-t','C,,','-i',file('ca.pem')],env);
   const flags=['--headless','--no-first-run','--disable-background-networking','--no-proxy-server',
-   '--host-resolver-rules='+names.map(host=>'MAP '+host+' 127.0.0.1').join(', ')];
+   '--host-resolver-rules='+[...names.map(host=>'MAP '+host+' 127.0.0.1'),'MAP '+pilotBrowserHost+':443 127.0.0.1:'+port].join(', ')];
   const render=async (path, profile)=>promisify(execFile)(process.env.CHROMIUM??'chromium',[...flags,'--dump-dom','--timeout=10000','--user-data-dir='+file(profile),origins[0]+path],{env,timeout:20_000,maxBuffer:1024*1024});
   const doc=await render('/continuation/approve#handoff='+'a'.repeat(43),'continuation-profile');
   assert.match(doc.stdout,/<div id="manual" hidden="">/);
@@ -198,7 +229,9 @@ try{
     if(result.value===true){
      const called=await cdp('Runtime.evaluate',{expression:'globalThis.runProbe()',userGesture:true,awaitPromise:true},sessionId);
      assert.ok(!called.exceptionDetails,'synthetic HTTPS probe threw');
-     return probeComplete;
+     const evidence=await probeComplete;
+     await verifyCompiledPilotBrowser(cdp,pilot,file('pilot-test-invitation.json'),ms=>delay(ms,undefined,{signal:timer.signal}));
+     return evidence;
     }
     await delay(100,undefined,{signal:timer.signal});
    }
@@ -215,7 +248,7 @@ try{
    const evidence=await Promise.race([
     start(),
     exited.then(({code,signal})=>{throw new Error(`browser exited before HTTPS probe completed: ${code??signal}\n${stderr}`);}),
-    delay(22_000,undefined,{signal:timer.signal}).then(()=>{throw new Error(`browser HTTPS probe timed out; requests: ${JSON.stringify(received.slice(-12))}\n${stderr}`);}),
+    delay(50_000,undefined,{signal:timer.signal}).then(()=>{throw new Error(`browser HTTPS probe timed out; requests: ${JSON.stringify(received.slice(-12))}\n${stderr}`);}),
    ]);
    assert.deepEqual(evidence,{cookie:true,csp:true,fetchBlocked:true,secure:true,webauthn:true,httpOnly:true,registration:true,assertion:true});
    assert.equal(verifiedAssertion,true);
@@ -228,9 +261,17 @@ try{
   }
   assert.ok(received.some(r=>r.origin===origins[0]&&r.path==='/cookie'&&r.cookie));
   assert.ok(!received.some(r=>r.origin===origins[1]&&r.path==='/cookie'));
+  for(const [path,status] of [['registration/begin',200],['registration/complete',204],['consent/begin',200],['consent/complete',200]]){
+   const hit=received.find(r=>r.origin===pilotBrowserOrigin&&r.path==='/v1/auth/pilot-genesis/'+path);
+   assert.ok(hit,path);assert.equal(hit.status,status);
+   if(path!=='registration/begin')assert.equal(hit.cookie,true);
+  }
+  console.log('PASS sandboxed browser: exact compiled pilot page registered, reviewed and approved one synthetic device; no vault activation');
+
   console.log('PASS sandboxed browser: signed TLS transport, bundle, CSP, host-only cookie and WebAuthn registration and a verified assertion with a disposable virtual authenticator');
  }
 }finally{
  if(server?.listening){server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+ await pilot?.dispose();
  rmSync(dir,{recursive:true,force:true});
 }
