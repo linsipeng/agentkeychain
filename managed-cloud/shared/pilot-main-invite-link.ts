@@ -14,11 +14,11 @@ const now=()=>Math.floor(Date.now()/1000);
 type Pin=Readonly<CheckpointKey>;
 /** Independently provisioned Admin mapping and verified installation scope.
  * This must not be inferred from the invitation, Auth receipt or caller IDs. */
-type ExistingMainMapping=Readonly<{
+export type ExistingMainMapping=Readonly<{
  grantCanonical:string;installationDigest:string;profileDigest:string;installationExpiresAt:number;
  authOrigin:string;rpId:string;
 }>;
-type Policy=GenesisApprovalPolicy&Readonly<{inviteAuthority:Pin;mainLinkAuthority:Pin}>;
+export type PilotMainInvitePolicy=GenesisApprovalPolicy&Readonly<{inviteAuthority:Pin;mainLinkAuthority:Pin}>;
 const sha=(v:SignedManagedOperation)=>digest(JSON.stringify([v.canonical,v.signature]));
 function digestShape(value:unknown):value is string{
  return typeof value==='string'&&value.length===64&&/^[a-f0-9]{64}$/.test(value);
@@ -41,7 +41,7 @@ function window(input:Record<string,unknown>,deadline:number,at:number){
  * Until a distinct trusted Auth readback binds those exact bytes, even a
  * verified Admin link is pending only. No D1 lookup, mutation or credentials. */
 export async function verifyPendingPilotMainInviteLink(
- input:unknown, expected:ExistingMainMapping, policy:Policy,
+ input:unknown, expected:ExistingMainMapping, policy:PilotMainInvitePolicy,
 ):Promise<Readonly<{state:'pending-auth-invite-consumption-proof'}>>{
  try{
   const at=now();
