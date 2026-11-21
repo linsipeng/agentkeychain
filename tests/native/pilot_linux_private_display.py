@@ -67,7 +67,8 @@ def owned_private_display(prompt=False):
     global phase
     need(platform.system() == "Linux" and platform.machine() == "x86_64" and os.getuid() == os.geteuid() != 0)
     need(os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") == ("prompt-cancel-v1" if prompt else "private-display-v1"))
+         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in
+         (("prompt-cancel-v1", "named-write-v1") if prompt else ("private-display-v1",)))
     os.umask(0o077)
     phase = "display-unix-capability"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM):
@@ -140,7 +141,7 @@ def verify_private_display():
         pass
 
 
-def screen_windows(display, mark):
+def screen_windows(display, mark, input_scope=None):
     # Read only normal X11/XRes metadata over a strictly pinned socket, without
     # trusting client-controlled _NET_WM_PID or screenshot/title matches.
     child, executable, endpoint, endpoint_identity, cookie = display
@@ -175,12 +176,15 @@ def screen_windows(display, mark):
         root, = struct.unpack_from("<I", setup, screen)
         sequence = 0
 
-        def reply(label, opcode, data=b"", minor=0):
+        def request(opcode, data=b"", minor=0):
             nonlocal sequence
             sequence += 1
             need(len(data) % 4 == 0)
-            mark(label + "-rpc")
             conn.sendall(struct.pack("<BBH", opcode, minor, 1 + len(data) // 4) + data)
+
+        def reply(label, opcode, data=b"", minor=0):
+            mark(label + "-rpc")
+            request(opcode, data, minor)
             header = read(32)
             mark(label + "-frame")
             need(header[0] == 1 and struct.unpack_from("<H", header, 2)[0] == sequence)
@@ -203,7 +207,7 @@ def screen_windows(display, mark):
             if attr_head[26] != 2:  # IsViewable
                 continue
             result.append(window)
-        resolved = set()
+        resolved = {}
         for window in result:
             head, body = reply("xres-client-id", opcode, struct.pack("<III", 1, window, 2), minor=4)
             ids, = struct.unpack_from("<I", head, 8)
@@ -215,9 +219,65 @@ def screen_windows(display, mark):
             # exact request to a single local PID; reject missing/extra IDs.
             mark("xres-local-pid")
             need(resource != 0 and mask == 2 and length == 4 and local_pid > 0)
-            resolved.add(local_pid)
+            resolved[window] = local_pid
+        if input_scope is not None:
+            need(os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") == "named-write-v1")
+            expected_pid, password = input_scope
+            mark("input-pinned-window")
+            need(len(resolved) == 1 and tuple(resolved.values()) == (expected_pid,))
+            window = next(iter(resolved))
+            authenticate_named_dialog(reply, window)
+            enter_fixture_password(reply, request, mark, setup, root, window, password)
         mark("mapped" if resolved else "no-viewable-top-level" if count else "no-top-level")
-        return resolved
+        return set(resolved.values())
+
+
+def authenticate_named_dialog(reply, window):
+    # Core X11 WM_NAME (atom 39). GCR receives an exact source-confirmed
+    # ASCII title in the clean C locale. Check, never print the property.
+    header, body = reply("input-dialog-title", 20, struct.pack("<IIIII", window, 39, 0, 0, 16))
+    remaining, count = struct.unpack_from("<II", header, 12)
+    expected = b"New Keyring Password"
+    need(header[1] == 8 and remaining == 0 and count == len(expected) and body[:count] == expected)
+
+
+def enter_fixture_password(reply, request, mark, setup, root, window, password):
+    need(isinstance(password, bytearray) and len(password) == 40 and
+         all(48 <= number <= 57 for number in password))
+    query = b"XTEST"
+    extension, _ = reply("input-xtest-extension", 98, struct.pack("<H2x", len(query)) + padded(query))
+    need(extension[8] == 1 and extension[9] >= 128)
+    first, last = setup[26:28]
+    need(8 <= first < last and last - first <= 247)
+    count = last - first + 1
+    header, body = reply("input-keymap", 101, struct.pack("<BB2x", first, count))
+    stride = header[1]
+    need(0 < stride <= 16 and len(body) == count * stride * 4)
+    symbols = (*range(48, 58), 0xff09, 0xff0d)
+    keys = {}
+    for symbol in symbols:
+        candidates = [first + i for i in range(count)
+                      if struct.unpack_from("<I", body, i * stride * 4)[0] == symbol]
+        need(len(candidates) == 1)
+        keys[symbol] = candidates[0]
+
+    def exact_focus():
+        header, _ = reply("input-focus", 43)
+        need(struct.unpack_from("<I", header, 8)[0] == window)
+
+    # Assign focus only to the already authenticated mapped GCR window; the
+    # fixture runs without a window manager. GCR source initially focuses
+    # the new-password entry; the next visible entry is confirmation.
+    request(42, struct.pack("<II", window, 0))
+    exact_focus()
+    keymap, keymap_body = reply("input-no-held-keys", 44)
+    need(len(keymap_body) == 8 and not any(keymap[8:32] + keymap_body))
+    for group in (password, (0xff09,), password, (0xff0d,)):
+        exact_focus()
+        for symbol in group:
+            for event in (2, 3):  # core KeyPress/KeyRelease; standard XTEST only.
+                request(extension[9], struct.pack("<BB2xII20x", event, keys[symbol], 0, root), minor=2)
+    mark("input-submitted")
 
 
 if __name__ == "__main__":

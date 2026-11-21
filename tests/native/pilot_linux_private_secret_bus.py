@@ -165,7 +165,7 @@ def wait_owner(conn, name, process, image, snapshot):
     raise RuntimeError("fixture role owner unavailable")
 
 
-def show_then_cancel(bus, owner, offer, prompter_pid, windows, liveness):
+def show_then_cancel(bus, owner, offer, prompter_pid, windows, liveness, named=None):
     global phase
     need(offer == FIRST_PROMPT)
     def observed(step):
@@ -204,10 +204,22 @@ def show_then_cancel(bus, owner, offer, prompter_pid, windows, liveness):
             time.sleep(0.05)
         else:
             raise RuntimeError("authenticated dialog not observed")
-        phase = "public-dismiss-rpc"
-        bus.call_sync(owner, offer, PROMPT_IFACE, "Dismiss", GLib.Variant("()", ()),
-                      GLib.VariantType.new("()"), Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
-        phase = "prompt-cancel-result"
+        if named is None:
+            phase = "public-dismiss-rpc"
+            bus.call_sync(owner, offer, PROMPT_IFACE, "Dismiss", GLib.Variant("()", ()),
+                          GLib.VariantType.new("()"), Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+            phase = "prompt-cancel-result"
+        else:
+            liveness(0)
+            phase = "prompt-synthetic-entry"
+            # Independent fresh digits of adequate entropy; no system credentials.
+            password = bytearray(48 + secrets.randbelow(10) for _ in range(40))
+            try:
+                named["input"](prompter_pid, password)
+            finally:
+                for i in range(len(password)):
+                    password[i] = 0
+            phase = "prompt-created-result"
         for _ in range(60):
             context.iteration(False)
             if completed:
@@ -215,8 +227,9 @@ def show_then_cancel(bus, owner, offer, prompter_pid, windows, liveness):
             time.sleep(0.05)
         need(len(completed) == 1 and completed[0].get_type_string() == "(bv)")
         variant = completed[0].get_child_value(1).get_variant()
-        need(completed[0].get_child_value(0).get_boolean() and
-             variant.get_type_string() == "o" and variant.get_string() == "/")
+        dismissed = completed[0].get_child_value(0).get_boolean()
+        need(variant.get_type_string() == "o" and
+             (dismissed, variant.get_string()) == ((True, "/") if named is None else (False, named["COLLECTION"])))
         phase = "prompt-closed-screen"
         for _ in range(60):
             if not observed("closed-screen"):
@@ -239,10 +252,10 @@ def validate_collection_offer(reply):
     return prompt
 
 
-def verify_collection_offer(bus, unique_owner):
+def verify_collection_offer(bus, unique_owner, label=COLLECTION_LABEL):
     global phase
     phase = "collection-offer-rpc"
-    properties = {"org.freedesktop.Secret.Collection.Label": GLib.Variant("s", COLLECTION_LABEL)}
+    properties = {"org.freedesktop.Secret.Collection.Label": GLib.Variant("s", label)}
     try:
         reply = bus.call_sync(unique_owner, "/org/freedesktop/secrets", "org.freedesktop.Secret.Service",
                              "CreateCollection", GLib.Variant("(a{sv}s)", (properties, "")), None,
@@ -329,7 +342,7 @@ def session_rpc_failure(error):
     return "other-local-error"
 
 
-def verify_encrypted_negotiation(bus, unique_owner):
+def verify_encrypted_negotiation(bus, unique_owner, retain=False):
     global phase
     phase = "encrypted-session-input"
     private = 2 + secrets.randbelow(SUBGROUP - 2)
@@ -346,9 +359,48 @@ def verify_encrypted_negotiation(bus, unique_owner):
         raise
     peer = validate_session_reply(reply)
     phase = "encrypted-session-derived-range"
-    need(2 <= pow(peer, private, MODP) <= MODP - 2)
-    # Only negotiation is tested. No key is serialized, no secret is
-    # transferred, and disconnect cleans up this connection-bound session.
+    shared = pow(peer, private, MODP)
+    need(2 <= shared <= MODP - 2)
+    # The existing negotiation-only lane retains no DH material.
+    if retain:
+        return reply.get_child_value(1).get_string(), shared
+
+
+def scoped_write_policy(named):
+    # Only the already named fixture capability. No GetSecret, SearchItems,
+    # replacement, aliases, or any outside collection is enabled.
+    interface, path = "org.freedesktop.Secret.Collection", named["COLLECTION"]
+    return (
+        f'<allow send_destination="{SERVICE}" send_interface="{interface}" send_member="CreateItem" '
+        f'send_path="{path}" send_type="method_call" max_fds="0"/>\n'
+        f'<allow receive_sender="{FIXTURE_CLIENT}" receive_interface="{interface}" receive_member="CreateItem" '
+        f'receive_path="{path}" receive_type="method_call" max_fds="0"/>'
+    )
+
+
+def write_fixture_item(conn, owner, session, named, marker):
+    global phase
+    phase = "named-encrypt-item"
+    session_path, shared = session
+    iv, ciphertext = named["encrypted_fixture_secret"](shared, marker)
+    need(len(iv) == 16 and len(ciphertext) == 48 and marker not in ciphertext)
+    properties = {
+        "org.freedesktop.Secret.Item.Label": GLib.Variant("s", "AgentKeychain disposable item"),
+        "org.freedesktop.Secret.Item.Attributes": GLib.Variant("a{ss}", {"fixture": "akc-noble-named-write"}),
+    }
+    request = GLib.Variant("(a{sv}(oayays)b)", (properties, (session_path, iv, ciphertext,
+                                                          "application/octet-stream"), False))
+    phase = "named-write-item-rpc"
+    try:
+        reply = conn.call_sync(owner, named["COLLECTION"], "org.freedesktop.Secret.Collection",
+                              "CreateItem", request, GLib.VariantType.new("(oo)"),
+                              Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+    except GLib.Error as error:
+        phase += "-" + session_rpc_failure(error)
+        raise
+    phase = "named-write-item-result"
+    item, prompt = reply.unpack()
+    need(prompt == "/" and re.fullmatch(re.escape(named["COLLECTION"]) + r"/[A-Za-z0-9_]{1,64}", item))
 
 
 def need(condition):
@@ -477,7 +529,7 @@ def interrupted(_signum, _frame):
 
 
 def verify_private_provider(provider_path, staged_provider, library_dir, staged_libraries, encrypted=False,
-                            collection_offer=False, prompt=None):
+                            collection_offer=False, prompt=None, named=None):
     global phase
     need(sys.platform == "linux" and os.getuid() == os.geteuid() != 0)
     os.umask(0o077)
@@ -487,6 +539,8 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
     children = []
     diagnostics = []
     conn = None
+    held = None
+    final_file = None
     try:
         phase = "unix-capability"
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -512,6 +566,11 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
             if prompt:
                 need(collection_offer)
                 policy += prompt_cancel_policy()
+            if named is not None:
+                need(prompt and encrypted and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") == "named-write-v1")
+                phase = "named-empty-held-directory"
+                held = named["HeldKeyrings"](env["XDG_DATA_HOME"])
+                policy += scoped_write_policy(named)
             conf.write_text(BUS_CONFIG.format(endpoint, os.getuid(), policy), encoding="ascii")
             def start(argv, environment, role):
                 child = subprocess.Popen(argv, env=environment, cwd=root, stdin=subprocess.DEVNULL,
@@ -575,7 +634,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                 need(call(conn, "GetNameOwner", SERVICE, "(s)") == owner)
                 if encrypted:
                     phase = "encrypted-session"
-                    verify_encrypted_negotiation(conn, owner)
+                    encrypted_session = verify_encrypted_negotiation(conn, owner, retain=named is not None)
                     phase = "encrypted-session-capability-denial"
                     try:
                         conn.call_sync(owner, "/org/freedesktop/secrets", "org.freedesktop.DBus.Peer",
@@ -610,7 +669,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                         need(prompt_owner not in (owner, conn.get_unique_name()))
                         phase = "prompter-library-identity"
                         verify_mapped_libraries(prompter, staged_libraries)
-                    offer = verify_collection_offer(conn, owner)
+                    offer = verify_collection_offer(conn, owner, named["LABEL"] if named else COLLECTION_LABEL)
                     if prompt:
                         def prompt_liveness(attempt):
                             global phase
@@ -624,7 +683,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                                 phase = "prompt-gcr-owner-live"
                                 need(call(conn, "GetNameOwner", PROMPTER, "(s)") == prompt_owner)
 
-                        show_then_cancel(conn, owner, offer, prompter.pid, windows, prompt_liveness)
+                        show_then_cancel(conn, owner, offer, prompter.pid, windows, prompt_liveness, named)
                         owner_after = wait_owner(conn, PROMPTER, prompter, image, snapshot)
                         phase = "prompter-owner-changed"
                         need(owner_after == prompt_owner)
@@ -634,8 +693,23 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                     need(call(conn, "GetNameOwner", SERVICE, "(s)") == owner)
                     credentials = call(conn, "GetConnectionCredentials", owner, "(a{sv})")
                     need(credentials.get("UnixUserID") == os.getuid() and credentials.get("ProcessID") == provider.pid)
-                    phase = "collection-offer-no-fixture-files"
-                    require_no_fixture_keyring_files(env["XDG_DATA_HOME"])
+                    if named is None:
+                        phase = "collection-offer-no-fixture-files"
+                        require_no_fixture_keyring_files(env["XDG_DATA_HOME"])
+                    else:
+                        phase = "named-created-file-no-alias"
+                        before = held.read_exact()
+                        marker = secrets.token_bytes(32)
+                        write_fixture_item(conn, owner, encrypted_session, named, marker)
+                        phase = "named-written-file-no-alias"
+                        final_file = held.read_exact(marker)
+                        need(before[-1] != final_file[-1])
+                        phase = "named-write-provider-after"
+                        owned_image(provider, provider_path, staged_provider)
+                        owned_image(broker, BROKER)
+                        need(call(conn, "GetNameOwner", SERVICE, "(s)") == owner)
+                        credentials = call(conn, "GetConnectionCredentials", owner, "(a{sv})")
+                        need(credentials.get("UnixUserID") == os.getuid() and credentials.get("ProcessID") == provider.pid)
             except Exception:
                 # Cleanup below stops only our children; classify buffered output
                 # afterwards. Preserve the original phase and raise again.
@@ -657,6 +731,16 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                         for record in diagnostics:
                             for label in record.summary_after_exit():
                                 print("linux_private_prompt_child=" + label, file=sys.stderr)
-                    need(not cleanup_failed)
+                    try:
+                        need(not cleanup_failed)
+                        if final_file is not None and not prompt_failed:
+                            phase = "named-file-after-owned-shutdown"
+                            need(held.read_exact() == final_file)
+                    finally:
+                        if held is not None:
+                            held.close()
+                            held = None
     finally:
+        if held is not None:
+            held.close()
         signal.alarm(0)

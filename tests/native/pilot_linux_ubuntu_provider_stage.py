@@ -122,10 +122,11 @@ def run():
     need("ID=ubuntu" in os_release.splitlines() and "VERSION_CODENAME=noble" in os_release.splitlines())
     need(len(sys.argv) == 1 and os.environ.get("GITHUB_ACTIONS") == "true"
          and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("archive-only-v1", "private-peer-v1", "encrypted-session-v1", "collection-offer-v1", "private-display-v1", "prompt-cancel-v1"))
+         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("archive-only-v1", "private-peer-v1", "encrypted-session-v1", "collection-offer-v1", "private-display-v1", "prompt-cancel-v1", "named-write-v1"))
     mode = os.environ["AKC_UBUNTU_PROVIDER_STAGE"]
     display_smoke = mode == "private-display-v1"
-    prompt_cancel = mode == "prompt-cancel-v1"
+    named_write = mode == "named-write-v1"
+    prompt_cancel = mode == "prompt-cancel-v1" or named_write
     verify_peer = mode not in ("archive-only-v1", "private-display-v1")
     prompt_pins = tuple((name, "3.41.2-1build3", "gcr") for name in PROMPT_ARCHIVES)
     pins = prompt_pins if display_smoke else PINS + prompt_pins if prompt_cancel else PINS
@@ -274,11 +275,11 @@ APT::Get::AllowUnauthenticated "false";
         lane = runpy.run_path(str(Path(__file__).with_name("pilot_linux_private_secret_bus.py")))
         need(len(staged_libraries) == (3 if prompt_cancel else 2))
         candidate.chmod(0o500)
-        def verify_provider(prompt=None):
+        def verify_provider(prompt=None, named=None):
             global phase
             try:
                 lane["verify_private_provider"](candidate, provider, library_dir, staged_libraries,
-                                               encrypted=encrypted, collection_offer=collection_offer, prompt=prompt)
+                                               encrypted=encrypted, collection_offer=collection_offer, prompt=prompt, named=named)
             except Exception:
                 phase = "private-peer-" + lane["verify_private_provider"].__globals__["phase"]
                 raise ValueError("private provider peer denied") from None
@@ -288,13 +289,27 @@ APT::Get::AllowUnauthenticated "false";
             prompter_image.chmod(0o500)
             try:
                 with display["owned_private_display"](prompt=True) as (display_env, secret_display):
+                    named = None
+                    if named_write:
+                        phase = "named-write-tools"
+                        named = runpy.run_path(str(Path(__file__).with_name("pilot_linux_named_write.py")))
+                        # Check the trusted distro crypto runtime before creating any fixture collection.
+                        import cryptography.hazmat.primitives.ciphers  # noqa: F401
+
+                        def enter_password(pid, password):
+                            def mark_input(stage):
+                                lane["verify_private_provider"].__globals__["phase"] = "named-" + stage
+                            display["screen_windows"](secret_display, mark_input, input_scope=(pid, password))
+
+                        named["input"] = enter_password
                     verify_provider((prompter_image, prompter_stat, display_env,
-                                     lambda mark: display["screen_windows"](secret_display, mark)))
+                                     lambda mark: display["screen_windows"](secret_display, mark)), named=named)
             except Exception:
-                if not phase.startswith("private-peer-"):
+                if not phase.startswith("private-peer-") and phase != "named-write-tools":
                     phase = display["owned_private_display"].__wrapped__.__globals__["phase"]
                 raise ValueError("private prompt denied") from None
-            print("linux_private_gcr_prompt_visible_and_cancelled_not_storage")
+            print("linux_private_named_fixture_encrypted_write_verified_not_reopened" if named_write else
+                  "linux_private_gcr_prompt_visible_and_cancelled_not_storage")
             return
         verify_provider()
         if collection_offer:
