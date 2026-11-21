@@ -30,10 +30,10 @@ function basis(value:unknown):PilotActivationBasis {
  return Object.freeze({version:1,profileDigest:digestText(value.profileDigest),stageDigest:digestText(value.stageDigest),
   commitDigest:digestText(value.commitDigest),slotDigest:digestText(value.slotDigest)});
 }
-function exactCanonical<T>(raw:unknown,parse:(input:unknown)=>T):T {
+function exactCanonicalSlot(raw:unknown):ProtectedSlot {
  if(typeof raw!=='string'||!raw||Buffer.byteLength(raw,'utf8')>2048)throw denied();
  const input:unknown=JSON.parse(raw);
- const canonical=parse(input);
+ const canonical=slot(input);
  if(JSON.stringify(canonical)!==raw)throw denied();
  return canonical;
 }
@@ -74,10 +74,9 @@ export function planPilotActivationSlotSuccessor(expected:PilotActivationBasis,a
   const previous=digestText(expectedPreparedDigest);
   const prepared=canonicalPilotActivationPreparedSlot(expected,attemptDigest);
   if(sha(prepared)!==previous)throw denied();
-  exactCanonical(databaseCanonical,dbCommit);
   const database=canonicalPilotActivationDbReceipt(expected,attemptDigest);
-  if(databaseCanonical!==database)throw denied();
-  const observed=exactCanonical(protectedCanonical,slot);
+  if(databaseCanonical!==database)throw denied(); // Equality with fresh canonical known bytes rejects every other form.
+  const observed=exactCanonicalSlot(protectedCanonical);
   const databaseReceiptDigest=sha(database);
   const finalizedCanonical=JSON.stringify(slot({...slot(JSON.parse(prepared)),phase:'finalized',
    previousDigest:previous,databaseReceiptDigest}));

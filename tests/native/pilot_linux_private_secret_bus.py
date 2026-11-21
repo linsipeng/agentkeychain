@@ -242,19 +242,35 @@ def show_then_cancel(bus, owner, offer, prompter_pid, windows, liveness, named=N
                     for i in range(len(password)):
                         password[i] = 0
             phase = "prompt-unlocked-result" if unlock else "prompt-created-result"
-        for _ in range(60):
-            context.iteration(False)
+        result_phase = phase
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            for _ in range(8):
+                if time.monotonic() >= deadline or not context.iteration(False):
+                    break
             if completed:
                 break
-            time.sleep(0.05)
-        need(len(completed) == 1 and completed[0].get_type_string() == "(bv)")
+            wait = deadline - time.monotonic()
+            if wait > 0:
+                time.sleep(min(0.05, wait))
+        if not completed:
+            phase = result_phase + "-timeout-no-signal"
+            need(False)
+        phase = result_phase + "-duplicate-signal"
+        need(len(completed) == 1)
+        phase = result_phase + "-malformed-envelope"
+        need(completed[0].get_type_string() == "(bv)")
         variant = completed[0].get_child_value(1).get_variant()
         dismissed = completed[0].get_child_value(0).get_boolean()
+        phase = result_phase + ("-unexpected-acceptance" if named is None else "-dismissed")
+        need(dismissed == (named is None))
+        phase = result_phase + "-wrong-payload-type"
+        need(variant.get_type_string() == ("ao" if unlock else "o"))
+        phase = result_phase + "-wrong-exact-collection"
         if unlock:
-            need(not dismissed and variant.get_type_string() == "ao" and variant.unpack() == [named["COLLECTION"]])
+            need(variant.unpack() == [named["COLLECTION"]])
         else:
-            need(variant.get_type_string() == "o" and
-                 (dismissed, variant.get_string()) == ((True, "/") if named is None else (False, named["COLLECTION"])))
+            need(variant.get_string() == ("/" if named is None else named["COLLECTION"]))
         phase = "prompt-closed-screen"
         for _ in range(60):
             if not observed("closed-screen"):
