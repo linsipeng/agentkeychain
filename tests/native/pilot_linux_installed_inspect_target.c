@@ -63,7 +63,7 @@ static bool release(struct held_reader *h){
  return ok;
 }
 int main(int argc,char **argv,char **envp){
- (void)sql;(void)scalar;(void)close_checked;
+ (void)sql;(void)scalar;(void)close_checked;(void)wait_child;
  struct stat top,dir;
  if(argc!=1||!argv[0]||strcmp(argv[0],"agentkeychain-pilot-native-reader")||!envp||envp[0]||
     !expected_uid||getuid()!=expected_uid||geteuid()!=expected_uid||getppid()<=1||

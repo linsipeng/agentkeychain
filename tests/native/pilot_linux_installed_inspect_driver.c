@@ -164,6 +164,7 @@ static int read_one(struct fixture *f,const char *image_hash){
  return fwrite(reply,1,(size_t)answer,stdout)==(size_t)answer&&fflush(stdout)==0?0:93;
 }
 int main(int argc,char **argv){
+ (void)wait_child;
  CHECK(argc>=3&&getuid()!=0&&getuid()==geteuid()&&getgid()==getegid()&&
   fcntl(0,F_GETFD)>=0&&fcntl(1,F_GETFD)>=0&&fcntl(2,F_GETFD)>=0&&
   sqlite3_libversion_number()==3054001&&!strcmp(sqlite3_sourceid(),sqlite_source));
