@@ -245,13 +245,13 @@ def screen_windows(display, mark, input_scope=None):
             mark("input-pinned-window")
             need(len(resolved) == 1 and tuple(resolved.values()) == (expected_pid,))
             window = next(iter(resolved))
-            authenticate_named_dialog(reply, mark, window)
+            authenticate_named_dialog(reply, mark, window, allow_pinned_empty=True)
             enter_fixture_password(reply, request, mark, setup, root, window, password)
         mark("mapped" if resolved else "no-viewable-top-level" if count else "no-top-level")
         return set(resolved.values())
 
 
-def authenticate_named_dialog(reply, mark, window):
+def authenticate_named_dialog(reply, mark, window, *, allow_pinned_empty=False):
     # The window ID and owner were checked on this exact authenticated X11
     # connection. Resolve only the fixed EWMH title and its UTF-8 type with
     # InternAtom(only-if-exists); never create atoms or accept a caller name.
@@ -262,6 +262,22 @@ def authenticate_named_dialog(reply, mark, window):
         return struct.unpack_from("<I", header, 8)[0]
 
     expected = b"New Keyring Password"
+
+    def require_named_prompter_class():
+        # GTK 3 window init: instance=g_get_prgname(), class=GDK program
+        # fallback (same basename with first byte uppercased). GLib takes
+        # the basename of argv[0]; the pinned fixture directly launches the
+        # official basename with no --name/--class override. ICCCM's
+        # XA_WM_CLASS=67 is two NUL-terminated 8-bit XA_STRING fields.
+        expected_class = b"gcr-prompter\0Gcr-prompter\0"
+        header, body = reply("input-dialog-wm-class", 20, struct.pack("<IIIII", window, 67, 31, 0, 16))
+        typ, remaining, count = struct.unpack_from("<III", header, 8)
+        mark("input-dialog-wm-class-encoding")
+        need(typ == 31 and header[1] == 8)
+        mark("input-dialog-wm-class-length")
+        need(remaining == 0 and count == len(expected_class) and len(body) == ((count + 3) & ~3))
+        mark("input-dialog-wm-class-value")
+        need(body[:count] == expected_class)
 
     def title(kind, prop, expected_type):
         header, body = reply("input-dialog-title-" + kind, 20, struct.pack("<IIIII", window, prop, 0, 0, 16))
@@ -275,6 +291,12 @@ def authenticate_named_dialog(reply, mark, window):
         mark("input-dialog-title-" + kind + "-wire-length")
         need(0 <= count <= 64 and remaining == 0 and len(body) == ((count + 3) & ~3))
         value = body[:count]
+        if kind == "modern" and count == 0 and allow_pinned_empty:
+            # This branch is reached only after the named-write workflow
+            # observed an empty screen before its exact public Prompt call
+            # and the verified Xvfb returned a singleton mapped GCR PID.
+            require_named_prompter_class()
+            return True
         if value != expected:
             # Static diagnostics only; neither GTK's fallback nor a source
             # string used for an on-screen label grants input authority.
