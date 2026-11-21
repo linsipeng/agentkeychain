@@ -7,6 +7,7 @@ import {fileURLToPath} from 'node:url';
 import {build} from 'esbuild';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 import {unstable_splitSqlQuery} from 'wrangler';
+import {MAIN_BIND_GENESIS,mainGenesisBindingDeviceProof} from '../shared/genesis-main-binding.ts';
 import {verifyGenesisApproval} from '../shared/genesis-approval.ts';
 import {checkpoint as signCheckpoint,genesisRoot} from '../shared/checkpoints.ts';
 import {verifyWitness,WITNESS_DOMAIN} from '../shared/roster-witness.ts';
@@ -68,6 +69,10 @@ export async function createCompiledPilotBrowserFixture(fixtureFile){
     PILOT_GENESIS_APPROVAL_SIGNER:{name:'browser-genesis-signer',entrypoint:'Signer'},
     PILOT_CUSTODY_READINESS:{name:'browser-package-readiness-disabled',entrypoint:'PilotCustodyReadiness'}}},
   {...base,name:'browser-package-readiness-disabled',scriptPath:relative('dist/custody-trust-worker/pilot-continuation.js')},
+  {...base,name:'browser-genesis-bind-readback',scriptPath:relative('dist/custody-trust-worker/pilot-continuation.js'),
+   d1Databases:{CUSTODIAN:custodyDatabase},bindings:{PILOT_CUSTODY_GENESIS_BIND_MODE:'main-binding-v1',
+    PILOT_CUSTODY_GENESIS_BIND_EXPIRES_AT:String(expiresAt),PILOT_CUSTODY_GENESIS_BIND_PINS:JSON.stringify({
+     authority:genesis.pin,witness:witness.pin,checkpointKeys:policy.checkpointKeys,recoveryAuthorities:policy.recoveryAuthorities})}},
   {...base,name:custodyDatabase,scriptPath:relative('dist/compiled-browser/recovery-worker/index.js'),d1Databases:{CUSTODIAN:custodyDatabase},
    bindings:{GENESIS_ADMISSION_MODE:'independent-v1',GENESIS_APPROVAL_PIN:JSON.stringify(genesis.pin)},
    serviceBindings:{ROSTER_WITNESS_SIGNER:{name:'browser-witness-signer',entrypoint:'Signer'},
@@ -87,13 +92,19 @@ export async function createCompiledPilotBrowserFixture(fixtureFile){
     return 'browser-device-fixture';}}
    export default {fetch(){return new Response(null,{status:404});}};`},
   {...base,name:'browser-private-probe',serviceBindings:{ADMISSION:{name:custodyDatabase,entrypoint:'GenesisAdmission'},
-    HEAD:{name:custodyDatabase,entrypoint:'Custodian'},CHECKPOINT:checkpointService},
+    HEAD:{name:custodyDatabase,entrypoint:'Custodian'},CHECKPOINT:checkpointService,
+    BIND:{name:'browser-genesis-bind-readback',entrypoint:'PilotCustodyGenesisBindingReadback'},
+    OFF:{name:'browser-package-readiness-disabled',entrypoint:'PilotCustodyGenesisBindingReadback'}},
+
    script:`import {WorkerEntrypoint} from 'cloudflare:workers';
     export default class extends WorkerEntrypoint {
      async admit(v){return JSON.stringify(structuredClone(await this.env.ADMISSION.admit(v)));}
      async head(t,v){return JSON.stringify(structuredClone(await this.env.HEAD.witnessHead(t,v)));}
      async ingress(){return (await this.env.ADMISSION.fetch('https://custody.fixture.invalid/')).status;}
      async checkpoint(s){return this.env.CHECKPOINT.sign(s);}
+     async binding(v){return JSON.stringify(structuredClone(await this.env.BIND.read(v)));}
+     async bindingOff(v){await this.env.OFF.read(v);}
+     async bindingIngress(){return (await this.env.BIND.fetch('https://custody.fixture.invalid/')).status;}
     }`},
   signer('browser-genesis-signer',genesis,'genesis'),signer('browser-continuation-disabled',approval,'disabled'),
   signer('browser-witness-signer',witness,'witness'),signer('browser-checkpoint-signer',checkpoint,'checkpoint'),
@@ -139,6 +150,14 @@ export async function createCompiledPilotBrowserFixture(fixtureFile){
    assert.equal(await probe.ingress(),404);
    const cp=await signCheckpoint({key:async()=>checkpoint.pin,sign:s=>probe.checkpoint(s)},tenantId,vaultId,0,root,null,null);
    const input={proof,grant:oldGrantCanonical,roster,checkpoint:cp};
+   const attemptDigest=hash(JSON.stringify(['AgentKeychain-genesis-admission-attempt-v1',proof,oldGrantCanonical,roster,cp]));
+   const bindNonce=random(),requestedAt=Math.floor(Date.now()/1000),binding={version:1,domain:MAIN_BIND_GENESIS,
+    nonce:bindNonce,requestedAt,...input,
+    deviceSignature:device.sign(mainGenesisBindingDeviceProof(bindNonce,requestedAt,attemptDigest))};
+   const request=JSON.stringify(binding);
+   assert.equal(await probe.bindingIngress(),404);
+   await assert.rejects(async()=>await probe.bindingOff(request),/pilot_custody_unavailable/);
+   await assert.rejects(async()=>await probe.binding(request),/pilot_custody_unavailable/);
    const count=(store,table)=>store.prepare('SELECT count(*) n FROM '+table).first('n');
    assert.equal(await count(custody,'genesis_admissions'),0);
    assert.equal(await count(main,'signed_rosters'),0);
@@ -148,6 +167,11 @@ export async function createCompiledPilotBrowserFixture(fixtureFile){
    const admission=JSON.parse(await probe.admit(input));
    assert.deepEqual(JSON.parse(await probe.admit(input)),admission);
    assert.deepEqual(JSON.parse(await probe.head(tenantId,vaultId)),admission);
+   const readback=JSON.parse(await probe.binding(request));
+   assert.deepEqual(readback,{nonce:bindNonce,attemptDigest,receipt:admission,
+    validUntil:Math.min(expiresAt,requestedAt+30,JSON.parse(proof.canonical).expiresAt)});
+   assert.deepEqual(JSON.parse(await probe.binding(request)),readback);
+   await assert.rejects(async()=>await probe.binding(JSON.stringify({...binding,nonce:random()})),/pilot_custody_unavailable/);
    const rosterHash=await rosterDigest(roster),verified=await verifyWitness(admission,[witness.pin],
     {accountId,tenantId,vaultId,revision:1,digest:rosterHash},cp);
    assert.equal(verified.root,root);assert.equal(verified.sequence,0);assert.equal(verified.event,1);

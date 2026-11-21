@@ -2,11 +2,13 @@
 import {WorkerEntrypoint} from 'cloudflare:workers';
 import {base64,exactFields,type SignedManagedOperation} from '../../src/cloud/protocol.ts';
 import {digest} from '../shared/contracts.ts';
+import {readExactMainGenesisAdmission} from '../shared/genesis-main-binding.ts';
 import {proveContinuationAuthReadiness,proveFreshContinuationHead,provePostCommitContinuationHead,type ContinuationFreshHeadRequest} from '../shared/continuation-fresh-head.ts';
 import type {ContinuationAuthReadinessRequest} from '../shared/continuation-auth-readiness.ts';
 
 interface Env {CUSTODIAN?:D1Database;PILOT_CUSTODY_MODE?:string;PILOT_CUSTODY_EXPIRES_AT?:string;
- PILOT_CUSTODY_PINS?:string;PILOT_CUSTODY_WITNESS_PKCS8_B64?:string}
+ PILOT_CUSTODY_PINS?:string;PILOT_CUSTODY_WITNESS_PKCS8_B64?:string;
+ PILOT_CUSTODY_GENESIS_BIND_MODE?:string;PILOT_CUSTODY_GENESIS_BIND_EXPIRES_AT?:string;PILOT_CUSTODY_GENESIS_BIND_PINS?:string}
 const denied=()=>new Error('pilot_custody_unavailable');
 const now=()=>Math.floor(Date.now()/1000);
 async function pin(v:unknown){
@@ -55,6 +57,31 @@ export class PilotCustodyPost extends Private{
  async post(input:ContinuationFreshHeadRequest,prior:SignedManagedOperation,main:SignedManagedOperation){
   try{const {db,policy,signer,live}=await configure(this.env),result=await provePostCommitContinuationHead(db,input,prior,main,policy,signer);
    live();return result;}catch{throw denied();}
+ }
+}
+/** Configure only as a private service binding of the exact isolated Pilot
+ * Main. This entrypoint has no public route or signer; the caller cannot
+ * supply pins or replace proof of original-device possession. */
+export class PilotCustodyGenesisBindingReadback extends Private{
+ async read(raw:unknown){
+  try{
+   const {CUSTODIAN:database,PILOT_CUSTODY_GENESIS_BIND_MODE:mode,
+    PILOT_CUSTODY_GENESIS_BIND_EXPIRES_AT:end,PILOT_CUSTODY_GENESIS_BIND_PINS:encoded}=this.env;
+   if(mode!=='main-binding-v1'||!database||!end||!/^\d{10}$/.test(end)||!encoded||encoded.length>8192)throw denied();
+   const expiresAt=Number(end),start=now();
+   if(expiresAt<=start||expiresAt-start>604800)throw denied();
+   const fields:unknown=JSON.parse(encoded);
+   exactFields(fields,['authority','witness','checkpointKeys','recoveryAuthorities']);
+   const pins=(v:unknown)=>{if(!Array.isArray(v)||v.length>16)throw denied();return Promise.all(v.map(pin));};
+   const [authority,witness,checkpointKeys,recoveryAuthorities]=await Promise.all(
+    [pin(fields.authority),pin(fields.witness),pins(fields.checkpointKeys),pins(fields.recoveryAuthorities)]);
+   const all=[authority,witness,...checkpointKeys,...recoveryAuthorities];
+   if(!checkpointKeys.length||new Set(all.map(key=>key.publicKey)).size!==all.length||now()>=expiresAt)throw denied();
+   const result=await readExactMainGenesisAdmission(database,raw,{authority,witness,checkpointKeys,recoveryAuthorities});
+   const validUntil=Math.min(expiresAt,result.validUntil);
+   if(now()>=validUntil)throw denied();
+   return {...result,validUntil};
+  }catch{throw denied();}
  }
 }
 export default {fetch(){return new Response(null,{status:404});}};
