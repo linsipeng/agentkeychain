@@ -1,7 +1,9 @@
+import {URL} from 'node:url';
 import {validateReleaseOrigins} from '../../managed-cloud/shared/release-origins.mjs';
 import sodium from 'libsodium-wrappers-sumo';
 import { base64, exactFields, identifier, type SignedManagedOperation } from './protocol.ts';
 import type { CheckpointKey } from '../../managed-cloud/shared/checkpoints.ts';
+import {digest} from '../../managed-cloud/shared/contracts.ts';
 import { releaseArtifact } from './release.generated.ts';
 await sodium.ready;
 export interface ReleaseTrustManifest {
@@ -16,7 +18,7 @@ export interface ReleaseTrustManifest {
   recoveryAuthorities?: readonly CheckpointKey[];
   recoveryServices?: Readonly<{api:CheckpointKey;custodian:CheckpointKey}>;
 }
-const verified = new WeakSet<object>();
+const verified = new WeakMap<object,{canonical:string;root:Uint8Array}>();
 export type ManagedEndpointPolicy = Readonly<ReleaseTrustManifest>;
 export function canonicalManifest(input: unknown): string {
   if(!input||typeof input!=='object')throw new Error('invalid_release_manifest');
@@ -55,10 +57,52 @@ export function verifyReleaseManifest(signed: SignedManagedOperation, root: Uint
   const value = JSON.parse(signed.canonical) as ReleaseTrustManifest;
   if (canonicalManifest(value) !== signed.canonical || !sodium.crypto_sign_verify_detached(Buffer.from(signed.signature,'base64'),signed.canonical,root)) throw new Error('invalid_release_signature');
   const result = Object.freeze({...value,...(value.witnessKeys?{witnessKeys:Object.freeze(value.witnessKeys.map(p=>Object.freeze({...p})))}:{}),...(value.recoveryServices?{recoveryServices:Object.freeze({api:Object.freeze({...value.recoveryServices.api}),custodian:Object.freeze({...value.recoveryServices.custodian})})}:{}),...(value.recoveryAuthorities?{recoveryAuthorities:Object.freeze(value.recoveryAuthorities.map(p=>Object.freeze({...p})))}:{}),checkpointKeys:Object.freeze(value.checkpointKeys.map(p=>Object.freeze({...p})))});
-  verified.add(result); return result;
+  verified.set(result,{canonical:signed.canonical,root:new Uint8Array(root)}); return result;
 }
 export function assertVerifiedPolicy(policy: ManagedEndpointPolicy): void {
   if (!verified.has(policy)) throw new Error('unverified_release_manifest');
+}
+// Separate v1 appendix: existing signed release artifacts and their format are
+// unchanged. The caller cannot opt into a different root or inject a default pin.
+async function verifyContinuationPin(policy:ManagedEndpointPolicy,appendix:SignedManagedOperation,domain:string):Promise<Readonly<CheckpointKey>>{
+  assertVerifiedPolicy(policy);
+  const provenance=verified.get(policy)!;
+  exactFields(appendix,['canonical','signature']);
+  if(typeof appendix.canonical!=='string'||appendix.canonical.length>1024||!policy.witnessKeys?.length)throw new Error('cloud_continuation_not_provisioned');
+  base64(appendix.signature,64,64);
+  const value:unknown=JSON.parse(appendix.canonical);
+  exactFields(value,['version','domain','manifestDigest','keyId','publicKey']);
+  identifier(value.keyId);base64(value.publicKey,32,32);
+  const expected={version:1,domain,manifestDigest:await digest(provenance.canonical),keyId:value.keyId,publicKey:value.publicKey};
+  const existing=[...policy.checkpointKeys,...policy.witnessKeys,...(policy.recoveryAuthorities??[]),...(policy.recoveryServices?[policy.recoveryServices.api,policy.recoveryServices.custodian]:[])];
+  const rootKey=Buffer.from(provenance.root).toString('base64');
+  if(appendix.canonical!==JSON.stringify(expected)||rootKey===value.publicKey||existing.some(p=>p.keyId===value.keyId||p.publicKey===value.publicKey)||
+     !sodium.crypto_sign_verify_detached(Buffer.from(appendix.signature,'base64'),appendix.canonical,provenance.root))
+    throw new Error('invalid_continuation_authority_pin');
+  return Object.freeze({keyId:value.keyId,publicKey:value.publicKey});
+}
+export const verifyContinuationAuthority=(policy:ManagedEndpointPolicy,appendix:SignedManagedOperation)=>
+  verifyContinuationPin(policy,appendix,'AgentKeychain-continuation-release-pin-v1');
+export const verifyContinuationCommitAuthority=(policy:ManagedEndpointPolicy,appendix:SignedManagedOperation)=>
+  verifyContinuationPin(policy,appendix,'AgentKeychain-continuation-main-commit-release-pin-v1');
+export const verifyContinuationRolloutAuthority=(policy:ManagedEndpointPolicy,appendix:SignedManagedOperation)=>
+  verifyContinuationPin(policy,appendix,'AgentKeychain-continuation-rollout-release-pin-v1');
+/** Separate signed pilot appendix; existing release format is unchanged. */
+export async function verifyContinuationHandoffOrigin(policy:ManagedEndpointPolicy,appendix:SignedManagedOperation):Promise<string>{
+  assertVerifiedPolicy(policy);
+  const provenance=verified.get(policy)!;
+  exactFields(appendix,['canonical','signature']);
+  if(typeof appendix.canonical!=='string'||appendix.canonical.length>1024||!policy.witnessKeys?.length)throw new Error('cloud_continuation_not_provisioned');
+  base64(appendix.signature,64,64);
+  const value:unknown=JSON.parse(appendix.canonical);
+  exactFields(value,['version','domain','manifestDigest','authOrigin']);
+  if(typeof value.authOrigin!=='string')throw new Error('invalid_continuation_auth_origin');
+  const auth=new URL(value.authOrigin);
+  const expected={version:1,domain:'AgentKeychain-continuation-auth-origin-pilot-v1',manifestDigest:await digest(provenance.canonical),authOrigin:auth.origin};
+  if(auth.protocol!=='https:'||auth.origin!==value.authOrigin||auth.hostname===new URL(policy.apiOrigin).hostname||auth.hostname===new URL(policy.webOrigin).hostname||
+     appendix.canonical!==JSON.stringify(expected)||!sodium.crypto_sign_verify_detached(Buffer.from(appendix.signature,'base64'),appendix.canonical,provenance.root))
+    throw new Error('invalid_continuation_auth_origin');
+  return auth.origin;
 }
 export function productionPolicy(): ManagedEndpointPolicy {
   const artifact = releaseArtifact();

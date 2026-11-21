@@ -2,7 +2,7 @@ import {SendCode} from './SendCode';
 import { createContext, useContext, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, NavLink, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, ApiError, passkey, stepUp, supported } from './api';
+import { api, ApiError, passkey, PasskeyIncompleteError, stepUp, supported } from './api';
 import { en, zh, type Key } from './i18n';
 const Risk = createContext<{
     failed: boolean;
@@ -102,26 +102,41 @@ function Action({ reference, title, warning, onDone, requiresPasskey = true }: {
     onDone?: () => void;
     requiresPasskey?: boolean;
 }) {
-    const t = useContext(Copy), cache = useQueryClient(), [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(false);
-    useEffect(() => { setError(false); setOpen(false); }, [reference]);
-    async function submit() { if (!reference)
-        return; setBusy(true); setError(false); try {
-        if (requiresPasskey)
-            await stepUp(reference);
-        await api('web/execute', { ref: reference, confirmed: true });
-        await cache.invalidateQueries();
-        setOpen(false);
-        onDone?.();
+    const t = useContext(Copy), cache = useQueryClient(), [openedRef, setOpenedRef] = useState<string | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState<Key | null>(null);
+    const stale = openedRef !== reference;
+    async function submit() {
+        if (!openedRef || stale || busy || error)
+            return;
+        let executing = false;
+        setBusy(true);
+        try {
+            if (requiresPasskey)
+                await stepUp(openedRef);
+            executing = true;
+            await api('web/execute', { ref: openedRef, confirmed: true });
+            await cache.invalidateQueries();
+            setOpenedRef(null);
+            onDone?.();
+        }
+        catch (cause) {
+            if (cause instanceof PasskeyIncompleteError || (cause instanceof DOMException && ['NotAllowedError', 'AbortError'].includes(cause.name)))
+                setError('actionPasskeyIncomplete');
+            else if (cause instanceof ApiError && [401, 404, 409, 410].includes(cause.status))
+                setError('changed');
+            else
+                setError(executing ? 'actionOutcomeUnknown' : 'actionUnavailable');
+        }
+        finally {
+            setBusy(false);
+        }
     }
-    catch {
-        setError(true);
-        await cache.invalidateQueries();
-    }
-    finally {
-        setBusy(false);
-    } }
-    return <><button disabled={!reference} className={title === 'allow' ? 'primary' : ''} onClick={() => { setError(false); setOpen(true); }}>{t(title)}</button>{open && <Dialog title={title} onClose={() => { if (!busy)
-        setOpen(false); }}><p>{t(warning)}</p>{error && <Message error>{t('changed')}</Message>}<button disabled={busy || error} onClick={() => void submit()}>{t(busy ? 'loading' : 'confirm')}</button></Dialog>}</>;
+    return <><button disabled={!reference} className={title === 'allow' ? 'primary' : ''} onClick={() => { setError(null); setOpenedRef(reference ?? null); }}>{t(title)}</button>{openedRef && <Dialog title={title} onClose={() => {
+        if (!busy) {
+            setOpenedRef(null);
+            if (error && error !== 'actionPasskeyIncomplete')
+                void cache.invalidateQueries();
+        }
+    }}><p>{t(warning)}</p>{(error || (stale && !busy)) && <Message error>{t(error ?? 'changed')}</Message>}<button disabled={busy || stale || !!error} onClick={() => void submit()}>{t(busy ? 'loading' : 'confirm')}</button></Dialog>}</>;
 }
 function Pages({ next, page, setPage }: {
     next?: string | null;
@@ -146,12 +161,20 @@ function VerifyBanner({ query, showVerified = false }: { query?: ReturnType<type
     return showVerified && state === 'verified' ? <Message>{t('verified')}</Message> : null;
 }
 const needsAttention = (d: Item) => !!d.active && ['stale', 'waiting', 'paused', 'unavailable'].includes(d.status ?? 'unavailable');
+const isPairingCode = (code: unknown): code is string => typeof code === 'string' && /^(?:[A-Za-z0-9_-]{12}|[A-Za-z0-9_-]{43})$/.test(code);
+function pairingReturn(pathname: string, search: string) {
+    if (pathname !== '/app/devices/add')
+        return undefined;
+    const codes = new URLSearchParams(search).getAll('code');
+    return codes.length === 1 && isPairingCode(codes[0]) ? codes[0] : undefined;
+}
 function Shell() {
-    const t = useContext(Copy), navigate = useNavigate(), cache = useQueryClient(), risk = useContext(Risk), [more, setMore] = useState(false), [error, setError] = useState(false);
+    const t = useContext(Copy), navigate = useNavigate(), location = useLocation(), cache = useQueryClient(), risk = useContext(Risk), [more, setMore] = useState(false), [error, setError] = useState(false);
     const session = useQuery({ queryKey: ['session'], queryFn: () => api<{
             authenticated: boolean;
         }>('session') });
-    useEffect(() => { const expired = () => { cache.clear(); risk.setFailed(false); navigate('/sign-in', { replace: true }); }; window.addEventListener('session-expired', expired); return () => window.removeEventListener('session-expired', expired); }, [navigate, cache, risk.setFailed]);
+    const pairingCode = pairingReturn(location.pathname, location.search);
+    useEffect(() => { const expired = () => { cache.clear(); risk.setFailed(false); navigate('/sign-in', { replace: true, state: { signInRequired: true, pairingCode } }); }; window.addEventListener('session-expired', expired); return () => window.removeEventListener('session-expired', expired); }, [navigate, cache, risk.setFailed, pairingCode]);
     async function logout() { try {
         await api('logout', {});
         cache.clear();
@@ -163,8 +186,10 @@ function Shell() {
     } }
     if (session.isPending)
         return <Message>{t('loading')}</Message>;
+    if (session.isError && !(session.error instanceof ApiError && session.error.status === 401))
+        return <><Message error>{t('error')}</Message><button onClick={() => void session.refetch()}>{t('retry')}</button></>;
     if (session.isError || !session.data?.authenticated)
-        return <Navigate to="/sign-in" replace/>;
+        return <Navigate to="/sign-in" replace state={{signInRequired:session.isError,pairingCode}}/>;
     const links = (keys: Key[]) => keys.map(k => <NavLink key={k} end={k === 'home'} onClick={() => setMore(false)} to={k === 'home' ? '/app' : '/app/' + k}>{t(k)}</NavLink>);
     return <div className="shell"><aside className="sidebar"><nav aria-label={t('more')}>{links(['home', 'requests', 'devices', 'activity', 'account', 'help'])}<button onClick={() => void logout()}>{t('signOut')}</button></nav><p>{t('noSecrets')}</p></aside><div className="content">{error && <Message error>{t('error')}</Message>}<Outlet /></div><nav className="mobile-nav" aria-label={t('home')}>{links(['home', 'requests', 'devices'])}<button aria-expanded={more} onClick={() => setMore(true)}>{t('more')}</button></nav>{more && <Dialog title="more" onClose={() => setMore(false)}><nav className="sheet-nav">{links(['activity', 'account', 'help'])}<button onClick={() => void logout()}>{t('signOut')}</button></nav></Dialog>}</div>;
 }
@@ -198,7 +223,7 @@ function Public({ title, children }: {
     title: Key;
     children: ReactNode;
 }) { const t = useContext(Copy); return <div className="public"><p className="eyebrow">AgentKeychain</p><h1>{t(title)}</h1>{children}</div>; }
-function SignIn() { const t = useContext(Copy), [email, setEmail] = useState(''), [error, setError] = useState(false), [busy, setBusy] = useState(false), nav = useNavigate(), cache = useQueryClient(); async function submit(e: FormEvent) { e.preventDefault(); if (!supported()) {
+function SignIn() { const t = useContext(Copy), location = useLocation(), [email, setEmail] = useState(''), [error, setError] = useState(false), [busy, setBusy] = useState(false), nav = useNavigate(), cache = useQueryClient(); async function submit(e: FormEvent) { e.preventDefault(); if (!supported()) {
     nav('/unsupported-browser');
     return;
 } setBusy(true); setError(false); try {
@@ -209,14 +234,15 @@ function SignIn() { const t = useContext(Copy), [email, setEmail] = useState('')
     }>('authentication/options', { email });
     await api('authentication/verify', { challengeId: o.challengeId, response: await passkey(o.options) });
     cache.clear();
-    nav('/app');
+    const code: unknown = location.state?.pairingCode;
+    nav(isPairingCode(code) ? '/app/devices/add?code=' + encodeURIComponent(code) : '/app', {replace:true});
 }
 catch {
     setError(true);
 }
 finally {
     setBusy(false);
-} } return <Public title="signIn"><p>{t('promise')}</p><form onSubmit={submit}><label>{t('email')}<input type="email" autoComplete="username webauthn" required value={email} onChange={e => setEmail(e.target.value)} maxLength={254}/></label><button className="primary" disabled={busy}>{t(busy ? 'loading' : 'signIn')}</button></form>{error && <Message error>{t('authError')}</Message>}<p>{t('another')}</p><Link to="/recovery">{t('recovery')}</Link><p>{t('invitation')}</p></Public>; }
+} } return <Public title="signIn">{location.state?.signInRequired === true && <Message error>{t('actionSignIn')}</Message>}<p>{t('promise')}</p><form onSubmit={submit}><label>{t('email')}<input type="email" autoComplete="username webauthn" required value={email} onChange={e => setEmail(e.target.value)} maxLength={254}/></label><button className="primary" disabled={busy}>{t(busy ? 'loading' : 'signIn')}</button></form>{error && <Message error>{t('authError')}</Message>}<p>{t('another')}</p><Link to="/recovery">{t('recovery')}</Link><p>{t('invitation')}</p></Public>; }
 function CopyLink() { const t = useContext(Copy), location = useLocation(), [message, setMessage] = useState<Key | null>(null); return <><button onClick={async () => { try {
     await navigator.clipboard.writeText(window.location.origin + location.pathname + location.search + location.hash);
     setMessage('copied');

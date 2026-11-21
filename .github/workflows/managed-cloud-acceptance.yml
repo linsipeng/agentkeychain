@@ -1,0 +1,71 @@
+name: Managed Cloud acceptance
+
+on:
+  pull_request:
+    branches: [handoff/managed-cloud-ai-20261121]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.5'
+      - run: bun install --frozen-lockfile
+      - run: npm ci --ignore-scripts --prefix managed-cloud
+      - name: Source checks
+        run: |
+          bun run lint
+          bun run typecheck
+          npm run typecheck --prefix managed-cloud
+          npm run typecheck --prefix managed-cloud/web
+      - name: Verify native-client and service behavior with synthetic data
+        shell: bash
+        run: |
+          set -euo pipefail
+          isolated="$(mktemp -d "$RUNNER_TEMP/akc-local.XXXXXXXX")"
+          export HOME="$isolated" AGENTKEYCHAIN_HOME="$isolated/vault"
+          export XDG_CONFIG_HOME="$isolated/config" XDG_DATA_HOME="$isolated/data"
+          export AKC_KEYCHAIN_TEST_MODE=1
+          unset AKC_PASSWORD AKC_KEYCHAIN_SECURITY_BIN AKC_KEYCHAIN_SECRET_TOOL_BIN AKC_KEYCHAIN_TEST_STUB_ROOT
+          bun test --timeout 30000
+          bun run build
+          ./bin/agentkeychain-bin --version
+          npm test --prefix managed-cloud
+          npm test --prefix managed-cloud/web
+          npm run test:bundle --prefix managed-cloud
+          npm run test:support-bundle --prefix managed-cloud
+          node --test --experimental-transform-types managed-cloud/tests/continuation-preview.test.mjs
+          node --experimental-transform-types --test managed-cloud/tests/continuation-pilot-review.test.mjs
+          node --experimental-transform-types managed-cloud/tests/continuation-https-rehearsal.mjs
+          node --experimental-transform-types tests/native/pilot_broker_pipe_rehearsal.mjs
+          node managed-cloud/build-continuation-pilot.mjs
+          node --test managed-cloud/tests/continuation-pilot-bundle.test.mjs
+          npm run test:recovery-resources --prefix managed-cloud
+          npm run test:recovery-process --prefix managed-cloud
+
+  isolated-browser-https:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts --prefix managed-cloud
+      - name: Run synthetic HTTPS with the sandboxed browser
+        env:
+          CHROMIUM: google-chrome
+        run: |
+          command -v "$CHROMIUM"
+          command -v certutil
+          node --experimental-transform-types managed-cloud/tests/continuation-https-rehearsal.mjs --browser

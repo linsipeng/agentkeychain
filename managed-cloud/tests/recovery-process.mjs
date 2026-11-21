@@ -50,6 +50,7 @@ Object.assign(api.serviceBindings,{
  RECOVERY_RELEASE_SIGNER:{name:'agentkeychain-api-recovery',entrypoint:'RecoveryReleaseSigner'},RECOVERY_ACCOUNT_ATTESTER:{name:'agentkeychain-api-recovery',entrypoint:'RecoveryTestService'}
 });
 Object.assign(recovery.serviceBindings,{
+ GENESIS_AUTH:{name:'agentkeychain-api-recovery',entrypoint:'RosterGenesisAuthority'},
  RECOVERY_AUTH:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryAuthority'},RECOVERY_KEYS:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryKeys'},RECOVERY_RELEASE_SIGNER:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryReleaseSigner'},
  ROSTER_WITNESS_SIGNER:{name:'agentkeychain-custody-recovery',entrypoint:'RosterWitnessSigner'},RECOVERY_TRUST_SIGNER:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryTrustSigner'},RECOVERY_TRUST_POLICY:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryTrustSigner'}
 });
@@ -100,7 +101,7 @@ try {
     let cookies, csrf;
     const remember = r => {
         cookies = r.headers.getSetCookie().map(c => c.split(';')[0]).join('; ');
-        csrf = /__Host-akc_csrf=([^;]+)/.exec(cookies)[1];
+        csrf = /__Host-akc_(?:boot_|recovery_)?csrf=([^;]+)/.exec(cookies)[1];
     };
     const bootstrap = async () => { const r = await worker.fetch(origin + '/v1/auth/bootstrap'); assert.equal(r.status, 200); remember(r); };
     const post = (route, body) => worker.fetch(origin + '/v1/auth/' + route, { method: 'POST', headers: { origin, cookie: cookies, 'x-csrf-token': csrf, 'content-type': 'application/json' }, body: JSON.stringify(body) });

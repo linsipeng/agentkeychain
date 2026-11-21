@@ -5,15 +5,18 @@ import {CloudStore} from '../src/cloud/persistence.ts';
 import {createCloudKeys} from '../src/cloud/crypto.ts';
 import {requestExport,acceptExport} from '../src/cloud/export.ts';
 test('export binds encrypted snapshot and output; no local delivery before acceptance, reuse or changed content',async()=>{
+ const {mkdtempSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path');
+ const home=mkdtempSync(join(tmpdir(),'akc-export-approval-')),path=join(home,'export-test'),other=join(home,'other');
  const db=new Database(':memory:');migrate(db);const keys=await createCloudKeys(),store=new CloudStore(db,keys.csk);let approved=false,calls=0;
  const runtime={store,keys,enrollment:{accountId:'a',tenantId:'t',vaultId:'v',deviceId:'d'},http:{async call(path:string){calls++;if(path.endsWith('consume')&&!approved)throw new Error('approval_required');return {accepted:true};}}};
- const id=await requestExport(runtime,'/private/tmp/export-test');expect(id.length).toBeGreaterThan(0);
- await expect(acceptExport(runtime,'/private/tmp/export-test')).rejects.toThrow('approval_required');
- approved=true;const permit=await acceptExport(runtime,'/private/tmp/export-test');expect(permit.requestId).toBe(id);
- await expect(acceptExport(runtime,'/private/tmp/other')).rejects.toThrow('approval_required');
- db.run("INSERT INTO secrets(name,ciphertext,nonce,scopes,created_at,updated_at,version) VALUES('changed',X'00',X'00','[]',1,1,1)");
- await expect(acceptExport(runtime,'/private/tmp/export-test')).rejects.toThrow('cloud_export_content_changed');expect(calls).toBe(3);
- db.close();
+ try{
+  const id=await requestExport(runtime,path);expect(id.length).toBeGreaterThan(0);
+  await expect(acceptExport(runtime,path)).rejects.toThrow('approval_required');
+  approved=true;const permit=await acceptExport(runtime,path);expect(permit.requestId).toBe(id);
+  await expect(acceptExport(runtime,other)).rejects.toThrow('approval_required');
+  db.run("INSERT INTO secrets(name,ciphertext,nonce,scopes,created_at,updated_at,version) VALUES('changed',X'00',X'00','[]',1,1,1)");
+  await expect(acceptExport(runtime,path)).rejects.toThrow('cloud_export_content_changed');expect(calls).toBe(3);
+ }finally{db.close();rmSync(home,{recursive:true,force:true});}
 });
 test('concurrent export permits produce one immutable delivery and leave no plaintext',async()=>{
  const {mkdtempSync,readFileSync,rmSync}=await import('node:fs'),{tmpdir}=await import('node:os'),{join}=await import('node:path');

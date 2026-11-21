@@ -48,8 +48,11 @@ export function authorityEntrypoint(party:Party){return class extends Private{
   await this.env.TRUST_DB.prepare('INSERT INTO trust_authorizations VALUES(?,?,unixepoch()+60) ON CONFLICT(digest) DO UPDATE SET evidence=excluded.evidence,expires_at=excluded.expires_at').bind(await digest(c),JSON.stringify(e)).run();return true;
  });}
  async rosterRevocation(c:string){return safe(async()=>{await rings(this.env,party);parseRecoveryRevocation(c);return !!await this.env.TRUST_DB.prepare('SELECT 1 FROM trust_revocations WHERE digest=? AND expires_at>unixepoch()').bind(await digest(c)).first();});}
- async rosterGenesis(s:SignedManagedOperation){return safe(async()=>{await rings(this.env,party);const r=await verifyRoster(s,null),key=await registry(this.env,party).device(r.accountId,r.tenantId,r.vaultId,r.issuer.id);return r.issuer.kind==='device'&&r.active.find(d=>d.deviceId===r.issuer.id)?.signingKey===key;});}
 };}
+export class RosterGenesisAuthorityBase extends Private {
+ // This narrows RPC capability, not the trust root: the active enrollment still comes from API Main.
+ async rosterGenesis(s:SignedManagedOperation){return safe(async()=>{await rings(this.env,'api');const r=await verifyRoster(s,null),key=await registry(this.env,'api').device(r.accountId,r.tenantId,r.vaultId,r.issuer.id);return r.issuer.kind==='device'&&r.active.find(d=>d.deviceId===r.issuer.id)?.signingKey===key;});}
+}
 export function keysEntrypoint(party:Party){return class extends Private{
  async key(){return safe(async()=>{const r=(await rings(this.env,party)).wrap!;return {keyId:r.active.keyId,publicKey:r.active.publicKey};});}
  async rewrap(id:string,box:SealedShare,source:string,target:string,context:string){return safe(async()=>{

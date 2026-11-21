@@ -25,6 +25,11 @@
       "entrypoint": "RecoveryAuthority"
     },
     {
+      "binding": "GENESIS_AUTH",
+      "service": "agentkeychain-cloud-api-trust",
+      "entrypoint": "RosterGenesisAuthority"
+    },
+    {
       "binding": "RECOVERY_KEYS",
       "service": "agentkeychain-cloud-custody-trust",
       "entrypoint": "RecoveryKeys"

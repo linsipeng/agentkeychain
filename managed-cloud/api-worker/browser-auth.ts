@@ -56,8 +56,10 @@ function exact(body: Record<string, unknown>, fields: string[]) {
     if (Object.keys(body).sort().join(',') !== fields.sort().join(','))
         throw unauthorized();
 }
-function cookie(request: Request, name: string) {
+function cookie(request: Request, name: string, optional = false) {
     const matches = (request.headers.get('cookie') ?? '').split(';').map(v => v.trim()).filter(v => v.startsWith(name + '='));
+    if (optional && matches.length === 0)
+        return '';
     if (matches.length !== 1)
         throw unauthorized();
     const value = matches[0]!.slice(name.length + 1);
@@ -65,11 +67,18 @@ function cookie(request: Request, name: string) {
         throw unauthorized();
     return value;
 }
-function response(body: unknown, session?: string, csrf?: string, maxAge = 43200) {
+const cookieNames = {
+    auth: ['__Host-akc_session', '__Host-akc_csrf'],
+    bootstrap: ['__Host-akc_boot_session', '__Host-akc_boot_csrf'],
+    recovery: ['__Host-akc_recovery_session', '__Host-akc_recovery_csrf'],
+} as const;
+const bootstrapRoutes = new Set(['email/request', 'invitation/detail', 'invitation/verify', 'registration/options', 'registration/verify', 'authentication/options', 'authentication/verify', 'recovery/verify']);
+const restrictedRoutes = new Set(['recovery/start', 'recovery/status', 'recovery/cancel']);
+function response(body: unknown, session?: string, csrf?: string, maxAge = 43200, scope: keyof typeof cookieNames = 'auth') {
     const headers = new Headers({ 'cache-control': 'no-store', 'pragma': 'no-cache' });
     if (session !== undefined && csrf !== undefined) {
-        headers.append('set-cookie', `__Host-akc_session=${session}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}`);
-        headers.append('set-cookie', `__Host-akc_csrf=${csrf}; Secure; SameSite=Strict; Path=/; Max-Age=${maxAge}`);
+        headers.append('set-cookie', `${cookieNames[scope][0]}=${session}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}`);
+        headers.append('set-cookie', `${cookieNames[scope][1]}=${csrf}; Secure; SameSite=Strict; Path=/; Max-Age=${maxAge}`);
     }
     return Response.json(body, { headers });
 }
@@ -87,28 +96,34 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
             const url = new URL(request.url), route = url.pathname.replace('/v1/auth/', '');
             if (url.search || url.origin !== config.origin)
                 throw unauthorized();
-            const routes = ['email/request', 'web/query', 'web/pairing', 'web/execute', 'web/options', 'web/verify', 'bootstrap', 'session', 'invitation/detail', 'invitation/verify', 'registration/options', 'registration/verify', 'authentication/options', 'authentication/verify', 'step-up/options', 'step-up/verify', 'logout', 'session/refresh', 'devices/pending', 'devices/approve', 'devices/deny', 'devices/list', 'devices/revoke', 'devices/verification', 'approvals/list', 'approvals/pending', 'approvals/recent', 'approvals/detail', 'approvals/approve', 'approvals/deny', 'approvals/cancel', 'activity/list', 'activity/detail', 'recovery/verify', 'recovery/status', 'recovery/start', 'recovery/cancel'];
+            const routes = ['email/request', 'web/query', 'web/pairing', 'web/execute', 'web/options', 'web/verify', 'bootstrap', 'bootstrap/v2', 'session', 'invitation/detail', 'invitation/verify', 'registration/options', 'registration/verify', 'authentication/options', 'authentication/verify', 'step-up/options', 'step-up/verify', 'logout', 'session/refresh', 'devices/pending', 'devices/approve', 'devices/deny', 'devices/list', 'devices/revoke', 'devices/verification', 'approvals/list', 'approvals/pending', 'approvals/recent', 'approvals/detail', 'approvals/approve', 'approvals/deny', 'approvals/cancel', 'activity/list', 'activity/detail', 'recovery/verify', 'recovery/status', 'recovery/start', 'recovery/cancel'];
             if (!routes.includes(route))
                 throw new ApiError('not_found');
-            if (route === 'bootstrap') {
+            if (route === 'bootstrap' || route === 'bootstrap/v2') {
                 if (request.method !== 'GET')
                     throw new ApiError('method_not_allowed');
                 // Safe bootstrap is stateless. Its HMAC authenticates the CSRF digest
                 // and five-minute lifetime. No GET writes D1 or refreshes idle time.
                 const csrf = random(), payload = encode(text.encode(JSON.stringify({ n: random(), e: Math.floor(Date.now() / 1000) + 300, c: await digest(csrf) })));
-                return response({ authenticated: false }, `p.${payload}.${await mac(config.bootstrapKey, 'bootstrap\0' + payload)}`, csrf, 300);
+                return response({ authenticated: false }, `p.${payload}.${await mac(config.bootstrapKey, 'bootstrap\0' + payload)}`, csrf, 300, 'bootstrap');
             }
             const safe = route === 'session' || route === 'devices/verification';
             if (safe && request.method !== 'GET')
                 throw new ApiError('method_not_allowed');
             if (!safe && request.method !== 'POST')
                 throw new ApiError('method_not_allowed');
-            const token = cookie(request, '__Host-akc_session'), sessionHash = await digest(token);
+            let scope: keyof typeof cookieNames = bootstrapRoutes.has(route) ? 'bootstrap' : restrictedRoutes.has(route) ? 'recovery' : 'auth';
+            // Preserve the unauthenticated status response for a valid provisional context.
+            // An existing auth cookie always wins on /session; invalid auth cannot fall back.
+            if (route === 'session' && !cookie(request, cookieNames.auth[0], true))
+                scope = 'bootstrap';
+            const token = cookie(request, cookieNames[scope][0]), sessionHash = await digest(token);
             let session: SessionRow | null = null, csrfDigest: string;
             let bootstrapExpires = 0;
             let restricted: RestrictedSession | null = null;
             const recoveryPublic = publicRecovery(db, config);
-            if (token.startsWith('p.')) {
+            if (scope === 'bootstrap') {
+                if (!token.startsWith('p.')) throw unauthorized();
                 const parts = token.split('.');
                 if (parts.length !== 3 || !await crypto.subtle.verify('HMAC', config.bootstrapKey, decode(parts[2]!), text.encode('bootstrap\0' + parts[1])))
                     throw unauthorized();
@@ -121,12 +136,14 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
                 csrfDigest = payload.c;
                 bootstrapExpires = payload.e;
             }
-            else if (token.startsWith('r.')) {
+            else if (scope === 'recovery') {
+                if (!token.startsWith('r.')) throw unauthorized();
                 restricted = await recoveryPublic.session(sessionHash);
-                if (!restricted || !['recovery/start','recovery/status','recovery/cancel'].includes(route)) throw unauthorized();
+                if (!restricted) throw unauthorized();
                 csrfDigest = restricted.csrf_digest;
             }
             else {
+                if (token.startsWith('p.') || token.startsWith('r.')) throw unauthorized();
                 session = await repo.session(sessionHash);
                 if (!session)
                     throw unauthorized();
@@ -141,7 +158,7 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
                 return response(session ? { authenticated: true, accountId: session.account_id, tenantId: session.tenant_id, authentication: 'passkey', absoluteExpires: session.absolute_expires, stepUp: session.step_up_expires !== null && session.step_up_expires > Math.floor(Date.now() / 1000) } : { authenticated: false });
             if (request.headers.get('origin') !== config.origin || !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(request.headers.get('content-type') ?? '') || request.headers.get('sec-fetch-site') === 'cross-site')
                 throw unauthorized();
-            const csrf = cookie(request, '__Host-akc_csrf');
+            const csrf = cookie(request, cookieNames[scope][1]);
             if (csrf !== request.headers.get('x-csrf-token') || await digest(csrf) !== csrfDigest)
                 throw unauthorized();
             let sourceIdentity: string;
@@ -221,7 +238,7 @@ export function createBrowserAuth(db: D1Database, config: BrowserConfig) {
                 if (session || restricted) throw unauthorized();
                 await rateIdentity(await emailLookup(config, body.email as string));
                 const result = await recoveryPublic.verify(body, sessionHash, bootstrapExpires);
-                return response({ accepted: true }, result.token, result.csrf, 600);
+                return response({ accepted: true }, result.token, result.csrf, 600, 'recovery');
             }
             if (restricted) {
                 await rateIdentity(await mac(config.lookupKey,'restricted-recovery\0'+restricted.digest));

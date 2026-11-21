@@ -29,7 +29,7 @@ export function deviceRepository(db: D1Database) {
         async cleanup() {
             // A nonce survives its entire session lifetime. Bounded scans never
             // delete replay protection from a live (even revoked) session.
-            await db.prepare("DELETE FROM device_requests WHERE id IN(SELECT id FROM device_requests WHERE state IN('pending','bound','denied') AND expires_at<unixepoch()-86400 LIMIT 32)").run();
+            await db.prepare("DELETE FROM device_requests WHERE id IN(SELECT id FROM device_requests WHERE state IN('pending','bound','denied') AND expires_at<unixepoch()-86400 AND NOT EXISTS(SELECT 1 FROM enrollment_retirements WHERE request_id=device_requests.id) AND NOT EXISTS(SELECT 1 FROM enrollment_successors WHERE successor_id=device_requests.id) LIMIT 32)").run();
             await db.batch([db.prepare('DELETE FROM device_session_issues WHERE challenge_id IN(SELECT id FROM device_challenges WHERE expires_at<unixepoch()-86400 LIMIT 32)'), db.prepare('DELETE FROM device_challenges WHERE id IN(SELECT id FROM device_challenges WHERE expires_at<unixepoch()-86400 LIMIT 32)')]);
             await db.prepare('DELETE FROM device_nonces WHERE rowid IN(SELECT n.rowid FROM device_nonces n JOIN device_sessions s ON s.digest=n.session_digest WHERE s.expires_at<unixepoch()-300 LIMIT 64)').run();
         },

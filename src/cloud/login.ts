@@ -7,12 +7,13 @@ import {assertVerifiedPolicy,type ManagedEndpointPolicy} from './config.ts';
 import { URL } from "node:url";
 /* eslint-disable no-unused-vars -- callback declarations */
 import sodium from 'libsodium-wrappers-sumo';
-import {randomUUID} from 'node:crypto';
+import {randomBytes,randomUUID} from 'node:crypto';
 import type {Database} from 'bun:sqlite';
 import {createCloudKeys,destroyCloudKeys,openKeyPackage,sealKeyPackage} from './crypto.ts';
 import {ManagedHttpClient,CloudHttpError} from './http.ts';
 import {CloudStore} from './persistence.ts';
-import {canonicalGrant,enrollmentProof,type EnrollmentGrant} from '../../managed-cloud/shared/device-protocol.ts';
+import {canonicalGrant,enrollmentProof,enrollmentReconcileProof,enrollmentReplaceProof,enrollmentRetireProof,type EnrollmentGrant} from '../../managed-cloud/shared/device-protocol.ts';
+import {digest} from '../../managed-cloud/shared/contracts.ts';
 import {openTrustedEnrollment,previewEnrollmentPhrase,selfAnchor,type TrustedEnrollmentBundle} from './enrollment.ts';
 import {productionComposition,type CloudComposition,type CloudEnrollment,openCloudRuntime} from './runtime.ts';
 import {hasCloudState} from './coordinator.ts';
@@ -31,10 +32,15 @@ export function authorizationBrowser(policy:ManagedEndpointPolicy,authorization:
   return browser;
  }catch{throw new Error('cloud_invalid_authorization');}
 }
-/** New requests must never inherit a previous request's randomized trust/package. */
+/** Once approval was observed, do not create another remote device or discard the pending trust state. */
+function assertCanReplaceEnrollmentRequest(store:CloudStore){
+ if(['enrollment','roster-current','pending-approved','pending-self-roster','pending-package'].some(id=>store.get('state',id)))
+  throw new Error('cloud_partial_activation_requires_resume');
+}
+/** New, unapproved requests must never inherit a previous request's state. */
 export function replaceEnrollmentRequest(store:CloudStore,authorization:unknown){
  store.transaction(()=>{
-  if(store.get('state','enrollment')||store.get('state','roster-current'))throw new Error('cloud_partial_activation_requires_resume');
+  assertCanReplaceEnrollmentRequest(store);
   store.remove('state','pending-package');store.remove('state','pending-self-roster');
   store.put('state','pending',authorization);
  });
@@ -69,31 +75,99 @@ export async function loginCloud(db:Database,ui:LoginUI,composition:CloudComposi
   const http=new ManagedHttpClient(policy,identity,composition.network),platform=process.platform==='darwin'?'macos':process.platform==='linux'?'linux':'other';
   type PendingAuthorization={deviceCode:string;deviceId:string;requestId:string;browserUri:string;verificationUri:string;phrase:string;interval:number;expiresIn:number;deadline:number};
   let authorization=store.get<PendingAuthorization>('state','pending');
-  if(!authorization||authorization.deadline<=Date.now()){
-  if(store.get('state','roster-current'))throw new Error('cloud_partial_activation_requires_resume');
+  if(authorization&&authorization.deadline<=Date.now()){
+   assertCanReplaceEnrollmentRequest(store);
+   const {requestId,deviceId}=authorization,timestamp=Math.floor(Date.now()/1000);
+   const signature=b64(sodium.crypto_sign_detached(enrollmentReconcileProof(requestId,deviceId,b64(keys.signingPublic),b64(keys.wrappingPublic),timestamp),keys.signingPrivate));
+   let readback:{state?:string;requestId?:string;deviceId?:string}|null=null;
+   try{readback=await http.publicCall('/v1/devices/enrollment-reconcile',{requestId,deviceId,timestamp,signature}) as {state?:string;requestId?:string;deviceId?:string};}
+   catch{ /* A missing/expired server record or unavailable service is not proof of non-approval. */ }
+   const isOriginal=(value:{requestId?:string;deviceId?:string}|null)=>value?.requestId===requestId&&value?.deviceId===deviceId;
+   if(!isOriginal(readback))throw new Error('cloud_enrollment_expired_requires_reconcile');
+   if(readback!.state==='expired_approved')throw new Error('cloud_enrollment_expired_approved_requires_reapproval');
+   if(!['expired_unapproved','retired_unapproved'].includes(readback!.state??''))throw new Error('cloud_enrollment_expired_requires_reconcile');
+   if(readback!.state==='expired_unapproved'){
+    const timestamp=Math.floor(Date.now()/1000),signature=b64(sodium.crypto_sign_detached(enrollmentRetireProof(requestId,deviceId,b64(keys.signingPublic),b64(keys.wrappingPublic),timestamp),keys.signingPrivate));
+    const retired=await http.publicCall('/v1/devices/enrollment-retire',{requestId,deviceId,timestamp,signature}) as {state?:string;requestId?:string;deviceId?:string}|null;
+    if(!isOriginal(retired)||retired!.state!=='retired_unapproved')throw new Error('cloud_enrollment_expired_requires_reconcile');
+   }
+   // The only cleartext copies of these one-time values stay in protected
+   // local state until the browser flow. Persist before any allocation call.
+   type SuccessorIntent={requestId:string;deviceId:string;deviceCode:string;verificationCode:string};
+   const intent=store.transaction(()=>{
+    assertCanReplaceEnrollmentRequest(store!);
+    if(!isOriginal(store!.get<PendingAuthorization>('state','pending')))throw new Error('cloud_enrollment_successor_conflict');
+    const previous=store!.get<SuccessorIntent>('state','pending-successor');
+    if(previous){if(!isOriginal(previous))throw new Error('cloud_enrollment_successor_conflict');return previous;}
+    const next={requestId,deviceId,deviceCode:randomBytes(32).toString('base64url'),verificationCode:randomBytes(9).toString('base64url')};
+    store!.put('state','pending-successor',next);return next;
+   });
+   if(!/^[A-Za-z0-9_-]{43}$/.test(intent.deviceCode)||!/^[A-Za-z0-9_-]{12}$/.test(intent.verificationCode))
+    throw new Error('cloud_enrollment_successor_conflict');
+   const codeDigest=await digest(intent.deviceCode),verificationDigest=await digest(intent.verificationCode),maybeTimestamp=Math.floor(Date.now()/1000);
+   const nextSignature=b64(sodium.crypto_sign_detached(enrollmentReplaceProof(requestId,deviceId,b64(keys.signingPublic),b64(keys.wrappingPublic),maybeTimestamp,codeDigest,verificationDigest),keys.signingPrivate));
+   const successor=await http.publicCall('/v1/devices/enrollment-replace',{requestId,deviceId,timestamp:maybeTimestamp,codeDigest,verificationDigest,signature:nextSignature}) as {requestId?:string;deviceId?:string;expiresAt?:number;interval?:number;phrase?:string}|null;
+   const validId=(value:unknown):value is string=>typeof value==='string'&&/^[A-Za-z0-9_-]{43}$/.test(value);
+   if(!successor||!validId(successor.requestId)||!validId(successor.deviceId)||successor.requestId===requestId||successor.deviceId===deviceId||
+      !Number.isSafeInteger(successor.expiresAt)||successor.expiresAt!<1||successor.interval!==5||
+      typeof successor.phrase!=='string'||successor.phrase.length>128||!/^[a-z]+(?: [a-z]+){2}$/.test(successor.phrase))
+    throw new Error('cloud_invalid_authorization');
+   const replacement:PendingAuthorization={requestId:successor.requestId,deviceId:successor.deviceId,deviceCode:intent.deviceCode,phrase:successor.phrase,
+    verificationUri:policy.webOrigin+'/v1/auth/devices/verification',browserUri:policy.webOrigin+'/app/devices/add?code='+encodeURIComponent(intent.verificationCode),
+    deadline:Math.min(Date.now()+600000,successor.expiresAt!*1000),expiresIn:600,interval:5};
+   store.transaction(()=>{
+    assertCanReplaceEnrollmentRequest(store!);
+    const previous=store!.get<SuccessorIntent>('state','pending-successor');
+    if(!isOriginal(store!.get<PendingAuthorization>('state','pending'))||!isOriginal(previous)||
+       previous!.deviceCode!==intent.deviceCode||previous!.verificationCode!==intent.verificationCode)
+     throw new Error('cloud_enrollment_successor_conflict');
+    store!.put('state','pending',replacement);store!.remove('state','pending-successor');
+   });
+   authorization=replacement;
+   if(authorization.deadline<=Date.now())throw new Error('cloud_authorization_expired');
+  }
+  if(!authorization){
+  assertCanReplaceEnrollmentRequest(store);
   const result=await http.publicCall('/v1/devices/authorize',{signingKey:b64(keys.signingPublic),wrappingKey:b64(keys.wrappingPublic),platform,proof:b64(sodium.crypto_sign_detached(enrollmentProof(b64(keys.signingPublic),b64(keys.wrappingPublic),platform),keys.signingPrivate))}) as Omit<PendingAuthorization,'deadline'>;
   authorization={...result,deadline:Date.now()+result.expiresIn*1000};
   replaceEnrollmentRequest(store,authorization);
   }
   const browser=authorizationBrowser(policy,authorization);
   if(!/^[a-z]+(?: [a-z]+){2}$/.test(authorization.phrase)||authorization.phrase.length>128||!Number.isFinite(authorization.interval)||authorization.interval<5||authorization.interval>60||!Number.isFinite(authorization.expiresIn)||authorization.expiresIn<1||authorization.expiresIn>600)throw new Error('cloud_invalid_authorization');
-  store.put('state','pending',authorization);
+  const attempt=authorization;
+  const clearDenied=()=>{
+   store!.transaction(()=>{
+    assertCanReplaceEnrollmentRequest(store!);
+    const current=store!.get<PendingAuthorization>('state','pending');
+    if(current?.requestId!==attempt.requestId||current.deviceId!==attempt.deviceId||store!.get('state','pending-successor'))
+     throw new Error('cloud_enrollment_successor_conflict');
+    for(const id of ['pending','pending-package','pending-self-roster'])store!.remove('state',id);
+   });
+   throw new Error('cloud_authorization_denied');
+  };
   const timestamp=Math.floor(Date.now()/1000);
   const initial=await http.publicCall('/v1/devices/resume',{requestId:authorization.requestId,deviceId:authorization.deviceId,timestamp,signature:b64(sodium.crypto_sign_detached(JSON.stringify(['AgentKeychain-enrollment-resume-v1',authorization.requestId,authorization.deviceId,timestamp]),keys.signingPrivate))}) as {state:string;deviceId?:string;requestId?:string;vaultId?:string};
-  if(initial.state==='denied'){store.transaction(()=>{for(const id of ['pending','pending-package','pending-self-roster'])store!.remove('state',id);});throw new Error('cloud_authorization_denied');}
-  if(initial.state!=='approved')await ui.open(browser.href);
+  if(initial.state==='denied')clearDenied();
+  if(initial.state!=='approved'){
+   assertCanReplaceEnrollmentRequest(store);
+   await ui.open(browser.href);
+  }
   ui.showPhrase?.(authorization.phrase);
   const deadline=authorization.deadline;let approved=false;
-  while(Date.now()<deadline){
+  while(initial.state==='approved'||Date.now()<deadline){
    if(initial.state!=='approved')await ui.wait(authorization.interval*1000);
    let status:{state:string;deviceId?:string;vaultId?:string;requestId?:string};
    try{status=initial.state==='approved'?initial:await http.publicCall('/v1/devices/status',{deviceCode:authorization.deviceCode}) as typeof status;}catch(error){if(error instanceof CloudHttpError&&error.code==='rate_limited'){await ui.wait(Math.max(error.retryAfter,5000));continue;}throw error;}
-   if(status.state==='denied'){store.transaction(()=>{for(const id of ['pending','pending-package','pending-self-roster'])store!.remove('state',id);});throw new Error('cloud_authorization_denied');}
+   if(status.state==='denied')clearDenied();
    if(status.state!=='approved')continue;
    if(status.deviceId!==authorization.deviceId||status.requestId!==authorization.requestId||!status.vaultId)throw new Error('cloud_invalid_authorization');
+   const receipt={requestId:status.requestId,deviceId:status.deviceId,vaultId:status.vaultId};
+   const previous=store.get<typeof receipt>('state','pending-approved');
+   if(previous&&(previous.requestId!==receipt.requestId||previous.deviceId!==receipt.deviceId||previous.vaultId!==receipt.vaultId))throw new Error('cloud_invalid_authorization');
+   store.put('state','pending-approved',receipt);
    identity.record.deviceId=status.deviceId;identity.record.vaultId=status.vaultId;approved=true;break;
   }
-  if(!approved)throw new Error('cloud_authorization_expired');
+  if(!approved||Date.now()>=deadline)throw new Error('cloud_authorization_expired');
   const result=await http.call('/v1/devices/enrollment-grant') as {canonical:string};
   const grant=JSON.parse(result.canonical) as EnrollmentGrant;
   if(canonicalGrant(grant)!==result.canonical||grant.requestId!==authorization.requestId||grant.deviceId!==authorization.deviceId||grant.vaultId!==identity.record.vaultId||grant.signingKey!==b64(keys.signingPublic)||grant.wrappingKey!==b64(keys.wrappingPublic))throw new Error('cloud_invalid_grant');

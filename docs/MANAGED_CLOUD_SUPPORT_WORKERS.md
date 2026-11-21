@@ -93,10 +93,13 @@ anchors and explicit revocation vetoes), `trust_accounts` (account-verifier pins
 and `trust_revocations` (exact approved canonical revocation digests). There is
 no public or API RPC that grants these permissions. No default allow entry exists.
 Custody follows its independently witnessed roster after genesis and rechecks
-revocation, while API checks live membership and device records. Genesis approval,
-account-verifier enrollment and last-device revocation approval are operational
-prerequisites, not automatically trusted API assertions. A deployment with empty
-registries deliberately refuses these operations.
+revocation, while API checks live membership and device records. For genesis,
+`GENESIS_AUTH` connects the Custodian to the API Trust Worker's dedicated
+`RosterGenesisAuthority` RPC, which only validates the initial roster against
+active API Main enrollment. It does not expose general recovery authorization
+or establish independent genesis evidence. Independent first-device approval
+remains a release gate; account-verifier enrollment and last-device revocation
+also require their separately provisioned trust metadata.
 
 `RecoveryAuthority.authorize` stores a 60-second exact-case authorization only
 after verifying evidence. `RecoveryKeys.rewrap` rechecks that evidence against

@@ -1,3 +1,11 @@
+import {advanceSyntheticContinuation,assertSyntheticContinuationFlow,showSyntheticContinuationHandoff,type SyntheticContinuationFlow} from '../cloud/continuation-machine.ts';
+import {verifyContinuationHandoffOrigin} from '../cloud/config.ts';
+import {verifySyntheticContinuationRollout} from '../cloud/continuation-rollout.ts';
+import {finalizeGenesisContinuation} from '../cloud/enrollment-intent.ts';
+import {CloudStore} from '../cloud/persistence.ts';
+import type {ManagedEndpointPolicy} from '../cloud/config.ts';
+import type {SecureStore} from '../platform/secure-store.ts';
+import type {SignedManagedOperation} from '../cloud/protocol.ts';
 import {assertManagedPlatform} from '../platform/managed-support.ts';
 import {activateRecovery} from '../cloud/recovery-activation.ts';
 import {requestExport} from '../cloud/export.ts';
@@ -34,9 +42,42 @@ export async function requestCloudApproval(action:string,name:string,scopes?:str
   }finally{bytes.fill(0);}
  }finally{runtime.close();}}finally{kek?.fill(0);db.close();}
 }
-export async function runCloud(argv:string[],platform:string=process.platform):Promise<number>{
+// No shipping caller supplies fixture dependencies.
+interface SyntheticContinuationGraph {
+ policy:ManagedEndpointPolicy; secure:SecureStore;
+ signed:Parameters<typeof verifySyntheticContinuationRollout>[1];
+ flow?:SyntheticContinuationFlow;
+ // eslint-disable-next-line no-unused-vars -- private local display only
+ showHandoff?:(url:string,code:string)=>void;
+ open:()=>Database;
+ // eslint-disable-next-line no-unused-vars -- private runtime transport contract
+ obtain:(nonce:string)=>Promise<SignedManagedOperation>;
+}
+export async function runCloud(argv:string[],platform:string=process.platform,fixture?:SyntheticContinuationGraph):Promise<number>{
  assertManagedPlatform(platform);
  const command=argv[0]??'status';
+ if(command==='continue-enrollment'){
+  const show=argv.length===2&&argv[1]==='--show-handoff';
+  if((argv.length!==1&&!show)||process.env.AKC_KEYCHAIN_TEST_MODE!=='1'||!fixture||
+    (show&&(!fixture.flow||!fixture.showHandoff)))throw new Error('cloud_continuation_not_provisioned');
+  const {policy,secure}=fixture;
+  if(fixture.flow){assertSyntheticContinuationFlow(fixture.flow);await verifyContinuationHandoffOrigin(policy,fixture.flow.authOriginAppendix);}
+  const permit=await verifySyntheticContinuationRollout(policy,fixture.signed);
+  const csk=await secure.get('csk');if(!csk)throw new Error('cloud_secure_store_locked');
+  let db:Database|undefined;
+  try{
+   db=fixture.open();const store=new CloudStore(db,csk);
+   try{
+    if(show){
+     await showSyntheticContinuationHandoff(store,policy,fixture.flow!,fixture.showHandoff!);
+    }else if(fixture.flow){
+     const state=await advanceSyntheticContinuation(secure,store,policy,fixture.flow);
+     process.stdout.write(JSON.stringify({state})+'\n');
+    }else if(!await finalizeGenesisContinuation(secure,store,policy,fixture.obtain,permit))throw new Error('cloud_continuation_not_staged');
+   }finally{store.destroy();}
+  }finally{db?.close();csk.fill(0);}
+  return 0;
+ }
  if(argv.some(a=>a.startsWith('--')&&a!=='--json'&&!(['rotate','recover'].includes(command)&&a==='--no-open')&&!(command==='recover'&&a==='--restart')))throw new Error('cloud_unknown_option');
  if(command==='compatibility'){process.stdout.write(JSON.stringify({cloudSchema:1,protocolMin:2,protocolMax:2,localSchema:'v0.6.2',helperABI:1,helperVersion:'1',nativeHelper:process.platform==='darwin'?'required':'none'})+'\n');return 0;}
  if(command==='status'){process.stdout.write(JSON.stringify(cloudStatus())+'\n');return 0;}

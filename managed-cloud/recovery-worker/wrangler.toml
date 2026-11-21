@@ -22,6 +22,11 @@ service = "agentkeychain-cloud-custody-trust"
 entrypoint = "RecoveryAuthority"
 
 [[services]]
+binding = "GENESIS_AUTH"
+service = "agentkeychain-cloud-api-trust"
+entrypoint = "RosterGenesisAuthority"
+
+[[services]]
 binding = "RECOVERY_KEYS"
 service = "agentkeychain-cloud-custody-trust"
 entrypoint = "RecoveryKeys"

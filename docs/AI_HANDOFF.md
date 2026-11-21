@@ -56,13 +56,15 @@ Sam will not cooperate with repeated login/Passkey attempts. First complete synt
 - Inspect repo rules, dirty diff, test isolation and generated artifacts; preserve other agents' changes.
 - Audit pending-state handling: approved remote device must survive local retry/expiry without replacing its request ID or VDK, orphaning devices, or generating phantom second devices. Historical retries overwrote pending state after expiry.
 - Test resume after browser approval, Worker/response failures, process restart, grant expiry, denied requests and lost ACK; no automatic destructive cleanup.
+- Expired-enrollment reconciliation is read-only: the original device signs a short-lived check tied to its request, device and original keys. A retained expired request can be classified as previously approved, never approved, or ambiguous. Missing rows and uncertain evidence never authorize replacement or automatic retry. A separate, purpose-signed retirement can atomically mark an expired, never-approved request terminal and return the same retained decision after response loss. A signed allocation bound to the retired request and locally saved hashes issues one new unapproved request, replaying the same IDs and phrase after a lost response. The original device keys are retained and the next request still requires normal approval. Reapproval for already-approved identities remains unfinished.
+- 过期请求对账只读：原设备用原密钥签名查询。服务端记录可区分“已批准”“未批准”“不确定”；找不到记录不能当作未批准。不会自动替换原请求，也不会延长原授权。独立签名的终止操作可以原子终止过期且未批准的请求，丢响应后仍可读取同一结果。后继请求使用原设备密钥和本地已保存的摘要，一条已终止请求只会分配一条仍须正常批准的新请求。已批准设备的重新批准仍待实现。
 - Investigate why browser `/session` becomes 401 after successful login. Correlate actual same browser/profile/tab and response body with bootstrap/session cookie lifecycle; deployment alone is not a proven cause. No cookie/token logging.
 - Fix expiry/poll error handling and frontend generic "request changed" error masking 503/401/Passkey cancellation. Do not send users through a click loop.
 
 ### P0 — security review of new fixes
 
 - Review Web step-up reuse: action digest, account/tenant/session binding, membership recheck, attempts, CSRF, rate limits, session rotation and atomic consumption; compare to normal step-up route.
-- Review `GENESIS_AUTH`: TypeScript `Pick<>` is not runtime RPC isolation. Current binding targets full `RecoveryAuthority`; consider purpose-specific entrypoint. No widening of recovery authority based solely on Main DB claims. Establish exactly what independent genesis evidence is required.
+- Review `GENESIS_AUTH`: the local repair replaces access to full `RecoveryAuthority` with a dedicated `RosterGenesisAuthority` entrypoint. This only narrows the RPC surface; it still relies on Main D1 enrollment. Independent genesis evidence is an unresolved release gate. Do not widen recovery authority based on Main DB claims.
 - Review dual-origin canonical/signature verification, retained pins/operator ownership, manifest/root pairing, actual release policy and local compiled binary/helper coherence.
 - Replace error-message regex logging with a fixed safe allowlist if arbitrary error names/messages could reveal metadata. Do not output request bodies, signatures or identifiers.
 

@@ -9,16 +9,16 @@ import type {SignedManagedOperation} from '../../src/cloud/protocol.ts';
 import {signRecoveryRelease,type RecoveryReleaseSigner} from '../shared/recovery-release.ts';
 import { rpcData } from '../shared/rpc-data.ts';
 import { digest,verify } from '../shared/contracts.ts';
+import { GenesisAdmission } from './genesis-ingress.ts';
+import { legacyGenesisEnabled, type GenesisAdmissionEnv } from './genesis-ingress.ts';
+export { GenesisAdmission };
 import { WorkerEntrypoint } from 'cloudflare:workers';
-import { manifest, packageContext, recoveryCase, releaseContext, type CancelAuthorization, type RecoveryAuthority, type RecoveryEvidence, type RecoveryKeys } from '../shared/recovery.ts';
+import { manifest, packageContext, recoveryCase, releaseContext, type CancelAuthorization, type RecoveryAuthority, type RecoveryEvidence, type RecoveryKeys, type RosterGenesisAuthority } from '../shared/recovery.ts';
 import type { SealedShare } from '../shared/recovery-crypto.ts';
-interface Env {
-    CUSTODIAN: D1Database;
-    ROSTER_WITNESS_SIGNER?:CheckpointSigner;
+interface Env extends GenesisAdmissionEnv {
     RECOVERY_TRUST_SIGNER?:CheckpointSigner;
-    RECOVERY_TRUST_POLICY?:{manifest():Promise<string>};
     RECOVERY_AUTH?: RecoveryAuthority;
-    GENESIS_AUTH?: Pick<RecoveryAuthority,'rosterGenesis'>;
+    GENESIS_AUTH?: RosterGenesisAuthority;
     RECOVERY_KEYS?: RecoveryKeys;
     RECOVERY_RELEASE_SIGNER?: RecoveryReleaseSigner;
 }
@@ -103,10 +103,11 @@ export class Custodian extends WorkerEntrypoint<Env> {
         return signRecoveryRelease('custodian',canonical,packageCanonical,evidence,box,this.env.RECOVERY_RELEASE_SIGNER);
     }
     private async witnessStore(){
-        if(!this.env.ROSTER_WITNESS_SIGNER||!this.env.RECOVERY_TRUST_POLICY||!this.env.GENESIS_AUTH?.rosterGenesis)throw new Error('witness_unavailable');
+        const genesis=this.env.GENESIS_AUTH, legacy=legacyGenesisEnabled(this.env);
+        if(!this.env.ROSTER_WITNESS_SIGNER||!this.env.RECOVERY_TRUST_POLICY||(legacy&&!genesis?.rosterGenesis))throw new Error('witness_unavailable');
         const policy=JSON.parse(await this.env.RECOVERY_TRUST_POLICY.manifest()) as ReleaseTrustManifest,key=await this.env.ROSTER_WITNESS_SIGNER.key();
         if(!policy.witnessKeys?.some(p=>p.keyId===key.keyId&&p.publicKey===key.publicKey)||policy.checkpointKeys.some(p=>p.publicKey===key.publicKey)||policy.recoveryAuthorities?.some(p=>p.publicKey===key.publicKey))throw new Error('invalid_witness_authority');
-        return rosterWitness(this.env.CUSTODIAN,this.env.ROSTER_WITNESS_SIGNER,policy.checkpointKeys,s=>this.env.GENESIS_AUTH!.rosterGenesis!(s),policy.recoveryAuthorities??[]);
+        return rosterWitness(this.env.CUSTODIAN,this.env.ROSTER_WITNESS_SIGNER,policy.checkpointKeys,async s=>legacy&&genesis?.rosterGenesis?genesis.rosterGenesis(s):false,policy.recoveryAuthorities??[]);
     }
     async witnessHead(tenant:string,vault:string){const h=await (await this.witnessStore()).head(tenant,vault);return h?JSON.parse(h.receipt) as SignedManagedOperation:null;}
     async witness(input:WitnessRequest){return (await this.witnessStore()).accept(input);}

@@ -27,6 +27,9 @@ API 操作方；`witnessKeys`、`recoveryAuthorities` 与 Custodian recovery ser
 独立控制面须审核并写入 `trust_devices` 初始锚点、`trust_accounts` 账号验证公钥
 和 `trust_revocations` 精确撤销摘要。没有公开写入接口或默认放行规则；空注册表
 会拒绝相关操作。新增 migration 仅包含 schema，不包含用户数据。
+首次设备名单通过 Custodian 的 `GENESIS_AUTH` 绑定到 API Trust 的专用
+`RosterGenesisAuthority` RPC，只对照 API Main 的有效注册记录验证首次名单，
+不开放通用恢复授权。这个接口隔离不等于独立信任证据；独立的首设备批准仍是发布前置条件。
 
 验证码使用密码学随机数生成，六位、十分钟有效、最多五次尝试，原子单次消费；
 同邮箱跨用途每小时最多发送五次、两次间隔至少六十秒。数据库与审计不保存邮箱、

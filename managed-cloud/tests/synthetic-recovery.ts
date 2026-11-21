@@ -18,7 +18,6 @@ export class RecoveryTestService extends WorkerEntrypoint {
     override async fetch() { return new Response(null, { status: 404 }); }
     async allowRevocation(canonical:string){revocations.add(canonical);}
     async rosterRevocation(canonical:string){return revocations.has(canonical);}
-    async rosterGenesis(s:import('../../src/cloud/protocol.ts').SignedManagedOperation){const r=parseRoster(s),key=devices.get(JSON.stringify([r.accountId,r.tenantId,r.vaultId,r.issuer.id]));return !!key&&await verify(key,s.signature,'AgentKeychain-trusted-roster-v1\0'+s.canonical);}
     async key() { const publicKey = encode64(new Uint8Array(await crypto.subtle.exportKey('raw', (await pair).publicKey))); return { keyId: await digest(publicKey), publicKey }; }
     async rewrap(keyId: string, box: SealedShare, source: string, target: string, context: string) { const key = await this.key(); return (await recoveryKeyring(new Map([[key.keyId, await pair]]), key.keyId)).rewrap(keyId, box, source, target, context); }
     async trust(a: string, t: string, v: string, d: string, key: string | null) {
@@ -36,6 +35,11 @@ export class RecoveryTestService extends WorkerEntrypoint {
     async complete(c: string, p: string, s: string) { return authority.complete(c, p, s); }
     async enrollment(c: string, s: string) { return authority.enrollment(c, s); }
     async authorize(c: string, e: RecoveryEvidence) { return authority.authorize(c, e); }
+}
+/** Mirrors the dedicated production RPC surface; only the test harness may seed trust. */
+export class RosterGenesisAuthority extends WorkerEntrypoint {
+    override async fetch() { return new Response(null, { status: 404 }); }
+    async rosterGenesis(s:import('../../src/cloud/protocol.ts').SignedManagedOperation){const r=parseRoster(s),key=devices.get(JSON.stringify([r.accountId,r.tenantId,r.vaultId,r.issuer.id]));return !!key&&await verify(key,s.signature,'AgentKeychain-trusted-roster-v1\0'+s.canonical);}
 }
 export default RecoveryTestService;
 export class RecoveryAuthority extends RecoveryTestService {
