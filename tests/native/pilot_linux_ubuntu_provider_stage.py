@@ -16,6 +16,20 @@ PINS = (
     ("libgcr-base-3-1", "3.41.2-1build3", "gcr"),
 )
 
+PROMPT_ARCHIVES = {
+    "gcr": "5c239a7ec1a732c649ab4c043cd55a5c7a2c673df4e486a8317e42a25cc9f928",
+    "libgcr-ui-3-1": "e48fd6e74dddbb1a522abd4b9f2a40b10bc73c93c7279809817dd71377a6d090",
+}
+PROMPT_MEMBERS = {
+    "gcr": ("./usr/libexec/gcr-prompter", "gcr-prompter",
+            ("libgcr-ui-3.so.1", "libgcr-base-3.so.1", "libglib-2.0.so.0", "libgobject-2.0.so.0",
+             "libgio-2.0.so.0", "libgtk-3.so.0", "libc.so.6")),
+    "libgcr-ui-3-1": ("./usr/lib/x86_64-linux-gnu/libgcr-ui-3.so.1.0.0", "libgcr-ui-3.so.1",
+                     ("libgck-1.so.0", "libgcr-base-3.so.1", "libglib-2.0.so.0", "libgobject-2.0.so.0",
+                      "libgio-2.0.so.0", "libgtk-3.so.0", "libgdk-3.so.0", "libpango-1.0.so.0",
+                      "libcairo.so.2", "libgdk_pixbuf-2.0.so.0", "libc.so.6")),
+}
+
 PEER_ARCHIVES = {
     "gnome-keyring": "86629a081c91dd8004655f5f48d8a5bfb75dde8c4e69ef7401b15568c2eacafb",
     "libgck-1-0": "bceace92f5cbbf55ab2c963a426f73335c887f0c1c45c7b0b7d7610b36d9afde",
@@ -108,8 +122,10 @@ def run():
     need("ID=ubuntu" in os_release.splitlines() and "VERSION_CODENAME=noble" in os_release.splitlines())
     need(len(sys.argv) == 1 and os.environ.get("GITHUB_ACTIONS") == "true"
          and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("archive-only-v1", "private-peer-v1", "encrypted-session-v1", "collection-offer-v1"))
-    verify_peer = os.environ["AKC_UBUNTU_PROVIDER_STAGE"] != "archive-only-v1"
+         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("archive-only-v1", "private-peer-v1", "encrypted-session-v1", "collection-offer-v1", "private-display-v1"))
+    display_smoke = os.environ["AKC_UBUNTU_PROVIDER_STAGE"] == "private-display-v1"
+    verify_peer = not display_smoke and os.environ["AKC_UBUNTU_PROVIDER_STAGE"] != "archive-only-v1"
+    pins = tuple((name, "3.41.2-1build3", "gcr") for name in PROMPT_ARCHIVES) if display_smoke else PINS
     encrypted = os.environ["AKC_UBUNTU_PROVIDER_STAGE"] in ("encrypted-session-v1", "collection-offer-v1")
     collection_offer = os.environ["AKC_UBUNTU_PROVIDER_STAGE"] == "collection-offer-v1"
     os.umask(0o077)
@@ -164,7 +180,7 @@ APT::Get::AllowUnauthenticated "false";
 
         phase = "signed-index"
         cmd("apt-get", "-o", "APT::Update::Error-Mode=any", "update", timeout=120)
-        for name, version, source in PINS:
+        for name, version, source in pins:
             phase = "metadata-" + name
             target = f"{name}:amd64={version}"
             records = []
@@ -179,7 +195,9 @@ APT::Get::AllowUnauthenticated "false";
             filename = f"{name}_{version}_amd64.deb"
             need(re.fullmatch(r"[a-f0-9]{64}", digest) and
                  record.get("Filename") == f"pool/main/{source[0]}/{source}/{filename}")
-            if verify_peer:
+            if display_smoke:
+                need(digest == PROMPT_ARCHIVES[name])
+            elif verify_peer:
                 need(digest == PEER_ARCHIVES[name])
             size = int(record["Size"])
             need(0 < size <= 4 * 1024 * 1024)
@@ -190,7 +208,17 @@ APT::Get::AllowUnauthenticated "false";
                 "--max-time", "30", "--max-filesize", str(size), "--output", str(output),
                 "https://archive.ubuntu.com/ubuntu/" + record["Filename"])
             need(output.stat().st_size == size and hashlib.sha256(output.read_bytes()).hexdigest() == digest)
-            if name == "gnome-keyring":
+            if display_smoke:
+                phase = "prompt-asset-" + name
+                member, leaf, dependencies = PROMPT_MEMBERS[name]
+                path = work / leaf
+                extract_member(cmd, output, member, path)
+                dynamic = cmd("readelf", "--dynamic", str(path)).decode("ascii")
+                need(tuple(re.findall(r"Shared library: \[([a-zA-Z0-9._+-]+)\]", dynamic)) == dependencies and
+                     not re.search(r"\((?:RPATH|RUNPATH)\)", dynamic))
+                if name == "libgcr-ui-3-1":
+                    need(re.findall(r"Library soname: \[([a-zA-Z0-9._+-]+)\]", dynamic) == [leaf])
+            elif name == "gnome-keyring":
                 phase = "member"
                 provider = extract_member(cmd, output, "./usr/bin/gnome-keyring-daemon", candidate)
                 phase = "elf"
@@ -217,6 +245,17 @@ APT::Get::AllowUnauthenticated "false";
                 need(re.findall(r"Library soname: \[([a-zA-Z0-9._+-]+)\]", dynamic) == [soname] and
                      not re.search(r"\((?:RPATH|RUNPATH)\)", dynamic))
             print("ubuntu_provider_archive_verified " + name + " " + version + " sha256=" + digest)
+        if display_smoke:
+            phase = "display-prerequisites"
+            import runpy
+            smoke = runpy.run_path(str(Path(__file__).with_name("pilot_linux_private_display.py")))["verify_private_display"]
+            try:
+                smoke()
+            except Exception:
+                phase = smoke.__globals__["phase"]
+                raise ValueError("isolated display denied") from None
+            print("linux_private_xvfb_peer_and_authentication_verified_gcr_asset_not_executed")
+            return
         if not verify_peer:
             print("ubuntu_provider_stage_archive_only_not_executed")
             return

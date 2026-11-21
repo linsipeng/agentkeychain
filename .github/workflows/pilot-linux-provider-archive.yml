@@ -1,4 +1,4 @@
-name: Disposable Ubuntu provider collection offer
+name: Disposable Ubuntu provider offer and display
 
 on:
   pull_request:
@@ -8,6 +8,7 @@ on:
       - '.github/workflows/pilot-linux-provider-archive.yml'
       - 'tests/native/pilot_linux_ubuntu_provider_stage.py'
       - 'tests/native/pilot_linux_private_secret_bus.py'
+      - 'tests/native/pilot_linux_private_display.py'
 
 permissions:
   contents: read
@@ -19,7 +20,7 @@ jobs:
           github.event.pull_request.number == 10 &&
           github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 6
+    timeout-minutes: 10
     steps:
       - name: Check out exact draft source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -38,3 +39,12 @@ jobs:
           /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
             AKC_UBUNTU_PROVIDER_STAGE=collection-offer-v1 /usr/bin/timeout 220s /usr/bin/python3 -I \
             tests/native/pilot_linux_ubuntu_provider_stage.py
+
+      - name: Verify separate authenticated display without launching a prompt
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$GITHUB_ACTIONS" = true && test "$RUNNER_ENVIRONMENT" = github-hosted
+          /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted AKC_UBUNTU_PROVIDER_STAGE=private-display-v1 /usr/bin/timeout 220s /usr/bin/python3 -I tests/native/pilot_linux_ubuntu_provider_stage.py
