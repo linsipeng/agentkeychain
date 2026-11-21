@@ -32,7 +32,7 @@ function adapter(db:Database){
   });
   return {...bound([]),bind:(...args:SQL[])=>bound(args)};
  };
- return {prepare,batch:async (rows:Array<{execute():unknown}>)=>db.transaction(()=>rows.map(row=>row.execute())).immediate()} as unknown as Parameters<typeof proveFreshContinuationHead>[0];
+ return {prepare,batch:async (rows:Array<{execute():unknown}>)=>db.transaction(()=>rows.map(row=>row.execute())).immediate()} as unknown as Parameters<typeof proveFreshContinuationHead>[0] & Parameters<typeof consumeGenesisPackageContinuation>[0];
 }
 function applySql(db:Database,dir:string){for(const f of readdirSync(dir).filter(x=>x.endsWith('.sql')).sort())db.exec(readFileSync(join(dir,f),'utf8'));}
 const b64=(b:Uint8Array)=>Buffer.from(b).toString('base64');

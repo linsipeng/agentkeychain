@@ -77,3 +77,45 @@ These ports do not enable a continuation command. Independently provisioned
 short-lived permit, compatible shared enrollment writers, pilot-only secure
 state and session acquisition, authenticated published Main preflight and
 commit-or-read, and complete enrolled-client acceptance are still required.
+
+## Explicit invocation after independent approval
+
+The installed adapter additionally composes the exact Main `preflight`,
+`commit-or-read`, and `post-commit-proof` ports for the approved original
+package stage. The composition is finite, requires a short-lived original
+device session, carries no Auth cookie or device private key, and independently
+checks the Main and Custody signatures. The additive scope permit is signed
+by the installation's distinct rollout pin over exact canonical JSON in
+this order:
+
+```text
+version, domain, keyId, installationDigest, intentDigest, approvalDigest, issuedAt, expiresAt
+```
+
+Version 1, domain `AgentKeychain-installed-continuation-pilot-commit-v1`.
+The install and approval digests hash the JSON pair of canonical bytes and
+signature; intent hashes canonical bytes. The permit is positive for at most
+300 seconds, expires no later than the signed installation, and cannot renew
+the Auth approval or Custody proof. Under the lease the CLI-side composition
+retains one original nonce and exact independently verified preflight
+evidence before entering Main's atomic commit. A lost response retries the
+same exact body with a newly signed request-envelope nonce; no new package or
+grant is created. Expired or revoked evidence refuses rather than replaying
+after the permitted window. The only positive result from this adapter is
+`commit-verified-not-active`; it neither writes the active profile nor
+starts sync.
+
+This path is exercised in an isolated in-memory secure store and a new local
+SQLite database, with independently signed typed fixture responses; the
+separate compiled binary still only checks installation. To surface an
+installed operational command, first bind a signed installation to a newly
+provisioned same-owner private directory and verify real path + inode/no
+symlink (never inherit HOME or AGENTKEYCHAIN_HOME for the pilot). Derive a
+distinct pilot-only native secret namespace from that installation + directory,
+allow it in a separately compiled, reviewed macOS helper, and provision an
+isolated Linux secret collection. Ensure the normal CLI resolves neither
+namespace, and that pilot setup establishes exact original approved enrollment
+there without copying normal vault credentials. Session acquisition must
+target the same signed pilot origin and only the original protected device.
+Until acceptance of that native base and an actual hosted transport rehearsal,
+normal and standalone CLI dispatch remain closed.

@@ -11,3 +11,6 @@ await build({absWorkingDir:root,entryPoints:['auth-trust-worker/pilot-continuati
 await build({absWorkingDir:root,entryPoints:['api-worker/pilot-continuation-main.ts'],
  outfile:'dist/api-worker/pilot-continuation-post.js',bundle:true,format:'esm',platform:'neutral',
  mainFields:['module','main'],external:['cloudflare:workers','cloudflare:email','node:buffer','node:net'],target:'es2022'});
+await build({absWorkingDir:root,entryPoints:['custody-trust-worker/pilot-continuation.ts'],
+ outfile:'dist/custody-trust-worker/pilot-continuation.js',bundle:true,format:'esm',platform:'neutral',
+ mainFields:['module','main'],external:['cloudflare:workers','node:buffer'],target:'es2022'});

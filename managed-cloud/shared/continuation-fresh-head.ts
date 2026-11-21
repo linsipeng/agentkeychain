@@ -34,7 +34,7 @@ const shape=(value:unknown,max:number):SignedManagedOperation=>{
 };
 const bytesDigest=(value:SignedManagedOperation)=>digest(JSON.stringify([value.canonical,value.signature]));
 
-async function exactCurrentHead(db:D1Database,request:Omit<ContinuationFreshHeadRequest,'approval'>,policy:CustodyPolicy,localWitnessKey:CheckpointSigner){
+async function exactCurrentHead(db:Pick<D1Database,'prepare'>,request:Omit<ContinuationFreshHeadRequest,'approval'>,policy:CustodyPolicy,localWitnessKey:CheckpointSigner){
   const {nonce,grant}=request;
   if(typeof nonce!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(nonce)||typeof grant!=='string'||grant.length===0||grant.length>4096)throw reject();
   const target=shape(request.target,4096),roster=shape(request.roster,64*1024),keyPackage=shape(request.keyPackage,4096);
@@ -75,7 +75,7 @@ async function exactCurrentHead(db:D1Database,request:Omit<ContinuationFreshHead
   return {g,r,w,pin,witness,target,nonce,grant,roster,expected,payloadDigest,stillCurrent};
 }
 
-async function approvedCurrentHead(db:D1Database,request:ContinuationFreshHeadRequest,policy:CustodyPolicy,localWitnessKey:CheckpointSigner){
+async function approvedCurrentHead(db:Pick<D1Database,'prepare'>,request:ContinuationFreshHeadRequest,policy:CustodyPolicy,localWitnessKey:CheckpointSigner){
  const head=await exactCurrentHead(db,request,policy,localWitnessKey),approval=shape(request.approval,1024),issuedAt=nowSeconds();
  const {target,grant,payloadDigest,expected,w,r}=head;
  await verifyContinuationApproval(target,approval,{oldGrantCanonical:grant,stage:'put-key-package',payloadDigest,
@@ -87,7 +87,7 @@ async function approvedCurrentHead(db:D1Database,request:ContinuationFreshHeadRe
 
 /** Internal read-only preflight; the local signer remains unexposed. */
 export async function proveFreshContinuationHead(
- db:D1Database, request:ContinuationFreshHeadRequest, policy:CustodyPolicy, localWitnessKey:CheckpointSigner,
+ db:Pick<D1Database,'prepare'>, request:ContinuationFreshHeadRequest, policy:CustodyPolicy, localWitnessKey:CheckpointSigner,
 ):Promise<{witness:SignedManagedOperation;freshHead:SignedManagedOperation}>{
  try{
   exactFields(request,['nonce','grant','target','approval','roster','keyPackage']);
@@ -107,7 +107,7 @@ export async function proveFreshContinuationHead(
  * This proves the sample occurred after that claim, not independent storage.
  * Pins/keys are local Custody configuration; no HTTP, RPC or write path. */
 export async function provePostCommitContinuationHead(
- db:D1Database, request:ContinuationFreshHeadRequest,
+ db:Pick<D1Database,'prepare'>, request:ContinuationFreshHeadRequest,
  priorFreshHead:SignedManagedOperation, mainCommit:SignedManagedOperation,
  policy:CustodyPolicy&{readonly mainCommitAuthority:CheckpointKey;readonly otherReleaseKeys:readonly CheckpointKey[]},
  localWitnessKey:CheckpointSigner,
@@ -162,7 +162,7 @@ export async function provePostCommitContinuationHead(
  * and bind its expired grant, one current genesis head, and exact package.
  * This read-only proof is neither approval nor permission to commit. */
 export async function proveContinuationAuthReadiness(
- db:D1Database, request:ContinuationAuthReadinessRequest, policy:CustodyPolicy, localWitnessKey:CheckpointSigner,
+ db:Pick<D1Database,'prepare'>, request:ContinuationAuthReadinessRequest, policy:CustodyPolicy, localWitnessKey:CheckpointSigner,
 ):Promise<{witness:SignedManagedOperation;readiness:SignedManagedOperation}>{
  try{
   exactFields(request,['nonce','oldGrantCanonical','target','roster','keyPackage']);

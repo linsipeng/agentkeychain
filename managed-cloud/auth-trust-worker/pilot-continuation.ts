@@ -11,6 +11,9 @@ import {continuationHandoff} from './experimental/continuation-handoff.ts';
 import {continuationReadback} from './experimental/continuation-readback.ts';
 import {continuationDevicePoll} from './experimental/continuation-device-poll.ts';
 
+import {pilotGenesisRegistration} from './experimental/pilot-genesis-registration.ts';
+import {PILOT_GENESIS_REGISTER_PATH,pilotGenesisRegistrationHttp} from './experimental/pilot-genesis-registration-http.ts';
+
 declare const AKC_PILOT_BROWSER_BUNDLE:string;
 
 interface Env {
@@ -22,6 +25,8 @@ interface Env {
  PILOT_APPROVAL_SIGNER:CheckpointSigner;
  PILOT_CUSTODY_READINESS:CustodyReadinessPort;
  PILOT_HANDOFF_HMAC:string;
+ PILOT_GENESIS_REGISTRATION_MODE?:string;
+ PILOT_GENESIS_INVITE_PIN?:string;
 }
 const paths=new Map([
  ['/continuation/approve','GET'],['/continuation/approve/browser.js','GET'],
@@ -29,6 +34,7 @@ const paths=new Map([
  ['/v1/auth/continuation-handoff/claim','POST'],['/v1/auth/continuation-handoff/poll','POST'],
  ['/v1/auth/continuation-approval/begin','POST'],['/v1/auth/continuation-approval/complete','POST'],
  ['/v1/auth/continuation-receipt','POST'],
+ [PILOT_GENESIS_REGISTER_PATH+'/begin','POST'],[PILOT_GENESIS_REGISTER_PATH+'/complete','POST'],
 ]);
 const reject=()=>new Error('pilot_continuation_unavailable');
 const closed=()=>new Response(null,{status:404,headers:{'cache-control':'no-store','referrer-policy':'no-referrer'}});
@@ -77,6 +83,14 @@ export default {
    let macKey:CryptoKey;
    try{macKey=await crypto.subtle.importKey('raw',secret,{name:'HMAC',hash:'SHA-256'},false,['sign']);}
    finally{secret.fill(0);}
+   if(u.pathname.startsWith(PILOT_GENESIS_REGISTER_PATH+'/')){
+    const raw=env.PILOT_GENESIS_INVITE_PIN;
+    if(env.PILOT_GENESIS_REGISTRATION_MODE!=='invitation-v1'||typeof raw!=='string'||raw.length>512)return closed();
+    const inviteKey=await pin(JSON.parse(raw));
+    if([policy.authority,policy.genesis.authority,...policy.genesis.checkpointKeys,...policy.genesis.recoveryAuthorities,...policy.witnesses]
+       .some(k=>k.keyId===inviteKey.keyId||k.publicKey===inviteKey.publicKey)||now()>=deadline)return closed();
+    return await pilotGenesisRegistrationHttp(origin,deadline,pilotGenesisRegistration(env.AUTH,{origin,rpId:u.hostname},policy.genesis,inviteKey,deadline))(req);
+   }
    const issuer=continuationIssuer(env.AUTH,{origin,rpId:u.hostname},policy,{
     key:async()=>signerPin,
     sign:async(value)=>{if(now()>=deadline)throw reject();return signer.sign(value);},

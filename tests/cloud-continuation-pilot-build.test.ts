@@ -34,7 +34,7 @@ async function makeArtifact(){
   mode:'disposable-only',contract:INSTALLED_PILOT_CONTRACT,target,manifestDigest:await signedDigest(manifest),authOriginDigest:await signedDigest(authOriginAppendix),
   authPinDigest:await signedDigest(authAppendix),mainPinDigest:await signedDigest(commitAppendix),rolloutPinDigest:await signedDigest(rolloutAppendix),genesisPin:genesis!.pin,issuedAt,expiresAt}));
  const artifact={manifest,authOriginAppendix,authAppendix,commitAppendix,rolloutAppendix,installation};
- return {artifact,root:root!,target,expiresAt,auth:auth!,main:main!,witness:witness!};
+ return {artifact,root:root!,target,expiresAt,auth:auth!,main:main!,witness:witness!,rollout:rollout!};
 }
 
 test('only the isolated, signed pilot artifact can compile an inert pilot installation',async()=>{
@@ -83,11 +83,11 @@ test('installed transport uses independent exact origins, and only post-queries 
  const {genesisRoot}=await import('../managed-cloud/shared/checkpoints.ts'),{rosterDigest}=await import('../managed-cloud/shared/roster.ts');
  const {WITNESS_DOMAIN}=await import('../managed-cloud/shared/roster-witness.ts'),{verify}=await import('../managed-cloud/shared/contracts.ts');
  const {verifyReleaseManifest}=await import('../src/cloud/config.ts'),{installedContinuationPilotTransport}=await import('../src/cloud/continuation-pilot-transport.ts');
- const {protectEnrollmentKeys,withContinuationEnrollmentLease,stageGenesisContinuation}=await import('../src/cloud/enrollment-intent.ts');
+ const {protectEnrollmentKeys,withContinuationEnrollmentLease}=await import('../src/cloud/enrollment-intent.ts');
  const {canonicalContinuationReceipt}=await import('../managed-cloud/shared/enrollment-continuation.ts');
- const {PILOT_POST_PROOF_PATH,canonicalPilotPostProof}=await import('../managed-cloud/shared/pilot-continuation-post-wire.ts');
+ const {PILOT_POST_PROOF_PATH,canonicalPilotPostProof,PILOT_PREFLIGHT_PATH,PILOT_COMMIT_PATH,pilotPreflightInput,pilotCommitInput}=await import('../managed-cloud/shared/pilot-continuation-post-wire.ts');
  const {randomBytes}=await import('node:crypto'),{default:sodium}=await import('libsodium-wrappers-sumo');
- const {artifact,root,target,auth,main,witness:signer}=await makeArtifact();
+ const {artifact,root,target,auth,main,witness:signer,rollout}=await makeArtifact();
  const gate=await verifyInstalledContinuationPilot(artifact,root.publicKey,target);
  expect(()=>installedContinuationPilotTransport({...gate})).toThrow('cloud_continuation_pilot_not_provisioned');
  const policy=verifyReleaseManifest(artifact.manifest,Buffer.from(root.publicKey,'base64'));
@@ -103,6 +103,8 @@ test('installed transport uses independent exact origins, and only post-queries 
  const authOrigin=JSON.parse(artifact.authOriginAppendix.canonical).authOrigin;
  const calls:string[]=[],signedDigest=(x:{canonical:string;signature:string})=>digest(JSON.stringify([x.canonical,x.signature]));
  let returnWrongOrigin=false,returnWrongProof=false;
+ const commitBodies:string[]=[],requestNonces=new Set<string>();
+
  const network:import('../src/cloud/http.ts').CloudFetch=async(url,init)=>{
   calls.push(url);expect(init).toMatchObject({method:'POST',credentials:'omit',redirect:'error',cache:'no-store'});
   const response=(value:object,status=200)=>{const r=Response.json(value,{status});
@@ -114,14 +116,38 @@ test('installed transport uses independent exact origins, and only post-queries 
    expect(url.endsWith('/poll')).toBe(true);
    return response({status:'pending'},202);
   }
-  expect(url).toBe(policy.apiOrigin+PILOT_POST_PROOF_PATH);
-  expect(canonicalPilotPostProof(body)).toBe(String(init.body));
+  const path=new URL(url).pathname;
+  expect(url).toBe(policy.apiOrigin+path);
+  expect(path===PILOT_POST_PROOF_PATH?canonicalPilotPostProof(body):
+   JSON.stringify(path===PILOT_PREFLIGHT_PATH?pilotPreflightInput(body):pilotCommitInput(body))).toBe(String(init.body));
   expect(body.request.grant).toBe(oldGrantCanonical);
   const headers=new globalThis.Headers(init.headers);
   expect(headers.get('origin')).toBeNull();expect(headers.get('cookie')).toBeNull();
   expect(headers.get('authorization')).toBe('Bearer '+session.token);
   expect(await verify(grant.signingKey,headers.get('x-device-proof')!,requestProof('POST',new URL(url),
    await digest(String(init.body)),Number(headers.get('x-device-timestamp')),headers.get('x-device-nonce')!,await digest(session.token)))).toBe(true);
+  const httpNonce=headers.get('x-device-nonce')!;
+  expect(requestNonces.has(httpNonce)).toBe(false);requestNonces.add(httpNonce);
+  if(path===PILOT_PREFLIGHT_PATH){
+   const witnessBytes=JSON.stringify({version:1,keyId:signer.pin.keyId,accountId:identity.accountId,tenantId,vaultId,event:1,revision:1,digest:head,
+    sequence:0,root:await genesisRoot(tenantId,vaultId),checkpointDigest:await digest('fixture-checkpoint')});
+   const witness={canonical:witnessBytes,signature:(await signer.sign(WITNESS_DOMAIN+witnessBytes)).signature};
+   const freshHead=await signer.sign(JSON.stringify({domain:'AgentKeychain-enrollment-continuation-current-head-v1',keyId:signer.pin.keyId,
+    nonce:body.request.nonce,requestId,witnessDigest:await signedDigest(witness),approvalDigest:await signedDigest(body.request.approval),
+    payloadDigest:JSON.parse(body.request.target.canonical).payloadDigest,issuedAt:now,expiresAt:now+40}));
+   return response({witness,freshHead});
+  }
+  if(path===PILOT_COMMIT_PATH){
+   commitBodies.push(String(init.body));
+   if(commitBodies.length===1)throw new Error('test_lost_commit_response');
+   const target=JSON.parse(body.request.target.canonical);
+   const commit=await main.sign(JSON.stringify({version:1,domain:'AgentKeychain-enrollment-continuation-main-commit-v1',keyId:main.pin.keyId,
+    nonce:body.request.nonce,continuationId:target.id,requestId,...identity,keyEpoch:1,stage:'put-key-package',
+    intentDigest:await digest(body.request.target.canonical),approvalDigest:await signedDigest(body.request.approval),payloadDigest:target.payloadDigest,
+    witnessDigest:await signedDigest(body.witness),custodyFreshHeadDigest:await signedDigest(body.freshHead),issuedAt:now,expiresAt:now+35}));
+   return response(commit);
+  }
+  expect(path).toBe(PILOT_POST_PROOF_PATH);
   const prior=JSON.parse(body.main.canonical);
   const proof=JSON.stringify({version:1,domain:'AgentKeychain-enrollment-continuation-custody-post-commit-v1',
    keyId:signer.pin.keyId,nonce:returnWrongProof?nonce():body.request.nonce,mainCommitDigest:await signedDigest(body.main),requestId,
@@ -133,7 +159,7 @@ test('installed transport uses independent exact origins, and only post-queries 
   await protectEnrollmentKeys(secure,keys);
   store.put('state','pending',{requestId,deviceId});store.put('state','pending-approved',{requestId,deviceId,vaultId});
   store.put('state','pending-self-roster',roster);store.put('state','pending-package',keyPackage);
-  await withContinuationEnrollmentLease(store,async lease=>{
+  const stage=await withContinuationEnrollmentLease(store,async lease=>{
    const bound={store,secure,lease};
    await expect(port.postFromProtectedStage({...bound,nonce:nonce(),session})).rejects.toThrow('cloud_continuation_pilot_transport_unavailable');
    expect(calls).toHaveLength(0);
@@ -149,22 +175,30 @@ test('installed transport uses independent exact origins, and only post-queries 
    expect(local).toHaveLength(1);
    const locator=browserUrl.split('#handoff=')[1]!;
    expect(await port.poll({...bound,locator,stage})).toEqual({status:'pending'});
-   const target=stage.target,intentDigest=await digest(target.canonical),alignment=JSON.parse(target.canonical);
-   const approval=await auth.sign(canonicalContinuationReceipt({version:1,domain:'AgentKeychain-enrollment-continuation-approval-v1',
-    intentDigest,authorityKeyId:auth.pin.keyId,approvedAt:now,expiresAt:now+45}));
-   const witnessBytes=JSON.stringify({version:1,keyId:signer.pin.keyId,accountId:identity.accountId,tenantId,vaultId,event:1,revision:1,digest:head,
-    sequence:0,root:await genesisRoot(tenantId,vaultId),checkpointDigest:await digest('fixture-checkpoint')});
-   const witness={canonical:witnessBytes,signature:(await signer.sign(WITNESS_DOMAIN+witnessBytes)).signature};
-   const preNonce=nonce(),witnessDigest=await signedDigest(witness),approvalDigest=await signedDigest(approval),payloadDigest=alignment.payloadDigest;
-   const freshHead=await signer.sign(JSON.stringify({domain:'AgentKeychain-enrollment-continuation-current-head-v1',keyId:signer.pin.keyId,
-    nonce:preNonce,requestId,witnessDigest,approvalDigest,payloadDigest,issuedAt:now,expiresAt:now+40}));
-   const commit=await main.sign(JSON.stringify({version:1,domain:'AgentKeychain-enrollment-continuation-main-commit-v1',keyId:main.pin.keyId,
-    nonce:preNonce,continuationId:alignment.id,requestId,...identity,keyEpoch:1,stage:'put-key-package',intentDigest,approvalDigest,payloadDigest,
-    witnessDigest,custodyFreshHeadDigest:await signedDigest(freshHead),issuedAt:now,expiresAt:now+35}));
-   await stageGenesisContinuation(secure,store,policy,preNonce,{grant,target,approval,authorityAppendix:artifact.authAppendix,witness,freshHead,roster,keyPackage,
-    commit,commitAppendix:artifact.commitAppendix},lease);
+   return stage;
+  });
+  const intentDigest=await digest(stage.target.canonical);
+  const approval=await auth.sign(canonicalContinuationReceipt({version:1,domain:'AgentKeychain-enrollment-continuation-approval-v1',
+   intentDigest,authorityKeyId:auth.pin.keyId,approvedAt:now,expiresAt:now+45}));
+  const permit=await rollout.sign(JSON.stringify({version:1,domain:'AgentKeychain-installed-continuation-pilot-commit-v1',keyId:rollout.pin.keyId,
+   installationDigest:await signedDigest(artifact.installation),intentDigest,approvalDigest:await signedDigest(approval),issuedAt:now,expiresAt:now+35}));
+  const input={stage,approval,permit,secure,store,session};
+  await expect(port.commitApprovedStage({...input,permit:{...permit,signature:approval.signature}})).rejects.toThrow('cloud_continuation_pilot_transport_unavailable');
+  expect(calls).toHaveLength(3);
+  await expect(port.commitApprovedStage(input)).rejects.toThrow('cloud_continuation_pilot_transport_unavailable');
+  expect(calls.slice(3)).toEqual([policy.apiOrigin+PILOT_PREFLIGHT_PATH,policy.apiOrigin+PILOT_COMMIT_PATH]);
+  const reopened=new CloudStore(db,keys.csk);
+  try{
+   const resume=installedContinuationPilotTransport(gate,network);
+   expect(await resume.commitApprovedStage({...input,store:reopened})).toBe('commit-verified-not-active');
+  }finally{reopened.destroy();}
+  expect(commitBodies).toHaveLength(2);
+  expect(commitBodies[0]).toBe(commitBodies[1]);
+  expect(calls.slice(5)).toEqual([policy.apiOrigin+PILOT_COMMIT_PATH,policy.apiOrigin+PILOT_POST_PROOF_PATH]);
+  await withContinuationEnrollmentLease(store,async lease=>{
+   const bound={store,secure,lease};
    await expect(port.postFromProtectedStage({...bound,nonce:nonce(),session:{...session,deviceId:'other'}})).rejects.toThrow('cloud_continuation_pilot_transport_unavailable');
-   expect(calls).toHaveLength(3);
+   expect(calls).toHaveLength(7);
    const postNonce=nonce(),proof=await port.postFromProtectedStage({...bound,nonce:postNonce,session});
    expect(JSON.parse(proof.canonical).nonce).toBe(postNonce);
    returnWrongProof=true;

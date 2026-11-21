@@ -16,7 +16,7 @@ const hash=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v
 /** Isolated Auth registration kernel only. The caller is an Auth-owned adapter
  * which must bind browserDigest to a server-generated cookie, exact HTTPS Origin
  * and CSRF. No Main pin import, HTTP, general session, signer or activation. */
-export function pilotGenesisRegistration(db:D1Database,identity:WebAuthnPolicy,policy:GenesisApprovalPolicy,inviteKey:CheckpointKey){
+export function pilotGenesisRegistration(db:D1Database,identity:WebAuthnPolicy,policy:GenesisApprovalPolicy,inviteKey:CheckpointKey,deadline=Number.MAX_SAFE_INTEGER){
  const u=new URL(identity.origin);
  if(u.protocol!=='https:'||u.origin!==identity.origin||u.port||u.hostname!==identity.rpId||!/^auth-pilot-[a-z0-9-]+\./.test(u.hostname))throw denied();
  async function scope(invite:SignedManagedOperation,grant:string,roster:SignedManagedOperation,browserDigest:string){
@@ -38,7 +38,7 @@ export function pilotGenesisRegistration(db:D1Database,identity:WebAuthnPolicy,p
   exactFields(data,['version','domain','keyId','origin','rpId','id','accountId','tenantId','vaultId','deviceId','requestId','keyEpoch','grantDigest','rosterDigest','issuedAt','expiresAt']);
   const {id,issuedAt,expiresAt}=data;
   if(!opaque(id)||typeof issuedAt!=='number'||typeof expiresAt!=='number'||!Number.isSafeInteger(issuedAt)||!Number.isSafeInteger(expiresAt)||
-     issuedAt<1||issuedAt>at||expiresAt<=at||expiresAt-issuedAt>600||expiresAt>Math.min(g.expiresAt,r.expiresAt))throw denied();
+     issuedAt<1||issuedAt>at||expiresAt<=at||expiresAt-issuedAt>600||expiresAt>Math.min(g.expiresAt,r.expiresAt,deadline))throw denied();
   const grantDigest=await digest(grant),rosterHash=await rosterDigest(roster);
   const expected={version:1,domain:PILOT_GENESIS_INVITE_DOMAIN,keyId:inviteKey.keyId,origin:identity.origin,rpId:identity.rpId,id,
    accountId,tenantId,vaultId,deviceId,requestId,keyEpoch,grantDigest,rosterDigest:rosterHash,issuedAt,expiresAt};

@@ -207,6 +207,21 @@ const continuationLeases=new WeakMap<EnrollmentLease,{store:CloudStore;fence:()=
 export function assertContinuationLease(store:CloudStore,lease:EnrollmentLease){
  const current=continuationLeases.get(lease);if(current?.store!==store)throw new Error('cloud_lease_lost');current.fence();
 }
+/** Match an enrollment draft without repairing slots or touching native state. */
+export async function assertProtectedPilotDraft(secure:SecureStore,store:CloudStore,lease:EnrollmentLease,
+ evidence:Pick<GenesisContinuationPreflight,'grant'|'roster'|'keyPackage'>){
+ assertContinuationLease(store,lease);
+ const previous=await load(secure),g=evidence.grant;
+ const pending=store.get<{requestId:string;deviceId:string}>('state','pending'),
+  approved=store.get<{requestId:string;deviceId:string;vaultId:string}>('state','pending-approved');
+ if(!previous||previous.activation||previous.keys.signingPublic!==g.signingKey||previous.keys.wrappingPublic!==g.wrappingKey||
+    pending?.requestId!==g.requestId||pending.deviceId!==g.deviceId||approved?.requestId!==g.requestId||
+    approved.deviceId!==g.deviceId||approved.vaultId!==g.vaultId||store.get('state','enrollment')||
+    JSON.stringify(store.get('state','pending-self-roster'))!==JSON.stringify(evidence.roster)||
+    JSON.stringify(store.get('state','pending-package'))!==JSON.stringify(evidence.keyPackage))throw denied();
+ assertContinuationLease(store,lease);
+}
+
 /** Only purpose-scoped post-proof transport receives exact protected evidence.
  * Retain both the lease and exact stage throughout the callback. */
 export async function withStagedGenesisPostProof(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,nonce:string,

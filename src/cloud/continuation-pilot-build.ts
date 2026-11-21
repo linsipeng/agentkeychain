@@ -24,7 +24,8 @@ export interface VerifiedInstalledContinuationPilot {
  readonly expiresAt:number;
 }
 type TransportScope={policy:ManagedEndpointPolicy;authOrigin:string;authOriginAppendix:SignedManagedOperation;
- authAppendix:SignedManagedOperation;commitAppendix:SignedManagedOperation};
+ authAppendix:SignedManagedOperation;commitAppendix:SignedManagedOperation;
+ rollout:Readonly<{keyId:string;publicKey:string}>;installationDigest:string};
 const installedScopes=new WeakMap<VerifiedInstalledContinuationPilot,Readonly<TransportScope>>();
 export function installedContinuationPilotScope(gate:VerifiedInstalledContinuationPilot){
  const scope=installedScopes.get(gate);
@@ -94,7 +95,8 @@ export async function verifyInstalledContinuationPilot(artifact:ContinuationPilo
   if(installation.canonical!==canonical||!await verify(rootPublicKey,installation.signature,canonical)||Math.floor(Date.now()/1000)>=expiresAt)throw deny();
   const gate=Object.freeze({releaseId:manifest.releaseId,contract:INSTALLED_PILOT_CONTRACT,expiresAt});
   installedScopes.set(gate,Object.freeze({policy:manifest,authOrigin,authOriginAppendix:Object.freeze(artifact.authOriginAppendix),
-   authAppendix:Object.freeze(artifact.authAppendix),commitAppendix:Object.freeze(artifact.commitAppendix)}));
+   authAppendix:Object.freeze(artifact.authAppendix),commitAppendix:Object.freeze(artifact.commitAppendix),rollout,
+   installationDigest:await signedDigest(installation)}));
   return gate;
  }catch{throw deny();}
 }

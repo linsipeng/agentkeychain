@@ -11,6 +11,9 @@ const transportMain=ephemeralTransportKey(),transportCustody=ephemeralTransportK
 const transportGenesis=ephemeralTransportKey();
 const transportPins=JSON.stringify({main:transportMain.pin,witness:transportCustody.pin,approval:transportApproval.pin,checkpoint:transportCheckpoint.pin,genesis:transportGenesis.pin});
 const pilotMainOrigin='https://api.web-pilot-device.fixture.invalid';
+const pilotCustodyPins=JSON.stringify({authority:transportApproval.pin,witness:transportCustody.pin,
+ mainCommitAuthority:transportMain.pin,checkpointKeys:[transportCheckpoint.pin],recoveryAuthorities:[],otherReleaseKeys:[transportGenesis.pin]});
+await build({entryPoints:['custody-trust-worker/pilot-continuation.ts'],outfile:'dist/test-pilot-custody.mjs',bundle:true,format:'esm',platform:'neutral',external:['cloudflare:workers','node:buffer'],target:'es2022'});
 await build({entryPoints:['api-worker/pilot-continuation-main.ts'],outfile:'dist/test-pilot-main-post.mjs',bundle:true,format:'esm',platform:'neutral',external:['cloudflare:workers','node:buffer'],target:'es2022'});
 await build({entryPoints:['custody-trust-worker/continuation-readiness.ts'],outfile:'dist/test-custody-continuation-readiness.mjs',bundle:true,format:'esm',platform:'neutral',external:['cloudflare:workers','node:buffer'],target:'es2022'});
 const readinessPins=JSON.stringify({authority:transportApproval.pin,witness:transportCustody.pin,checkpointKeys:[transportCheckpoint.pin],recoveryAuthorities:[]});
@@ -39,7 +42,7 @@ export default defineConfig({
                             workers: [
                                 {name:'fixture-pilot-main-post',modules:true,scriptPath:'dist/test-pilot-main-post.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat'],
                                  bindings:{PILOT_MAIN_MODE:'continuation-v1',PILOT_MAIN_ORIGIN:pilotMainOrigin,PILOT_MAIN_EXPIRES_AT:String(Math.floor(Date.now()/1000)+3600),PILOT_CUSTODY_WITNESS:JSON.stringify(transportCustody.pin),PILOT_MAIN_APPROVAL_PIN:JSON.stringify(transportApproval.pin),PILOT_MAIN_COMMIT_PIN:JSON.stringify(transportMain.pin)},
-                                 d1Databases:{MAIN:'main-db'},serviceBindings:{PILOT_CUSTODY_POST:{name:'fixture-continuation-custody',entrypoint:'PilotCustodyPostFixture'},PILOT_CUSTODY_FRESH:{name:'fixture-continuation-custody',entrypoint:'PilotCustodyFreshFixture'},PILOT_MAIN_SIGNER:{name:'fixture-continuation-main',entrypoint:'PilotMainSignerFixture'}}},
+                                 d1Databases:{MAIN:'main-db'},serviceBindings:{PILOT_CUSTODY_POST:{name:'fixture-pilot-custody',entrypoint:'PilotCustodyPost'},PILOT_CUSTODY_FRESH:{name:'fixture-pilot-custody',entrypoint:'PilotCustodyFresh'},PILOT_MAIN_SIGNER:{name:'fixture-continuation-main',entrypoint:'PilotMainSignerFixture'}}},
                                 {name:'fixture-pilot-main-off',modules:true,scriptPath:'dist/test-pilot-main-post.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat']},
                                 {name:'fixture-continuation-auth',modules:true,scriptPath:'dist/test-auth-continuation-preview.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat'],
                                  bindings:{ROLE_KEY:transportApproval.privateKey,PINS:transportPins},d1Databases:{AUTH:'fixture-continuation-auth-db'},
@@ -48,6 +51,8 @@ export default defineConfig({
                                  bindings:{ROLE_KEY:transportMain.privateKey,PINS:transportPins},d1Databases:{MAIN:'main-db'},serviceBindings:{CUSTODY:{name:'fixture-continuation-custody',entrypoint:'CustodyContinuationTransport'}}},
                                 {name:'fixture-continuation-custody-readiness',modules:true,scriptPath:'dist/test-custody-continuation-readiness.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat'],
                                  bindings:{CONTINUATION_WITNESS_PKCS8_B64:transportCustody.privateKey,CONTINUATION_READINESS_PINS:readinessPins},d1Databases:{CUSTODIAN:'custodian-db'}},
+                                {name:'fixture-pilot-custody',modules:true,scriptPath:'dist/test-pilot-custody.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat'],
+                                 bindings:{PILOT_CUSTODY_MODE:'continuation-v1',PILOT_CUSTODY_EXPIRES_AT:String(Math.floor(Date.now()/1000)+3600),PILOT_CUSTODY_PINS:pilotCustodyPins,PILOT_CUSTODY_WITNESS_PKCS8_B64:transportCustody.privateKey},d1Databases:{CUSTODIAN:'custodian-db'}},
                                 {name:'fixture-continuation-custody',modules:true,scriptPath:'dist/test-continuation-transport.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat'],
                                  bindings:{ROLE_KEY:transportCustody.privateKey,PINS:transportPins},d1Databases:{CUSTODIAN:'custodian-db'}},
                                 {name:'api-recovery',modules:true,scriptPath:'dist/test-recovery.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat']},{name:'custody-recovery',modules:true,scriptPath:'dist/test-recovery.mjs',compatibilityDate:'2026-07-16',compatibilityFlags:['nodejs_compat']},{ name: 'checkpoint', modules: true, scriptPath: 'dist/test-checkpoint.mjs', compatibilityDate: '2026-07-16', compatibilityFlags: ['nodejs_compat'] }, {

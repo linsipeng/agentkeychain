@@ -74,3 +74,14 @@ test('compiled Main pilot closes unconfigured and long-lived origins without tou
  }
  assert.deepEqual([reads,rpcs],[0,0]);
 });
+
+test('compiled pilot registration stays closed unless exact separate mode and distinct invite pin are configured',async()=>{
+ const {env,config}=fixture(),path='/v1/auth/pilot-genesis/registration/begin';
+ const req=()=>new Request(origin+path,{method:'POST',headers:{origin,'sec-fetch-site':'same-origin','content-type':'application/json'},body:'{}'});
+ for(const patch of [{},{PILOT_GENESIS_REGISTRATION_MODE:'invitation-v1'},
+  {PILOT_GENESIS_REGISTRATION_MODE:'invitation-v1',PILOT_GENESIS_INVITE_PIN:JSON.stringify(config.genesis)},
+  {PILOT_GENESIS_REGISTRATION_MODE:'invitation-v1',PILOT_GENESIS_INVITE_PIN:JSON.stringify(config.witnesses[0])}]){
+  assert.equal((await pilot.fetch(req(),{...env,...patch})).status,404);
+ }
+ assert.equal((await pilot.fetch(req(),{...env,PILOT_GENESIS_REGISTRATION_MODE:'invitation-v1',PILOT_GENESIS_INVITE_PIN:JSON.stringify(pin())})).status,401);
+});
