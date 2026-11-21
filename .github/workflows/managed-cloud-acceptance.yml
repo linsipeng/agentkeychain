@@ -47,6 +47,7 @@ jobs:
           node --test --experimental-transform-types managed-cloud/tests/continuation-preview.test.mjs
           node --experimental-transform-types --test managed-cloud/tests/continuation-pilot-review.test.mjs
           node --experimental-transform-types managed-cloud/tests/continuation-https-rehearsal.mjs
+          node --experimental-transform-types tests/native/pilot_broker_pipe_rehearsal.mjs
           node managed-cloud/build-continuation-pilot.mjs
           node --test managed-cloud/tests/continuation-pilot-bundle.test.mjs
           npm run test:recovery-resources --prefix managed-cloud

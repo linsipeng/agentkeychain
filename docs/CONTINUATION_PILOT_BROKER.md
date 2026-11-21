@@ -79,3 +79,24 @@ V1 verbs remain unavailable in an installed CLI.
   remote commit or activate. Assert ordinary vault and native slots untouched.
 - Later activation needs cross-store crash/retry tests plus lost or revoked
   Auth/Main/Custody proof cases. This is not power-loss acceptance.
+
+## Disposable channel rehearsal
+
+Run `node --experimental-transform-types tests/native/pilot_broker_pipe_rehearsal.mjs`
+with Node 24. A parent/child test uses only inherited pipes. A separate
+private bootstrap descriptor provisions a one-run test child's Ed25519 key
+and a root-signed exact profile/ABI/peer-key scope, never prepared by the
+request. A signed request and reply are correlated by scope, role, random
+request ID and exact request digest. The one-frame boundary rejects
+oversize, truncation, trailing frames, noncanonical or fatal UTF-8 input.
+The protocol permits only a read of an empty in-memory reference; even a
+valid client signature over seed or activation cannot execute either.
+Only generic denial can cross stderr. No socket listener, file persistence,
+product client, OS credential or external network participates.
+
+This does not implement native trust. The fixture bootstrap is provisioned
+by the already controlled test parent and does not prove actual native peer
+process identity, safe native spawn, keychain/collection scoping or correct
+installed binary origin. Do not copy it as an authority source for a product
+endpoint. Those controls and the authenticated durable state/AEAD contract
+remain open.
