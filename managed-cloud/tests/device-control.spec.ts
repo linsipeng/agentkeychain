@@ -495,9 +495,9 @@ test('last trusted device without current recovery readiness cannot be revoked a
  const {webRepository}=await import('../api-worker/web-repository.ts');
  const view=await webRepository(db(),{} as never,s).query({view:'device',id:d.deviceId});assertSafeView(view);expect(view).toMatchObject({removeRef:null,lastDevice:true,recoveryReady:false});
  await db().prepare('UPDATE browser_sessions SET step_up_digest=?,step_up_expires=unixepoch()+300 WHERE digest=?').bind(listed.revokeActionDigest,s.digest).run();
- const before=await db().prepare('SELECT * FROM devices').all();
+ const before=(await db().prepare('SELECT * FROM devices').all()).results;
  await expect(repo.revoke(s,d.deviceId)).rejects.toThrow();
- expect(await db().prepare('SELECT * FROM devices').all()).toEqual(before);
+ expect((await db().prepare('SELECT * FROM devices').all()).results).toEqual(before);
  expect(await db().prepare("SELECT count(*) n FROM device_actions WHERE action='revoke'").first('n')).toBe(0);
  expect(await db().prepare('SELECT count(*) n FROM device_revocation_boundaries').first('n')).toBe(0);
  expect((await db().prepare('SELECT * FROM device_sessions').all()).results).toEqual(sessionsBefore);expect((await db().prepare('SELECT * FROM vault_devices').all()).results).toEqual(vaultBefore);
@@ -534,4 +534,71 @@ test.each(['expiry','revoke'])('concurrent readiness %s and last-device removal 
  expect(changed.status).toBe('fulfilled');
  expect(await db().prepare('SELECT active FROM devices WHERE id=?').bind(d.deviceId).first('active')).toBe(removed.status==='fulfilled'?0:1);
  expect(await db().prepare('SELECT count(*) n FROM last_device_revocations').first('n')).toBe(removed.status==='fulfilled'?1:0);
+});
+
+import {consumeGenesisPackageContinuation} from '../api-worker/genesis-package-continuation.ts';
+import {canonicalContinuationIntent,canonicalContinuationReceipt} from '../shared/enrollment-continuation.ts';
+import {WITNESS_DOMAIN} from '../shared/roster-witness.ts';
+async function expiredGenesisPackageFixture(){
+ const schema=(env as unknown as {GENESIS_PACKAGE_SCHEMA:Parameters<typeof applyD1Migrations>[1]}).GENESIS_PACKAGE_SCHEMA;
+ await applyD1Migrations(db(),schema);
+ const s=await account(), device=await identity(), authority=await identity(), custody=await identity();
+ const now=Math.floor(Date.now()/1000),requestId='original-request',deviceId='original-device',expiresAt=now-10;
+ const grant={version:1,requestId,deviceId,accountId:s.account_id,tenantId:s.tenant_id,vaultId:'v',keyEpoch:1,issuerDeviceId:null,
+  signingKey:device.signingKey,wrappingKey:device.wrappingKey,expiresAt};
+ const oldGrantCanonical=canonicalGrant(grant);
+ await db().batch([
+  db().prepare("INSERT INTO device_requests(id,code_digest,verification_digest,phrase,device_id,signing_key,wrapping_key,platform,expires_at,state,account_id,tenant_id,vault_id) VALUES(?,?,?,'fixture',?,?,?,'linux',?,'approved',?,?,?)")
+   .bind(requestId,'code','verification',deviceId,device.signingKey,device.wrappingKey,expiresAt,s.account_id,s.tenant_id,'v'),
+  db().prepare('INSERT INTO devices(tenant_id,id,account_id,public_key,active) VALUES(?,?,?,?,1)').bind(s.tenant_id,deviceId,s.account_id,device.signingKey),
+  db().prepare('INSERT INTO device_keys VALUES(?,?,?)').bind(s.tenant_id,deviceId,device.wrappingKey),
+  db().prepare('INSERT INTO vault_devices VALUES(?,?,?,1)').bind(s.tenant_id,'v',deviceId),
+  db().prepare('INSERT INTO enrollment_grants VALUES(?,?,?,?,?,?,?,NULL)').bind(requestId,s.tenant_id,'v',deviceId,null,1,oldGrantCanonical),
+ ]);
+ const roster:TrustedDeviceRoster={version:1,revision:1,previousDigest:null,keyEpoch:1,accountId:s.account_id,tenantId:s.tenant_id,vaultId:'v',
+  active:[{deviceId,signingKey:device.signingKey,wrappingKey:device.wrappingKey}],revoked:[],issuer:{kind:'device',id:deviceId},issuedAt:now,expiresAt:now+86400,
+  checkpointKeys:[{keyId:'custody',publicKey:custody.signingKey}],recoveryAuthorities:[],recovery:null};
+ const canonical=canonicalRoster(roster),signature=await device.sign(ROSTER_DOMAIN+canonical),head=await rosterDigest({canonical,signature});
+ await db().prepare('INSERT INTO signed_rosters VALUES(?,?,?,?,?,?,?,?,?)').bind(s.tenant_id,'v',s.account_id,1,head,null,deviceId,canonical,signature).run();
+ const witnessBytes=JSON.stringify({version:1,keyId:'custody',accountId:s.account_id,tenantId:s.tenant_id,vaultId:'v',event:1,revision:1,digest:head,
+  sequence:0,root:await digest('synthetic root'),checkpointDigest:await digest('synthetic checkpoint')});
+ const witness={canonical:witnessBytes,signature:await custody.sign(WITNESS_DOMAIN+witnessBytes)};
+ await db().prepare("UPDATE roster_witness_sagas SET state='acknowledged',receipt=? WHERE tenant_id=? AND vault_id='v' AND revision=1").bind(JSON.stringify(witness),s.tenant_id).run();
+ const create=async(id='a'.repeat(43),cipher='x')=>{
+  const bytes=canonicalPackage({version:1,vaultId:'v',targetDeviceId:deviceId,keyEpoch:1,wrappedVDK:btoa(cipher.repeat(80)),issuerDeviceId:deviceId,grantId:requestId});
+  const keyPackage={canonical:bytes,signature:await device.sign(bytes)};
+  const payloadDigest=await digest(JSON.stringify(['AgentKeychain-enrollment-continuation-package-v1',bytes,keyPackage.signature]));
+  const intent=canonicalContinuationIntent({version:1,domain:'AgentKeychain-enrollment-continuation-intent-v1',
+   id,originalGrantDigest:await digest(oldGrantCanonical),requestId,accountId:s.account_id,tenantId:s.tenant_id,vaultId:'v',deviceId,
+   signingKey:device.signingKey,wrappingKey:device.wrappingKey,issuerDeviceId:null,keyEpoch:1,stage:'put-key-package',
+   payloadDigest,rosterDigest:head,witnessHead:{revision:1,digest:head},expiresAt:now+60});
+  const receipt=canonicalContinuationReceipt({version:1,domain:'AgentKeychain-enrollment-continuation-approval-v1',
+   intentDigest:await digest(intent),approvedAt:now,expiresAt:now+60,authorityKeyId:'auth'});
+  return {oldGrantCanonical,target:{canonical:intent,signature:await device.sign(intent)},approval:{canonical:receipt,signature:await authority.sign(receipt)},
+   keyPackage,witness,roster:{canonical,signature}};
+ };
+ return {create,grant,pins:{authority:{keyId:'auth',publicKey:authority.signingKey},witnesses:[{keyId:'custody',publicKey:custody.signingKey}]}};
+}
+test('unwired genesis continuation commits one exact immutable package despite concurrency and retries',async()=>{
+ const f=await expiredGenesisPackageFixture(), input=await f.create();
+ await expect(db().prepare('INSERT INTO device_key_packages VALUES(?,?,?,?,?,?,?,?)').bind('t','v',f.grant.deviceId,1,f.grant.deviceId,f.grant.requestId,input.keyPackage.canonical,input.keyPackage.signature).run()).rejects.toThrow('not_found');
+ const outcomes=await Promise.all([consumeGenesisPackageContinuation(db(),input,f.pins),consumeGenesisPackageContinuation(db(),input,f.pins)]);
+ expect(outcomes).toEqual([{accepted:true},{accepted:true}]);
+ await expect(consumeGenesisPackageContinuation(db(),await f.create('a'.repeat(43),'z'),f.pins)).rejects.toThrow('idempotency_conflict');
+ await expect(consumeGenesisPackageContinuation(db(),await f.create('b'.repeat(43)),f.pins)).rejects.toThrow('idempotency_conflict');
+ expect(await db().prepare('SELECT count(*) n FROM device_key_packages').first('n')).toBe(1);
+ expect(await db().prepare('SELECT count(*) n FROM genesis_package_continuations').first('n')).toBe(1);
+ expect(await db().prepare('SELECT canonical FROM enrollment_grants').first('canonical')).toBe(input.oldGrantCanonical);
+});
+test('genesis package continuation does not write under membership, roster, or signature drift',async()=>{
+ const f=await expiredGenesisPackageFixture(),input=await f.create();
+ const reject=()=>consumeGenesisPackageContinuation(db(),input,f.pins);
+ await expect(consumeGenesisPackageContinuation(db(),{...input,witness:{...input.witness,signature:input.approval.signature}},f.pins)).rejects.toThrow('invalid_witness');
+ await db().prepare("UPDATE roster_witness_sagas SET state='pending'").run();
+ await expect(reject()).rejects.toThrow('approval_required');
+ await db().prepare("UPDATE roster_witness_sagas SET state='acknowledged'").run();
+ await db().prepare('UPDATE memberships SET active=0').run();
+ await expect(reject()).rejects.toThrow('approval_required');
+ expect(await db().prepare('SELECT count(*) n FROM device_key_packages').first('n')).toBe(0);
+ expect(await db().prepare('SELECT count(*) n FROM genesis_package_continuations').first('n')).toBe(0);
 });

@@ -7,7 +7,7 @@ This runbook is preparation, not permission to deploy, publish a release or chan
 - Keep one reviewed Git commit as the candidate. Record its tree, required CI, Worker-build evidence, native macOS helper/build evidence, and product and independent security review. Treat missing proof as not passed.
 - Exercise the real built service graph with isolated synthetic data. First-device admission must prove independent Auth approval and atomic Custody admission. For an already-approved device, continue the original identity only with a fresh, exact, separately verified authorization. Do not mint a new identity to make activation pass.
 - Require both compiled clients to complete onboarding, sync/restart, scope approval and denial, offline retry, revocation, and recovery without exposing credential material. Verify cookie behavior in a disposable real-browser session and keep actual passkey user verification intact.
-- Produce candidate binaries for supported Darwin and Linux architectures and checksum-verified Darwin secure-store helpers. Verify file architecture, release input manifest, install/upgrade and rollback with isolated home and secure-store fixtures. Do not tag a candidate merely to produce test artifacts: the current repository treats version tags as a release trigger.
+- Use [the candidate packaging workflow](RELEASE_PACKAGING.md) to produce binaries for supported Darwin and Linux architectures and checksum-verified Darwin secure-store helpers. Verify file architecture, release input manifest, install/upgrade and rollback with isolated home and secure-store fixtures. Do not tag a candidate merely to produce test artifacts: the current repository treats version tags as a release trigger.
 
 ## 2. Rehearse the rollout in disposable staging
 

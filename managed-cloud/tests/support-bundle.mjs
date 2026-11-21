@@ -3,19 +3,26 @@
 import assert from 'node:assert/strict';
 import {readFile,readdir,mkdir,writeFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
-import {createHash,randomBytes,generateKeyPairSync} from 'node:crypto';
+import {createHash,randomBytes,generateKeyPairSync,createPrivateKey,sign as nodeSign} from 'node:crypto';
 import {build} from 'esbuild';
 import {Miniflare,convertV4MiniflareOptions,Log,LogLevel} from 'miniflare';
 import {unstable_readConfig,unstable_getMiniflareWorkerOptions,unstable_splitSqlQuery} from 'wrangler';
 import {manifests,plan,releaseManifest} from '../provisioning/render.mjs';
-await build({entryPoints:['shared/recovery-crypto.ts','shared/recovery.ts','shared/roster.ts'],outdir:'dist/support-shared',bundle:true,format:'esm',platform:'node',target:'es2022'});
+await build({entryPoints:['shared/recovery-crypto.ts','shared/recovery.ts','shared/roster.ts','shared/checkpoints.ts','shared/device-protocol.ts'],outdir:'dist/support-shared',bundle:true,format:'esm',platform:'node',target:'es2022'});
 const {seal,open,encode64}=await import('../dist/support-shared/recovery-crypto.js');
 const {packageContext,releaseContext}=await import('../dist/support-shared/recovery.js');
 const {canonicalRoster,ROSTER_DOMAIN}=await import('../dist/support-shared/roster.js');
+const {checkpoint,genesisRoot}=await import('../dist/support-shared/checkpoints.js');
+const {canonicalGrant}=await import('../dist/support-shared/device-protocol.js');
+await build({entryPoints:['tests/genesis-transport-fixture.ts'],outfile:'dist/test-genesis-transport.mjs',bundle:true,format:'esm',platform:'neutral',mainFields:['module','main'],external:['cloudflare:workers','node:buffer','node:net'],target:'es2022'});
 const sha=s=>createHash('sha256').update(s).digest('hex'),raw=()=>randomBytes(32).toString('base64url');
 function ring(algorithm){const pair=generateKeyPairSync(algorithm),publicKey=pair.publicKey.export({format:'der',type:'spki'}).subarray(-32).toString('base64'),keyId=sha(publicKey);return {activeId:keyId,keys:[{keyId,publicKey,privateKey:pair.privateKey.export({format:'der',type:'pkcs8'}).toString('base64')}]};}
 const apiRings={CHECKPOINT_KEYRING:ring('ed25519'),ACCOUNT_KEYRING:ring('ed25519'),WRAP_KEYRING:ring('x25519'),RELEASE_KEYRING:ring('ed25519')},custodyRings={WITNESS_KEYRING:ring('ed25519'),TRUST_KEYRING:ring('ed25519'),WRAP_KEYRING:ring('x25519'),RELEASE_KEYRING:ring('ed25519')};
 const pub=r=>({keyId:r.activeId,publicKey:r.keys[0].publicKey});
+const genesisAuthority=ring('ed25519');
+const ringSign=(r,message)=>nodeSign(null,Buffer.from(message),createPrivateKey({format:'der',type:'pkcs8',key:Buffer.from(r.keys[0].privateKey,'base64')})).toString('base64');
+const independentName='synthetic-independent-custodian',invalidName='synthetic-admission-unconfigured',issuerName='synthetic-independent-auth';
+
 const apiPeer=Object.values(apiRings).flatMap(r=>r.keys.map(k=>k.publicKey)),custodyPeer=Object.values(custodyRings).flatMap(r=>r.keys.map(k=>k.publicKey));
 const policy=releaseManifest({releaseId:'synthetic-support',checkpointKeys:[pub(apiRings.CHECKPOINT_KEYRING)],witnessKeys:[pub(custodyRings.WITNESS_KEYRING)],recoveryAuthorities:[pub(custodyRings.TRUST_KEYRING)],recoveryServices:{api:pub(apiRings.RELEASE_KEYRING),custodian:pub(custodyRings.RELEASE_KEYRING)}},plan.apiDomain,plan.webDomain,{api:apiPeer,custodian:custodyPeer});
 const configs=manifests({main:'11111111-1111-4111-8111-111111111111',custodian:'22222222-2222-4222-8222-222222222222',auth:'33333333-3333-4333-8333-333333333333',emailFrom:'verify@agentkeychain.soupsam.com'});
@@ -31,6 +38,19 @@ for(const [folder,c] of Object.entries(configs)){
  const bindings={...c.vars,...(folder==='api-worker'?apiKeys:folder==='auth-trust-worker'?authKeys:folder==='api-trust-worker'?{...encoded(apiRings),PEER_PUBLIC_KEYS:JSON.stringify(Object.values(custodyRings).map(r=>r.keys[0].publicKey))}:folder==='custody-trust-worker'?{...encoded(custodyRings),PEER_PUBLIC_KEYS:JSON.stringify(Object.values(apiRings).map(r=>r.keys[0].publicKey)),RELEASE_POLICY:JSON.stringify(policy)}:{})};
  workers.push({...options,name:c.name,modules:true,scriptPath:resolve('dist/'+folder+'/index.js'),modulesRoot:resolve('dist'),bindings,...(folder==='auth-trust-worker'?{serviceBindings:{EMAIL:{name:'synthetic-mailbox',entrypoint:'Mailbox'}}}:{}),outboundService:()=>new Response(null,{status:502})});
 }
+workers.push({name:issuerName,compatibilityDate:plan.compatibilityDate,compatibilityFlags:plan.compatibilityFlags,modules:true,
+ scriptPath:resolve('dist/test-genesis-transport.mjs'),modulesRoot:resolve('dist'),d1Databases:{AUTH:'isolated-genesis-auth'},
+ bindings:{AUTHORITY_PRIVATE:genesisAuthority.keys[0].privateKey,APPROVAL_POLICY:JSON.stringify({authority:pub(genesisAuthority),checkpointKeys:policy.checkpointKeys,recoveryAuthorities:policy.recoveryAuthorities})},
+ outboundService:()=>new Response(null,{status:502})});
+// Synthetic-only staging graphs. Production renderer grants no ingress binding.
+for(const name of [independentName,invalidName]){
+ const base=workers.find(w=>w.name===plan.workers['recovery-worker']);
+ const {GENESIS_AUTH:_legacy,...independentBindings}=base.serviceBindings;
+ workers.push({...base,name,d1Databases:{CUSTODIAN:name},serviceBindings:name===invalidName?base.serviceBindings:independentBindings,bindings:{
+  ...base.bindings,GENESIS_ADMISSION_MODE:'independent-v1',
+  ...(name===independentName?{GENESIS_APPROVAL_PIN:JSON.stringify(pub(genesisAuthority))}:{})}});
+}
+for(const name of [independentName,invalidName,plan.workers['recovery-worker']])workers.push({name:name+'-test-admission',modules:true,compatibilityDate:plan.compatibilityDate,serviceBindings:{ADMISSION:{name,entrypoint:'GenesisAdmission'},WITNESS:{name,entrypoint:'Custodian'}},script:`import {WorkerEntrypoint} from 'cloudflare:workers';export default class extends WorkerEntrypoint{async admit(v){return JSON.stringify(structuredClone(await this.env.ADMISSION.admit(v)));}async admitAndDrop(v){await this.env.ADMISSION.admit(v);}async witness(v){return JSON.stringify(structuredClone(await this.env.WITNESS.witness(v)));}async head(t,v){return JSON.stringify(structuredClone(await this.env.WITNESS.witnessHead(t,v)));}async ingressStatus(){return (await this.env.ADMISSION.fetch('https://fixture.invalid/')).status;}}`});
 workers.push({name:'synthetic-mailbox',modules:true,compatibilityDate:plan.compatibilityDate,serviceBindings:{API:plan.workers['api-worker']},script:`import {WorkerEntrypoint} from 'cloudflare:workers';const messages=new Map();export class Mailbox extends WorkerEntrypoint{
  async send(message){if(typeof message.to!=='string'||!/Your verification code is [0-9]{6}\\./.test(message.text))throw new Error('invalid_test_email');messages.set(message.to,message.text.match(/[0-9]{6}/)[0]);return {messageId:'synthetic'};}
  async metadata(){return JSON.stringify({count:messages.size,recipients:[...messages.keys()].map(e=>e[0]+'***@'+e.split('@')[1])});}
@@ -52,7 +72,13 @@ for(const [i,p] of invalidPolicies.entries()){
 const mf=new Miniflare(convertV4MiniflareOptions({host:'127.0.0.1',port:0,inspectorPort:0,log:new Log(LogLevel.NONE),workers}));
 try{
  await mf.ready;
+ const issuerDb=await mf.getD1Database('AUTH',issuerName);
+ for(const file of ['genesis-registration.sql','genesis-readback.sql'])await issuerDb.batch(unstable_splitSqlQuery(await readFile('auth-trust-worker/experimental/'+file,'utf8')).map(sql=>issuerDb.prepare(sql)));
  for(const [folder,binding] of [['api-worker','MAIN'],['recovery-worker','CUSTODIAN'],['auth-trust-worker','AUTH']]){const db=await mf.getD1Database(binding,plan.workers[folder]);for(const file of (await readdir(folder+'/migrations')).filter(n=>n.endsWith('.sql')).sort())await db.batch(unstable_splitSqlQuery(await readFile(folder+'/migrations/'+file,'utf8')).map(sql=>db.prepare(sql)));}
+ for(const name of [independentName,invalidName]){
+  const db=await mf.getD1Database('CUSTODIAN',name);
+  for(const file of (await readdir('recovery-worker/migrations')).filter(n=>n.endsWith('.sql')).sort())await db.batch(unstable_splitSqlQuery(await readFile('recovery-worker/migrations/'+file,'utf8')).map(sql=>db.prepare(sql)));
+ }
  for(const folder of Object.keys(configs).filter(f=>f!=='api-worker'))assert.equal((await (await mf.getWorker(plan.workers[folder])).fetch('https://private.invalid/')).status,404);
  const db=await mf.getD1Database('MAIN',plan.workers['api-worker']),auth=await mf.getD1Database('AUTH',plan.workers['auth-trust-worker']);
  const origin='https://'+plan.webDomain,email='synthetic@example.invalid',invitation=raw();
@@ -91,6 +117,48 @@ try{
  const genesis=await mf.getWorker('api-trust-worker-RosterGenesisAuthority');
  const rosterCanonical=canonicalRoster({version:1,accountId:'a',tenantId:'t',vaultId:'v',revision:1,previousDigest:null,keyEpoch:1,active:[{deviceId:'d',signingKey:issuerKey,wrappingKey}],revoked:[],issuer:{kind:'device',id:'d'},issuedAt:now,expiresAt:now+60,checkpointKeys:policy.checkpointKeys,recoveryAuthorities:policy.recoveryAuthorities,recovery:null});
  assert.equal(await genesis.rosterGenesis({canonical:rosterCanonical,signature:await sign(ROSTER_DOMAIN+rosterCanonical)}),true);
+ const roster={canonical:rosterCanonical,signature:await sign(ROSTER_DOMAIN+rosterCanonical)};
+ const cp=await checkpoint({key:async()=>pub(apiRings.CHECKPOINT_KEYRING),sign:async m=>ringSign(apiRings.CHECKPOINT_KEYRING,m)},'t','v',0,await genesisRoot('t','v'),null,null);
+ const grant=canonicalGrant({version:1,requestId:'synthetic-admission',accountId:'a',tenantId:'t',vaultId:'v',deviceId:'d',signingKey:issuerKey,wrappingKey,issuerDeviceId:null,keyEpoch:1,expiresAt:now+60});
+ const isolatedAuth=await mf.getWorker(issuerName),sessionToken=raw(),anti=raw();
+ const decisionId=await isolatedAuth.issueAndDropResponse(grant,roster,sessionToken,anti);
+ const issuerOrigin='https://independent-auth.fixture.invalid';
+ const readback=async (decision=decisionId,headers={})=>JSON.parse(await isolatedAuth.syntheticReadback({
+  origin:issuerOrigin,'content-type':'application/json','x-csrf-token':anti,cookie:'__Host-akc_genesis_session='+sessionToken+'; __Host-akc_genesis_csrf='+anti,...headers},
+  JSON.stringify({decisionId:decision,grant,roster})));
+ assert.equal((await readback(raw())).status,401);
+ assert.equal((await readback(decisionId,{'x-csrf-token':raw()})).status,401);
+ const firstRead=await readback();assert.equal(firstRead.status,200);
+ const proof=firstRead.body,retried=await readback();assert.equal(retried.status,200);assert.deepEqual(retried.body,proof);
+ assert.equal(await issuerDb.prepare('SELECT count(*) n FROM auth_genesis_decisions').first('n'),1);
+ const admission={proof,grant,roster,checkpoint:cp};
+ const independent=await mf.getWorker(independentName+'-test-admission'),unconfigured=await mf.getWorker(invalidName+'-test-admission'),legacy=await mf.getWorker(plan.workers['recovery-worker']+'-test-admission');
+ assert.equal(await independent.ingressStatus(),404);
+ await assert.rejects(async()=>await legacy.admit(admission),/genesis_admission_unavailable/);
+ await assert.rejects(async()=>await unconfigured.admit(admission),/genesis_admission_unavailable/);
+ // The exact same genesis was approved by the old API-backed validator above:
+ // an incomplete independent config must nevertheless refuse that fallback.
+ await assert.rejects(async()=>await unconfigured.witness({rosters:[roster],checkpoints:[cp]}),/witness_untrusted_genesis/);
+ await assert.rejects(async()=>await independent.witness({rosters:[roster],checkpoints:[cp]}),/witness_untrusted_genesis/);
+ await independent.admitAndDrop(admission);
+ const receipt=await independent.admit(admission);
+ assert.deepEqual(await independent.head('t','v'),receipt);
+ assert.deepEqual(await independent.admit(admission),receipt);
+ assert.deepEqual(await independent.witness({prior:JSON.parse(receipt),rosters:[roster],checkpoints:[cp]}),receipt);
+ const independentDb=await mf.getD1Database('CUSTODIAN',independentName);
+ assert.equal(await independentDb.prepare('SELECT count(*) n FROM genesis_admissions').first('n'),1);
+ assert.equal(await independentDb.prepare('SELECT count(*) n FROM roster_witness').first('n'),1);
+ // Seed drift-free legacy data using the actual prior-mode worker's own
+ // persisted local fixture result; independent startup must still read it.
+ const legacyReceipt=await legacy.witness({rosters:[roster],checkpoints:[cp]});
+ const legacyRow=await custodyDb.prepare("SELECT tenant_id,vault_id,event,revision,digest,sequence,root,request_digest,roster,checkpoint,receipt,checkpoint_suffix FROM roster_witness WHERE tenant_id='t' AND vault_id='v'").first();
+ const upgradedDb=await mf.getD1Database('CUSTODIAN',invalidName);
+ await upgradedDb.prepare('INSERT INTO roster_witness(tenant_id,vault_id,event,revision,digest,sequence,root,request_digest,roster,checkpoint,receipt,checkpoint_suffix) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').bind(...Object.values(legacyRow)).run();
+ assert.equal(await unconfigured.head('t','v'),legacyReceipt);
+ assert.equal(await unconfigured.witness({prior:JSON.parse(legacyReceipt),rosters:[roster],checkpoints:[cp]}),legacyReceipt);
+ assert.equal(await upgradedDb.prepare('SELECT count(*) n FROM genesis_admissions').first('n'),0);
+
+
  // An eligible recovery gets the same browser result as the earlier decoy,
  // but has a real restricted account session and invokes the production attester.
  await db.prepare("INSERT INTO account_emails VALUES('a',?,?,1)").bind(randomBytes(64).toString('base64'),identity).run();
@@ -119,5 +187,5 @@ try{
  await custodyDb.prepare("UPDATE trust_devices SET revoked=1 WHERE device_id='d'").run();
  const custodyKeys=await mf.getWorker('custody-trust-worker-RecoveryKeys');await assert.rejects(async()=>await custodyKeys.rewrap(m.custodianKeyId,m.custodianShare,packageContext(m,'custodian'),wrappingKey,releaseContext(canonical,'custodian')));
  await db.prepare("UPDATE recovery_sagas SET state='cancelled' WHERE id=?").bind(c.id).run();const apiWrap=await mf.getWorker('api-trust-worker-RecoveryKeys');await assert.rejects(async()=>await apiWrap.rewrap(m.apiKeyId,m.apiShare,packageContext(m,'api'),wrappingKey,releaseContext(canonical,'api')));
- console.log('Support bundle: all five production Workers, three D1s, exact service graph, private HTTP, invitation/recovery code request+consume+replay, key metadata, signer oracle rejection, non-exported helpers and independent authorized rewrap/revocation/cancellation passed.');
+ console.log('Support bundle: all five production Workers, three D1s, exact service graph, private HTTP, invitation/recovery code request+consume+replay, key metadata, signer oracle rejection, non-exported helpers, independent authorized rewrap/revocation/cancellation, and synthetic independent Auth registration/approval, lost Auth response/readback, and Custody first witness/replay passed.');
 }finally{await mf.dispose();}

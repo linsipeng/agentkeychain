@@ -1,13 +1,14 @@
 import {env} from 'cloudflare:workers';
 import {applyD1Migrations,reset} from 'cloudflare:test';
 import {expect,test} from 'vitest';
+import {genesisReadback,genesisReadbackIntent} from '../auth-trust-worker/experimental/genesis-readback.ts';
 import {genesisIssuer} from '../auth-trust-worker/experimental/genesis-issuer.ts';
 import {virtualAuthenticator} from './virtual-authenticator.ts';
 import {encode,random,webauthn} from '../api-worker/webauthn.ts';
 import {digest} from '../shared/contracts.ts';
 import {canonicalGrant,type EnrollmentGrant} from '../shared/device-protocol.ts';
 import {verifyGenesisApproval} from '../shared/genesis-approval.ts';
-import {canonicalRoster,ROSTER_DOMAIN} from '../shared/roster.ts';
+import {canonicalRoster,ROSTER_DOMAIN,rosterDigest} from '../shared/roster.ts';
 
 const bytes=(input:ArrayBuffer)=>btoa(String.fromCharCode(...new Uint8Array(input)));
 async function pair(){
@@ -45,4 +46,34 @@ test('Auth-owned credentials approve one exact first-device decision, not a Main
  expect(await verifyGenesisApproval(only[0]!.value,grantBytes,roster,policy)).toMatchObject({decisionId:challenge.id});
  expect(await db.prepare('SELECT count(*) FROM auth_genesis_decisions').first('count(*)')).toBe(1);
  expect(await db.prepare('SELECT counter FROM auth_genesis_pins').first('counter')).toBe(1);
+ // Auth-only harness: production does not yet issue these session/intent rows.
+ const lookup=genesisReadback(db,identity.origin,policy);
+ const cookie=random(),anti=random(),session=await digest(cookie);
+ const intent=await genesisReadbackIntent(challenge.id,await digest(grantBytes),await rosterDigest(roster));
+ const read=(change:Record<string,unknown>={},requestHeaders:Record<string,string>={})=>lookup(new Request(identity.origin+'/v1/auth/first-device-receipt',{
+  method:'POST',headers:{origin:identity.origin,'content-type':'application/json','x-csrf-token':anti,
+    cookie:'__Host-akc_genesis_session='+cookie+'; __Host-akc_genesis_csrf='+anti,...requestHeaders},
+  body:JSON.stringify({decisionId:challenge.id,grant:grantBytes,roster,...change}),
+ }));
+ expect((await read()).status).toBe(401);
+ await db.prepare('INSERT INTO auth_genesis_view_sessions VALUES(?,?,?,?,?,1,0,?)').bind(session,await digest(anti),grant.accountId,grant.tenantId,grant.vaultId,now+110).run();
+ expect((await read()).status).toBe(401);
+ await db.prepare('INSERT INTO auth_genesis_view_grants VALUES(?,?,?,?)').bind(session,intent,now,now+100).run();
+ const first=await read(), repeated=await read();
+ expect(first.status).toBe(200);
+ expect(first.headers.get('cache-control')).toBe('no-store');
+ expect(await first.json()).toEqual(only[0]!.value);
+ expect(await repeated.json()).toEqual(only[0]!.value);
+ for(const headers of [{origin:'https://elsewhere.invalid'},{'x-csrf-token':random()},{'sec-fetch-site':'cross-site'}] as Record<string,string>[])
+  expect((await read({},headers)).status).toBe(401);
+ expect((await read({decisionId:random()})).status).toBe(401);
+ expect((await read({grant:canonicalGrant({...grant,requestId:'altered'})})).status).toBe(401);
+ await db.prepare('UPDATE auth_genesis_view_sessions SET approval_reader=0').run();
+ expect((await read()).status).toBe(401);
+ await db.prepare('UPDATE auth_genesis_view_sessions SET approval_reader=1,revoked=1').run();
+ expect((await read()).status).toBe(401);
+ await db.prepare('UPDATE auth_genesis_view_sessions SET revoked=0').run();
+ await db.prepare('UPDATE auth_genesis_view_grants SET issued=?,expires=?').bind(now-60,now-1).run();
+ expect((await read()).status).toBe(401);
+ expect(await db.prepare('SELECT count(*) FROM auth_genesis_decisions').first('count(*)')).toBe(1);
 });

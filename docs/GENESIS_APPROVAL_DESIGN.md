@@ -153,3 +153,30 @@ keep legacy witnessed heads and later witness events unchanged. Never infer
 a missing decision from Main D1 or retry legacy genesis on an admission
 failure. The signed grant, roster and checkpoint fixture use ephemeral keys
 and a local Custody D1.
+
+
+### Custody ingress and staged activation
+
+A separate private `GenesisAdmission` Worker entrypoint accepts only
+`admit({proof, grant, roster, checkpoint})`. Its HTTP handler remains closed;
+the caller supplies no pin or policy. The configuration owner provides
+`GENESIS_ADMISSION_MODE=independent-v1` and `GENESIS_APPROVAL_PIN` (the exact
+Custody-approved attester public key and key ID). Custody separately verifies
+that key is distinct from policy witness, checkpoint, recovery and release keys.
+
+If either independent configuration value is present, legacy first-genesis
+authorization is disabled, even if the other value is missing, invalid, or the
+old API Trust service is still bound. Existing witnesses retain continuity
+without requiring the new approval. With neither value present the untouched
+legacy production graph still behaves as before; this is a transition mode,
+not independent acceptance. Provisioning currently does not grant this RPC
+binding or activate the new mode in a production manifest.
+
+A production migration must install the Custody pin under the correct operator,
+grant only the narrow service binding to an authenticated, independently reviewed
+transport, provision Auth issuance and test that plane, then switch admission
+on as a coordinated rollout. Never enable the mode before the legitimate
+transport is ready or lower it on enrollment errors. The compiled
+`test:support-bundle` uses a separate synthetic graph and verifies closed
+HTTP, successful pinned admission/replay, no legacy fallback even with a
+retained API Trust binding, and existing witness continuity.
