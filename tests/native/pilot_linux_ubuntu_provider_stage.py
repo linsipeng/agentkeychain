@@ -4,11 +4,11 @@ import io
 import os
 from pathlib import Path
 import re
-import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
 PINS = (
     ("gnome-keyring", "46.1-2ubuntu0.2", "gnome-keyring"),
@@ -24,46 +24,49 @@ def need(value):
         raise ValueError("stage denied")
 
 
-# Both files are shipped by Ubuntu Noble's ubuntu-keyring package. A missing
-# aggregate file may use the exact archive-only file; a suspicious aggregate
-# is never ignored. Trust only the 2018 archive key, not other bundled keys.
+# Canonical's published Noble archive trust anchor. The keyserver is the
+# transport, not the source of authority for its identity:
+# https://documentation.ubuntu.com/security/software-integrity/image-verification/
 ARCHIVE_KEY = "F6ECB3762474EDA9D21B7022871920D1991BC93C"
-ARCHIVE_KEY_PATHS = (
-    Path("/usr/share/keyrings/ubuntu-archive-keyring.gpg"),
-    Path("/etc/apt/trusted.gpg.d/ubuntu-keyring-2018-archive.gpg"),
-)
+ARCHIVE_KEY_URL = "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x" + ARCHIVE_KEY
 
 
-def archive_key():
+def archive_key(work, cmd):
     global phase
-    for source, path in zip(("aggregate", "archive-2018"), ARCHIVE_KEY_PATHS):
-        label = "archive-key-" + source
-        try:
-            for parent in reversed(path.parents):
-                phase = label + "-parent-stat"
-                row = parent.lstat()
-                phase = label + "-parent-type"
-                need(stat.S_ISDIR(row.st_mode))
-                phase = label + "-parent-owner"
-                need(row.st_uid == 0)
-                phase = label + "-parent-mode"
-                need(not row.st_mode & 0o022)
-            phase = label + "-stat"
-            row = path.lstat()
-        except FileNotFoundError:
-            continue
-        phase = label + "-file-type"
-        need(stat.S_ISREG(row.st_mode))
-        phase = label + "-file-owner"
-        need(row.st_uid == 0)
-        phase = label + "-file-mode"
-        need(not row.st_mode & 0o022 and row.st_mode & 0o444 == 0o444)
-        phase = label + "-file-size"
-        need(0 < row.st_size <= 1024 * 1024)
-        print("ubuntu_provider_archive_key_source=" + source)
-        return path
-    phase = "archive-key-missing"
-    raise ValueError("archive key missing")
+    phase = "archive-key-fetch"
+    armored = work / "archive-key.asc"
+    cmd("curl", "--disable", "--fail", "--silent", "--show-error", "--proto", "=https",
+        "--max-time", "20", "--max-filesize", "65536", "--output", str(armored), ARCHIVE_KEY_URL)
+    phase = "archive-key-armor"
+    need(0 < armored.stat().st_size <= 65536)
+    lines = armored.read_text(encoding="ascii").strip().splitlines()
+    need(len(lines) >= 4 and lines[0] == "-----BEGIN PGP PUBLIC KEY BLOCK-----" and
+         lines[-1] == "-----END PGP PUBLIC KEY BLOCK-----" and
+         all(not line.startswith("-----") for line in lines[1:-1]))
+
+    home = work / "gnupg"
+    home.mkdir(mode=0o700)
+    gpg = ("--no-options", "--homedir", str(home), "--batch", "--no-tty",
+           "--no-auto-key-retrieve", "--no-auto-key-import")
+    phase = "archive-key-inspect"
+    data = cmd("gpg", *gpg, "--with-colons", "--with-fingerprint", "--show-keys", str(armored))
+    records = [line.split(":") for line in data.decode("utf-8").splitlines()]
+    public = [i for i, row in enumerate(records) if row[0] == "pub"]
+    phase = "archive-key-primary"
+    need(len(public) == 1 and not any(row[0] in ("sec", "ssb") for row in records))
+    public = public[0]
+    need(len(records[public]) > 6 and public + 1 < len(records))
+    validity, expiry = records[public][1], records[public][6]
+    need(validity not in ("r", "e", "d", "i") and (expiry == "" or int(expiry) > time.time()))
+    phase = "archive-key-fingerprint"
+    fingerprint = records[public + 1]
+    need(len(fingerprint) > 9 and fingerprint[0] == "fpr" and fingerprint[9] == ARCHIVE_KEY)
+    phase = "archive-key-stage"
+    key = work / "ubuntu-archive-2018.gpg"
+    cmd("gpg", *gpg, "--output", str(key), "--dearmor", str(armored))
+    need(0 < key.stat().st_size <= 65536)
+    key.chmod(0o400)
+    return key
 
 
 def run():
@@ -107,17 +110,18 @@ Acquire::https::Verify-Host "true";
 Acquire::Retries "0";
 APT::Get::AllowUnauthenticated "false";
 """)
-        key = archive_key()
-        phase = "archive-sources"
-        (work / "sources.list").write_text("\n".join(
-            f"deb [arch=amd64 signed-by={key},{ARCHIVE_KEY}] https://archive.ubuntu.com/ubuntu/ {suite} main"
-            for suite in ("noble", "noble-updates")
-        ) + "\n")
         env = {"HOME": str(work), "PATH": "/usr/bin:/bin", "LC_ALL": "C", "APT_CONFIG": str(config)}
 
         def cmd(exe, *args, timeout=40):
             return subprocess.run(["/usr/bin/" + exe, *args], cwd=work, env=env, check=True,
                                   timeout=timeout, capture_output=True).stdout
+
+        key = archive_key(work, cmd)
+        phase = "archive-sources"
+        (work / "sources.list").write_text("\n".join(
+            f"deb [arch=amd64 signed-by={key},{ARCHIVE_KEY}] https://archive.ubuntu.com/ubuntu/ {suite} main"
+            for suite in ("noble", "noble-updates")
+        ) + "\n")
 
         phase = "signed-index"
         cmd("apt-get", "-o", "APT::Update::Error-Mode=any", "update", timeout=120)
