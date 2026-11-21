@@ -57,8 +57,8 @@ export default defineConfig({
                         main: 'recovery-worker/index.ts', remoteBindings: false,
                         miniflare: {
                             compatibilityDate: '2026-07-16', compatibilityFlags: ['nodejs_compat'],
-                            d1Databases: { CUSTODIAN: 'custodian-db' },
-                            bindings: { MIGRATIONS: await readD1Migrations('recovery-worker/migrations') },
+                            d1Databases: { CUSTODIAN: 'custodian-db', RECONCILIATION_AUTH_TEST:'reconciliation-auth-db' },
+                            bindings: { RECONCILIATION_AUTH_SCHEMA:await readD1Migrations('auth-trust-worker/experimental'), MIGRATIONS: await readD1Migrations('recovery-worker/migrations') },
                         },
                     })],
             },

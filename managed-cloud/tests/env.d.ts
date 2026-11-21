@@ -4,6 +4,8 @@ declare global {
     namespace Cloudflare {
         interface Env extends importEnv {
             CUSTODIAN: D1Database;
+            RECONCILIATION_AUTH_TEST:D1Database;
+            RECONCILIATION_AUTH_SCHEMA:D1Migration[];
             CUSTODIAN_TEST_WITNESS_SIGNER:import('./synthetic-recovery.ts').RosterWitnessSigner;
             CUSTODIAN_TEST_TRUST_SIGNER:import('./synthetic-recovery.ts').RecoveryTrustSigner;
             CUSTODIAN_TEST_RELEASE:import('../shared/recovery-release.ts').RecoveryReleaseSigner;

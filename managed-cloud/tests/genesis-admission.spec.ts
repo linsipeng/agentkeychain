@@ -7,7 +7,8 @@ import {admitGenesis} from '../shared/genesis-admission.ts';
 import {custodyAbsenceHeadRequestProof,proveCustodyAbsenceHead} from '../custody-trust-worker/package-absence-head.ts';
 import {digest,verify} from '../shared/contracts.ts';
 import {rosterDigest} from '../shared/roster.ts';
-import {rosterWitness} from '../shared/roster-witness.ts';
+import {rosterWitness,verifyWitness} from '../shared/roster-witness.ts';
+import {hasExactHistoricalGenesisApproval} from '../auth-trust-worker/experimental/historical-genesis-reconciliation.ts';
 import {enrollmentFixture,signingFixture} from './synthetic-genesis-approval.ts';
 
 const db=env.CUSTODIAN;
@@ -93,7 +94,7 @@ async function absence(vaultId:string){
  const {grant:originalGrant,proof:initialApproval,roster}=request;
  const requestedAt=f.grant.expiresAt+1,nonce='A'.repeat(43);
  const deviceSignature=await f.device.sign(custodyAbsenceHeadRequestProof(nonce,requestedAt,f.grant.requestId,await digest(originalGrant),await rosterDigest(roster)));
- return {f,accepted,signer,live,policy,input:{nonce,requestedAt,deviceSignature,originalGrant,initialApproval,roster}};
+ return {f,accepted,signer,live,policy,request,input:{nonce,requestedAt,deviceSignature,originalGrant,initialApproval,roster}};
 }
 test('Custody signs the current independently admitted origin after historical grant expiry, without writes',async()=>{
  const {f,accepted,signer,policy,input}=await absence('bound-current-head');
@@ -154,5 +155,43 @@ test('Custody suppresses signed response if an immutable revocation arrives duri
   signer.sign.mockClear();
   await expect(proveCustodyAbsenceHead(db,input,policy,signer)).rejects.toThrow('continuation_absence_head_unavailable');
   expect(signer.sign).not.toHaveBeenCalled();
+ }finally{clock.mockRestore();}
+});
+
+test('an exact already-admitted genesis can be reconciled from independently retained Auth and Custody records',async()=>{
+ const {f,input,policy,signer,accepted,request}=await absence('lost-main-ack');
+ const auth=env.RECONCILIATION_AUTH_TEST;
+ await applyD1Migrations(auth,env.RECONCILIATION_AUTH_SCHEMA);
+ const {accountId,tenantId,vaultId}=f.grant,proof=input.initialApproval,decision=JSON.parse(proof.canonical);
+ const {decisionId,grantDigest,rosterDigest:rosterHash,expiresAt}=decision;
+ const clock=vi.spyOn(Date,'now').mockReturnValue(input.requestedAt*1000);
+ const hasApproval=()=>hasExactHistoricalGenesisApproval(auth,input.originalGrant,input.roster,proof,f.policy);
+ // Composition exists only in this test. No Main read/source and no Main ACK write.
+ const reconcile=async(cp=request.checkpoint)=>{
+  if(!await hasApproval())return null;
+  const result=await proveCustodyAbsenceHead(db,input,policy,signer);
+  await verifyWitness(result.witness,[policy.witness],{accountId,tenantId,vaultId,revision:1,digest:rosterHash},cp);
+  return await hasApproval()?result:null;
+ };
+ try{
+  // Custody provenance alone cannot replace independently retained Auth bytes.
+  expect(await reconcile()).toBeNull();
+  expect(signer.sign).not.toHaveBeenCalled();
+  // Synthetic historical material is populated separately; this is not a registration flow.
+  await auth.batch([
+   auth.prepare('INSERT INTO auth_genesis_pins VALUES(?,?,?,?,?,?,0,1)').bind(accountId,tenantId,vaultId,'handle','credential','cose'),
+   auth.prepare('INSERT INTO auth_genesis_challenges VALUES(?,?,?,?,?,?,?,?,?)').bind(decisionId,'challenge',accountId,tenantId,vaultId,'credential',grantDigest,rosterHash,expiresAt),
+   auth.prepare('INSERT INTO auth_genesis_decisions VALUES(?,?,?,?)').bind(decisionId,grantDigest,proof.canonical,proof.signature),
+  ]);
+  const audit=async()=>Promise.all([
+   auth.prepare('SELECT * FROM auth_genesis_decisions').all(),db.prepare('SELECT * FROM genesis_admissions').all(),
+   db.prepare('SELECT * FROM roster_witness').all(),
+  ]).then(rows=>rows.map(r=>r.results));
+  const before=await audit();
+  expect((await reconcile())?.witness).toEqual(accepted);
+  await expect(reconcile({...request.checkpoint,signature:proof.signature})).rejects.toThrow();
+  expect(await audit()).toEqual(before);
+  await auth.prepare('UPDATE auth_genesis_decisions SET signature=?').bind(accepted.signature).run();
+  expect(await reconcile()).toBeNull();
  }finally{clock.mockRestore();}
 });
