@@ -32,7 +32,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Verify pinned official SQLite and build four standalone fixtures
+      - name: Verify pinned official SQLite and build standalone fixtures
         timeout-minutes: 6
         shell: bash
         run: |
@@ -67,13 +67,13 @@ jobs:
           cc "${base[@]}" tests/native/pilot_sqlite_writer_lease.c -o "$fixture/lease"
           cc -O2 -DSQLITE_OMIT_WAL=1 -DSQLITE_OMIT_LOAD_EXTENSION=1 -DSQLITE_TEMP_STORE=3 \
             -c "$fixture/sqlite3.c" -o "$fixture/sqlite3.o"
-          for test in pilot_sqlite_engine_readonly pilot_sqlite_rollback_writer; do
+          for test in pilot_sqlite_engine_readonly pilot_sqlite_rollback_writer pilot_sqlite_broker_receipt; do
             cc "${base[@]}" -I"$fixture" -c "tests/native/$test.c" -o "$fixture/$test.o"
             cc "$fixture/$test.o" "$fixture/sqlite3.o" -lm -lpthread -o "$fixture/$test"
           done
           printf 'AKC_SQLITE_FIXTURE_DIR=%s\n' "$fixture" >> "$GITHUB_ENV"
 
-      - name: Exercise isolated path, lease, read, and rollback behavior
+      - name: Exercise isolated path, lease, read, rollback, and receipt behavior
         timeout-minutes: 2
         shell: bash
         run: |
@@ -84,3 +84,4 @@ jobs:
           "$AKC_SQLITE_FIXTURE_DIR/lease"
           "$AKC_SQLITE_FIXTURE_DIR/pilot_sqlite_engine_readonly"
           "$AKC_SQLITE_FIXTURE_DIR/pilot_sqlite_rollback_writer"
+          "$AKC_SQLITE_FIXTURE_DIR/pilot_sqlite_broker_receipt"

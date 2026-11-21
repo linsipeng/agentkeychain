@@ -163,3 +163,24 @@ OS, filesystem or device errors. Hosted macOS should verify the enlarged
 matrix anew even if an earlier single-fence pass is known. Independent
 audit and the remaining installed-broker/profile ownership and native
 credential gates are still open. Do not ship or enable storage from this test.
+
+## Narrow step: snapshot and exact receipt in the same SQLite transaction
+
+Use the same pinned amalgamation and compile options above with
+`pilot_sqlite_broker_receipt.c`. The synthetic fixture uses only one
+pending seed and one handoff transition from the TypeScript wire’s golden
+vectors. There is no request parser, authentication, encryption or generic
+database access here; the AEAD-shaped fields are just fixed public test
+markers. Native authenticated channel, source receipt provenance, exact
+monotonic/AEAD binding and all-six-stage storage are separate gates.
+
+The fixture opens the real named dirfd VFS with the same independent exclusive
+lease. One SQLite transaction writes both snapshot and an append-only receipt.
+On first-dirty SIGKILL it reopens and verifies only the old generation and
+receipt are present; no partial transition survived. A second case kills
+after durable journal unlink and directory sync, but before COMMIT can reply.
+Reopen returns both new generation and byte-exact receipt; same-op replay
+does not append a second receipt, and altered frame/receipt or competing
+stale CAS is refused. UPDATE and DELETE of receipts are denied by fixture
+triggers. An additional read-only reopen checks exact tuple and integrity.
+No production or installed CLI hook, customer storage, or power-loss claim.

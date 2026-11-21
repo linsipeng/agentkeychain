@@ -240,6 +240,7 @@ static void sql(sqlite3 *db,const char *statement) {
     if(rc!=SQLITE_OK)fprintf(stderr,"SQL fixed fixture failure %d / %d: %s\n",rc,sqlite3_extended_errcode(db),sqlite3_errmsg(db));
     CHECK(rc==SQLITE_OK);
 }
+#ifndef AKC_ROLLBACK_PRIMITIVES_ONLY
 static void writer(struct run r,enum fence barrier,int fence_fd,int keepalive,bool read_committed) {
     CHECK(acquire(&r.scope,r.parent,r.lock_inode,&r.lease)==lease_held);
     r.barrier=barrier;r.fence_fd=fence_fd;r.keepalive=keepalive;r.verify_only=read_committed;
@@ -274,6 +275,7 @@ static void writer(struct run r,enum fence barrier,int fence_fd,int keepalive,bo
     CHECK(sqlite3_close(db)==SQLITE_OK && sqlite3_vfs_unregister(&v)==SQLITE_OK);
     close_checked(r.lease);
 }
+#endif
 static int wait_child(pid_t p) {
     int st;pid_t got=0;
     for(int i=0;i<750&&got==0;i++){
@@ -287,6 +289,7 @@ static int wait_child(pid_t p) {
     }
     CHECK(got==p);return st;
 }
+#ifndef AKC_ROLLBACK_PRIMITIVES_ONLY
 static void run_case(enum fence barrier,const char *name) {
     char tmp[]="/tmp/akc-rollback-XXXXXX";CHECK(mkdtemp(tmp)!=NULL);
     const int top=open(tmp,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
@@ -356,3 +359,5 @@ int main(void) {
     run_case(fail_first_write,"injected main-write EIO: reject and recover before retry");
     return 0;
 }
+
+#endif
