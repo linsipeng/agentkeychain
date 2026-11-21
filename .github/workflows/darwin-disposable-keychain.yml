@@ -1,0 +1,86 @@
+name: Disposable Darwin Keychain acceptance
+
+# The workflow can run on the takeover PR before this file exists on the
+# default branch. It never runs against a fork or on a release event.
+on:
+  pull_request:
+    branches: [handoff/managed-cloud-ai-20261121]
+    types: [opened, reopened, synchronize]
+    paths:
+      - '.github/workflows/darwin-disposable-keychain.yml'
+      - 'tests/native/pilot_darwin_keychain.swift'
+      - 'tests/native/pilot_darwin_keychain_config_digest.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  disposable-keychain:
+    if: >-
+      ${{ github.repository == 'linsipeng/agentkeychain' &&
+          github.event.pull_request.number == 10 &&
+          github.event.pull_request.head.repo.full_name == github.repository }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15, arch: arm64 }
+          - { runner: macos-15-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 9
+    steps:
+      - name: Check out exact reviewed PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+
+      - name: Record initial user Keychain configuration digest
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(/usr/bin/uname -m)" = '${{ matrix.arch }}'
+          /bin/bash tests/native/pilot_darwin_keychain_config_digest.sh \
+            > "$RUNNER_TEMP/akc-keychain-config.before.sha256"
+
+      - name: Compile only the standalone fixture
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer
+          test -x "$DEVELOPER_DIR/usr/bin/xcodebuild"
+          /usr/bin/xcrun swiftc tests/native/pilot_darwin_keychain.swift \
+            -o "$RUNNER_TEMP/akc-darwin-keychain-fixture"
+
+      - name: Exercise two new disposable Keychains
+        timeout-minutes: 2
+        shell: bash
+        env:
+          AKC_DISPOSABLE_DARWIN_FIXTURE: create-two-private-keychains-v1
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/akc-darwin-keychain-fixture" --provision-disposable
+
+      - name: Independently check user Keychain configuration after attempt
+        if: ${{ always() }}
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          before="$RUNNER_TEMP/akc-keychain-config.before.sha256"
+          if ! after=$(/bin/bash tests/native/pilot_darwin_keychain_config_digest.sh); then
+            echo 'User Keychain configuration post-check unavailable' >&2
+            exit 1
+          fi
+          if [[ ! -s "$before" ]] || [[ "$after" != "$(<"$before")" ]]; then
+            echo 'User Keychain configuration unchanged could not be verified' >&2
+            exit 1
+          fi
+          echo 'PASS independent user Keychain configuration unchanged'

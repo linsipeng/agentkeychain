@@ -1,4 +1,4 @@
-# Disposable macOS Keychain acceptance (not invoked by CI or the CLI)
+# Disposable macOS Keychain acceptance
 
 The harness tests only the legacy **file-based macOS Keychain** Security
 framework path on the designated disposable GitHub-hosted Darwin runner.
@@ -10,7 +10,7 @@ owner's Mac or a self-hosted runner.
 1. Review and compile only, without opening any keychain:
    `xcrun swiftc -typecheck tests/native/pilot_darwin_keychain.swift`.
    The hosted macOS candidate workflow does this type-check only. The
-   program is never executed by CI.
+   program does not execute in the candidate/release workflow.
 2. Before separately authorizing a run, provision two new empty,
    unlocked **file-based** fixture stores in the disposable runner identity,
    without touching ability to use or actually changing its default
@@ -50,7 +50,7 @@ Sources: [Apple TN3137: macOS Keychain API behavior](https://developer.apple.com
 [explicit search list key](https://developer.apple.com/documentation/security/ksecmatchsearchlist),
 [Apple's Security tool source](https://github.com/apple-oss-distributions/Security/blob/main/SecurityTool/macOS/security.c).
 
-## Optional direct provisioner, pending review and a disposable Darwin run
+## Direct provisioner in the disposable PR test
 
 Apple's open-source Security implementation distinguishes the direct API
 from the CLI. `SecKeychainCreate` calls `StorageManager::make` and then
@@ -62,8 +62,10 @@ The process independently compares the observed default/search-list metadata
 before and after each call, and bails out without attempting to restore
 preferences if the installed implementation behaves differently.
 
-The optional mode must be reviewed, then typechecked on the exact intended
-Darwin image, before any run. It is not executed by the candidate workflow or the CLI.
+The separate Disposable Darwin Keychain acceptance workflow invokes the
+reviewed provisioner only on fresh GitHub-hosted macOS 15 runners for the
+same-repository takeover PR. It is not invoked by the candidate/release
+workflow or the CLI and does not prove compatibility outside those images.
 An independently supervised runtime job must take out-of-process metadata
 snapshots before and after (including after failure), never expose the paths
 in logs, and reject any drift without restoring preferences. It must use a
@@ -80,7 +82,7 @@ file creation, and an explicit unlock only if the proven new fixture is
 locked. If exact path, identity, mode or status does not match, stop; no
 normal-store fallback, no preference edits, and no recursive cleanup.
 
-Once explicitly approved, the command for a reviewed, temporary executable is:
+The isolated workflow runs the reviewed, temporary executable as follows:
 
 ```sh
 AKC_DISPOSABLE_DARWIN_FIXTURE=create-two-private-keychains-v1 \

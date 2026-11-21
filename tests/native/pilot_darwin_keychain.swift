@@ -207,7 +207,7 @@ func provisionDisposableKeychains(before: [String]) throws -> String {
 
 func run() throws {
  // Explicitly gated to a GitHub-hosted disposable account; marker is a
- // guard, not a substitute for operator/runner isolation. CI never runs this.
+ // guard, not a substitute for operator/runner isolation.
  let env = ProcessInfo.processInfo.environment
  try require(CommandLine.arguments.count == 2 && getuid() != 0 && getuid() == geteuid() &&
              env["GITHUB_ACTIONS"] == "true" && env["RUNNER_ENVIRONMENT"] == "github-hosted")
