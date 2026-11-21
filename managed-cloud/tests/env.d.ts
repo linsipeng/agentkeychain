@@ -5,6 +5,9 @@ declare global {
         interface Env extends importEnv {
             CUSTODIAN: D1Database;
             RECONCILIATION_AUTH_TEST:D1Database;
+            GENESIS_BIND_MAIN_TEST:D1Database;
+            GENESIS_BIND_MAIN_SCHEMA:D1Migration[];
+            GENESIS_BIND_STAGE_SCHEMA:D1Migration[];
             RECONCILIATION_AUTH_SCHEMA:D1Migration[];
             CUSTODIAN_TEST_WITNESS_SIGNER:import('./synthetic-recovery.ts').RosterWitnessSigner;
             CUSTODIAN_TEST_TRUST_SIGNER:import('./synthetic-recovery.ts').RecoveryTrustSigner;

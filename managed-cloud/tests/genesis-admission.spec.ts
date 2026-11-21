@@ -3,6 +3,8 @@ import {applyD1Migrations} from 'cloudflare:test';
 import {env} from 'cloudflare:workers';
 import {checkpoint,genesisRoot} from '../shared/checkpoints.ts';
 import {canonicalGrant} from '../shared/device-protocol.ts';
+import {deviceRepository} from '../api-worker/device-repository.ts';
+import {stagePilotGenesisMainBinding} from '../api-worker/genesis-main-binding-stage.ts';
 import {admitGenesis} from '../shared/genesis-admission.ts';
 import {MAIN_BIND_GENESIS,mainGenesisBindingDeviceProof,readExactMainGenesisAdmission,verifyMainGenesisBinding} from '../shared/genesis-main-binding.ts';
 import {custodyAbsenceHeadRequestProof,proveCustodyAbsenceHead} from '../custody-trust-worker/package-absence-head.ts';
@@ -238,4 +240,54 @@ test('first-device readback denies a valid legacy genesis head without independe
  const deviceSignature=await f.device.sign(mainGenesisBindingDeviceProof(nonce,requestedAt,hash));
  await expect(readExactMainGenesisAdmission(db,JSON.stringify({version:1,domain:MAIN_BIND_GENESIS,nonce,requestedAt,proof,grant,roster,
   checkpoint,deviceSignature}),policy)).rejects.toThrow('genesis_main_binding_unavailable');
+});
+
+test('stages one independently approved Main link atomically without standard device or token eligibility',async()=>{
+ const main=env.GENESIS_BIND_MAIN_TEST;
+ await applyD1Migrations(main,env.GENESIS_BIND_MAIN_SCHEMA);
+ await applyD1Migrations(main,env.GENESIS_BIND_STAGE_SCHEMA);
+ const {f,witness,request}=await attempt(current(),'main-stage-cas'),g=f.grant;
+ const policy={...f.policy,witness:{keyId:witness.keyId,publicKey:witness.publicKey}};
+ const {proof,grant,roster,checkpoint}=request;
+ const attemptDigest=await digest(JSON.stringify(['AgentKeychain-genesis-admission-attempt-v1',proof,grant,roster,checkpoint]));
+ const make=async(nonce:string,requestedAt=current())=>JSON.stringify({version:1,domain:MAIN_BIND_GENESIS,nonce,requestedAt,
+  proof,grant,roster,checkpoint,deviceSignature:await f.device.sign(mainGenesisBindingDeviceProof(nonce,requestedAt,attemptDigest))});
+ const port={MAIN:main,PILOT_CUSTODY_GENESIS_BIND:{read:(raw:string)=>readExactMainGenesisAdmission(db,raw,policy)}};
+ const reject='pilot_genesis_binding_stage_unavailable',raw=await make('A'.repeat(43));
+ const countMain=(table:'pilot_genesis_main_binding_stage'|'devices'|'device_keys'|'vault_devices'|'device_sessions'|'enrollment_grants'|'device_challenges'|'accounts')=>
+  main.prepare('SELECT count(*) n FROM '+table).first<number>('n');
+ // A genuine approved Custody ledger cannot synthesize a Main account or a
+ // pending device identity. Only test-owned existing auth metadata is seeded.
+ await admitGenesis(db,request,f.policy,witness);
+ await expect(stagePilotGenesisMainBinding(port,policy,raw)).rejects.toThrow(reject);
+ expect(await countMain('accounts')).toBe(0);
+ await main.batch([
+  main.prepare('INSERT INTO accounts VALUES(?)').bind(g.accountId),
+  main.prepare('INSERT INTO tenants VALUES(?)').bind(g.tenantId),
+  main.prepare('INSERT INTO memberships VALUES(?,?,1)').bind(g.tenantId,g.accountId),
+  main.prepare('INSERT INTO vaults(tenant_id,id,sequence) VALUES(?,?,0)').bind(g.tenantId,g.vaultId),
+  main.prepare(`INSERT INTO device_requests(id,code_digest,verification_digest,phrase,device_id,signing_key,wrapping_key,platform,
+   expires_at,state,account_id,tenant_id,vault_id,key_epoch) VALUES(?,'test-code','test-verify','test-phrase',?,?,?,'linux',?,'bound',?,?,?,?)`)
+   .bind(g.requestId,g.deviceId,g.signingKey,g.wrappingKey,g.expiresAt,g.accountId,g.tenantId,g.vaultId,g.keyEpoch),
+ ]);
+ const mismatched={...port,PILOT_CUSTODY_GENESIS_BIND:{read:async(s:string)=>({...await port.PILOT_CUSTODY_GENESIS_BIND.read(s),nonce:'c'.repeat(43)})}};
+ await expect(stagePilotGenesisMainBinding(mismatched,policy,raw)).rejects.toThrow(reject);
+ await expect(stagePilotGenesisMainBinding(port,policy,await make('A'.repeat(43),current()-31))).rejects.toThrow(reject);
+ expect(await countMain('pilot_genesis_main_binding_stage')).toBe(0);
+ const expected={state:'binding-staged-not-session',attemptDigest};
+ expect(await Promise.all([stagePilotGenesisMainBinding(port,policy,raw),stagePilotGenesisMainBinding(port,policy,raw)])).toEqual([expected,expected]);
+ expect(await stagePilotGenesisMainBinding(port,policy,await make('E'.repeat(43)))).toEqual(expected);
+ expect(await countMain('pilot_genesis_main_binding_stage')).toBe(1);
+ for(const t of ['devices','device_keys','vault_devices','device_sessions','enrollment_grants','device_challenges'] as const)
+  expect(await countMain(t)).toBe(0);
+ expect(await main.prepare('SELECT state FROM device_requests WHERE id=?').bind(g.requestId).first('state')).toBe('bound');
+ await expect(deviceRepository(main).challenge(g.deviceId,'non-secret-test-digest')).rejects.toThrow();
+ await expect(main.prepare('UPDATE pilot_genesis_main_binding_stage SET grant=?').bind('foreign').run()).rejects.toThrow('pilot_genesis_binding_immutable');
+ await expect(main.prepare('INSERT OR REPLACE INTO pilot_genesis_main_binding_stage SELECT * FROM pilot_genesis_main_binding_stage').run())
+  .rejects.toThrow('pilot_genesis_binding_immutable');
+ // A change in Main eligibility even after an exact stage is not a replay authorization.
+ await main.prepare('UPDATE memberships SET active=0 WHERE tenant_id=? AND account_id=?').bind(g.tenantId,g.accountId).run();
+ await expect(stagePilotGenesisMainBinding(port,policy,raw)).rejects.toThrow(reject);
+ expect(await countMain('pilot_genesis_main_binding_stage')).toBe(1);
+ expect(await countMain('device_challenges')).toBe(0);
 });
