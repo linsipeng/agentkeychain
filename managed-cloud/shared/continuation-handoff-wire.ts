@@ -15,3 +15,6 @@ export const handoffCodeDigest=(locator:string,code:string)=>digest(JSON.stringi
 export const handoffPrepareProof=(locator:string,codeDigest:string,stageDigest:string,expiresAt:number)=>
  JSON.stringify(['AgentKeychain-continuation-handoff-prepare-v1',locator,codeDigest,stageDigest,expiresAt]);
 export const handoffStageDigest=(value:unknown)=>digest(JSON.stringify(canonicalHandoffStage(value)));
+export const CONTINUATION_DEVICE_POLL_SECONDS=30;
+export const handoffDevicePollProof=(locator:string,intentDigest:string,stageDigest:string,nonce:string,timestamp:number)=>
+ JSON.stringify(['AgentKeychain-continuation-handoff-device-poll-v1',locator,intentDigest,stageDigest,nonce,timestamp]);

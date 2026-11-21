@@ -1,3 +1,5 @@
+import {advanceSyntheticContinuation,assertSyntheticContinuationFlow,type SyntheticContinuationFlow} from '../cloud/continuation-machine.ts';
+import {verifyContinuationHandoffOrigin} from '../cloud/config.ts';
 import {verifySyntheticContinuationRollout} from '../cloud/continuation-rollout.ts';
 import {finalizeGenesisContinuation} from '../cloud/enrollment-intent.ts';
 import {CloudStore} from '../cloud/persistence.ts';
@@ -44,6 +46,7 @@ export async function requestCloudApproval(action:string,name:string,scopes?:str
 interface SyntheticContinuationGraph {
  policy:ManagedEndpointPolicy; secure:SecureStore;
  signed:Parameters<typeof verifySyntheticContinuationRollout>[1];
+ flow?:SyntheticContinuationFlow;
  open:()=>Database;
  // eslint-disable-next-line no-unused-vars -- private runtime transport contract
  obtain:(nonce:string)=>Promise<SignedManagedOperation>;
@@ -53,13 +56,18 @@ export async function runCloud(argv:string[],platform:string=process.platform,fi
  const command=argv[0]??'status';
  if(command==='continue-enrollment'){
   if(argv.length!==1||process.env.AKC_KEYCHAIN_TEST_MODE!=='1'||!fixture)throw new Error('cloud_continuation_not_provisioned');
-  const {policy,secure}=fixture,permit=await verifySyntheticContinuationRollout(policy,fixture.signed);
+  const {policy,secure}=fixture;
+  if(fixture.flow){assertSyntheticContinuationFlow(fixture.flow);await verifyContinuationHandoffOrigin(policy,fixture.flow.authOriginAppendix);}
+  const permit=await verifySyntheticContinuationRollout(policy,fixture.signed);
   const csk=await secure.get('csk');if(!csk)throw new Error('cloud_secure_store_locked');
   let db:Database|undefined;
   try{
    db=fixture.open();const store=new CloudStore(db,csk);
    try{
-    if(!await finalizeGenesisContinuation(secure,store,policy,fixture.obtain,permit))throw new Error('cloud_continuation_not_staged');
+    if(fixture.flow){
+     const state=await advanceSyntheticContinuation(secure,store,policy,fixture.flow);
+     process.stdout.write(JSON.stringify({state})+'\n');
+    }else if(!await finalizeGenesisContinuation(secure,store,policy,fixture.obtain,permit))throw new Error('cloud_continuation_not_staged');
    }finally{store.destroy();}
   }finally{db?.close();csk.fill(0);}
   return 0;

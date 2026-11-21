@@ -27,6 +27,8 @@ interface Options {
  network:CloudFetch;
  // eslint-disable-next-line no-unused-vars -- private local display callback contract
  displayPairCode:(_code:string)=>void;
+ // eslint-disable-next-line no-unused-vars -- accept only exact staged rollout scope
+ authorizeBeforePublish?:(stage:ContinuationHandoffStage,browserUrl:string)=>Promise<void>;
 }
 async function readback(response:Response):Promise<unknown>{
  if(!response.ok||!response.body)throw conflict();
@@ -78,6 +80,8 @@ export async function prepareContinuationBrowserHandoff(o:Options):Promise<{brow
   if(saved.expiresAt<=now())throw expired();
   const expected=target(JSON.parse(saved.stage.target.canonical).id,saved.expiresAt);
   if(expected!==saved.stage.target.canonical||!await verify(g.signingKey,saved.stage.target.signature,expected))throw conflict();
+  const browserUrl=new URL('/continuation/approve#handoff='+saved.locator,authOrigin).href;
+  await o.authorizeBeforePublish?.(saved.stage,browserUrl);
   try{
    const reply=await readback(await o.network(new URL('/v1/auth/continuation-handoff/prepare',authOrigin).href,{method:'POST',headers:{'content-type':'application/json'},
     credentials:'omit',redirect:'error',cache:'no-store',signal:globalThis.AbortSignal.timeout(15000),body:JSON.stringify({locator:saved.locator,codeDigest:saved.codeDigest,
@@ -86,6 +90,6 @@ export async function prepareContinuationBrowserHandoff(o:Options):Promise<{brow
   }catch{throw new Error('cloud_continuation_handoff_unavailable');}
   store.transaction(()=>{assertPending();if(JSON.stringify(store.get('state',stateKey))!==JSON.stringify(saved))throw conflict();if(saved.expiresAt<=now())throw expired();});
   o.displayPairCode(saved.code);
-  return {browserUrl:new URL('/continuation/approve#handoff='+saved.locator,authOrigin).href,stage:saved.stage};
+  return {browserUrl,stage:saved.stage};
  }finally{destroyCloudKeys(keys);}
 }

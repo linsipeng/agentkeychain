@@ -136,3 +136,20 @@ capability or continuation transport and fails closed before opening a Vault.
 Normal login is unchanged. Independently administered Auth UX, receipt/commit/
 post-proof transport, a common exclusive guard followed by all onboarding
 writers and native secure-store validation remain release gates.
+
+The injected synthetic CLI can now advance one exact first-device continuation
+from local preparation through Auth polling, Main commit/readback and fresh
+post-commit Custody verification. The encrypted local handoff is reserved
+before network submission and requires a separate exact-intent signed fixture
+permit before contacting the approved Auth origin. The test CLI presents one
+automatic browser launch, then subsequent calls poll once without reopening
+the browser. Automation never grants approval. Auth approval and the Main
+nonce are durably recorded before the exact idempotent commit call; on response
+loss the same intent and nonce are reused. Finalization shares the continuation
+lease and never activates from a pre-commit head or expired proof.
+
+The actual separate-origin Auth session, Main commit and private Custody
+transports must be injected for this fixture path. Normal login/profile
+creation still use their existing path; do not provision the shipping command
+or deploy an origin from these adapters. Shared locking with all normal
+and recovery writers remains required before a real pilot.

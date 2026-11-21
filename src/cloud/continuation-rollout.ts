@@ -35,11 +35,15 @@ export async function verifySyntheticContinuationRollout(policy:ManagedEndpointP
   return permit;
  }catch{throw denied();}
 }
+export async function assertSyntheticContinuationIntent(policy:ManagedEndpointPolicy,permit:VerifiedContinuationRollout,target:SignedManagedOperation){
+ const scope=permits.get(permit);
+ if(!scope||scope.policy!==policy||Math.floor(Date.now()/1000)>=permit.expiresAt||scope.intentDigest!==await digest(target.canonical))throw denied();
+}
 export async function assertSyntheticContinuationScope(policy:ManagedEndpointPolicy,permit:VerifiedContinuationRollout,input:{
  target:SignedManagedOperation;authorityAppendix:SignedManagedOperation;commitAppendix:SignedManagedOperation;witness:SignedManagedOperation;
 }){
- const scope=permits.get(permit);
- if(!scope||scope.policy!==policy||Math.floor(Date.now()/1000)>=permit.expiresAt||
-    scope.intentDigest!==await digest(input.target.canonical)||scope.authDigest!==await signedDigest(input.authorityAppendix)||
+ await assertSyntheticContinuationIntent(policy,permit,input.target);
+ const scope=permits.get(permit)!;
+ if(scope.authDigest!==await signedDigest(input.authorityAppendix)||
     scope.commitDigest!==await signedDigest(input.commitAppendix)||scope.witnessKeyId!==JSON.parse(input.witness.canonical).keyId)throw denied();
 }

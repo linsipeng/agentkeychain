@@ -79,6 +79,8 @@ test('Auth-owned credentials approve one exact first-device decision, not a Main
 });
 
 import {continuationReadback,continuationReadbackIntent} from '../auth-trust-worker/experimental/continuation-readback.ts';
+import {continuationDevicePoll} from '../auth-trust-worker/experimental/continuation-device-poll.ts';
+import {handoffDevicePollProof} from '../shared/continuation-handoff-wire.ts';
 import {continuationHandoff,handoffCodeDigest,handoffPrepareProof,handoffStageDigest} from '../auth-trust-worker/experimental/continuation-handoff.ts';
 import {continuationApprovalUi} from '../auth-trust-worker/experimental/continuation-ui.ts';
 import {continuationIssuer} from '../auth-trust-worker/experimental/continuation-issuer.ts';
@@ -260,5 +262,40 @@ test('Auth requires a newly verified ceremony for the exact continuation stage a
  expect(await db.prepare('SELECT attempts FROM auth_continuation_handoffs').first('attempts')).toBe(2);
  // Claiming the package does not create a generic approval/readback session.
  expect(await db.prepare('SELECT count(*) n FROM auth_genesis_view_sessions').first('n')).toBe(2);
+
+ const poll=continuationDevicePoll(db,identity.origin,policy.authority,issuer.assertStageForHandoff);
+ const intentDigest=await digest(priorStage.target.canonical),stageDigest=await handoffStageDigest(priorStage);
+ const pollRequest=async(change:Record<string,unknown>={},headers:Record<string,string>={},sign=f.device.sign)=>{
+  const fields={locator:routing,intentDigest,stageDigest,nonce:random(),timestamp:Math.floor(Date.now()/1000),...change};
+  const signed=await sign(handoffDevicePollProof(fields.locator,fields.intentDigest,fields.stageDigest,fields.nonce,fields.timestamp));
+  return poll(new Request(identity.origin+'/v1/auth/continuation-handoff/poll',{
+   method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify({...fields,signature:signed}),
+  }));
+ };
+ expect((await pollRequest({}, {},authority.sign)).status).toBe(401);
+ expect((await pollRequest({intentDigest:'a'.repeat(64)})).status).toBe(401);
+ expect((await pollRequest({stageDigest:'a'.repeat(64)})).status).toBe(401);
+ expect((await pollRequest({timestamp:now-60})).status).toBe(401);
+ expect((await pollRequest({},original)).status).toBe(401);
+ const pending=await pollRequest();expect(pending.status).toBe(202);expect(await pending.json()).toEqual({status:'pending'});
+ const finalBegin=await post('begin',{stage:priorStage});expect(finalBegin.status).toBe(200);
+ const finalCookies=finalBegin.headers.get('set-cookie')!;
+ const finalSession=/__Host-akc_genesis_session=([A-Za-z0-9_-]{43})/.exec(finalCookies)![1]!,finalCsrf=/__Host-akc_genesis_csrf=([A-Za-z0-9_-]{43})/.exec(finalCookies)![1]!;
+ const finalChallenge=await finalBegin.json() as {id:string;options:{challenge:string}};
+ const finalAssertion=await authentic.assert(finalChallenge.options.challenge,{...identity,counter:3,userHandle:handle});
+ const committed=await post('complete',{id:finalChallenge.id,stage:priorStage,assertion:finalAssertion},{
+  cookie:'__Host-akc_genesis_session='+finalSession+'; __Host-akc_genesis_csrf='+finalCsrf,'x-csrf-token':finalCsrf,
+ });
+ expect(committed.status).toBe(200);
+ const stored=await db.prepare('SELECT canonical,signature FROM auth_continuation_decisions WHERE id=?').bind(finalChallenge.id).first();
+ for(const result of await Promise.all([pollRequest(),pollRequest()])){
+  expect(result.status).toBe(200);expect(await result.json()).toEqual({status:'approved',approval:stored});
+ }
+ const liveWitness=latest;latest=null;
+ expect((await pollRequest()).status).toBe(401);
+ latest=liveWitness;
+ await db.prepare('UPDATE auth_genesis_view_sessions SET revoked=1 WHERE session_digest=?').bind(await digest(finalSession)).run();
+ expect((await pollRequest()).status).toBe(401);
+ expect(await db.prepare('SELECT count(*) n FROM auth_continuation_decisions').first('n')).toBe(3);
 
 });

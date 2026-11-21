@@ -29,13 +29,14 @@ export function continuationApprovalPage(authOrigin:string,browserBundle:string)
  * surfaces on the same independent origin. The optional handoff fixture accepts
  * a routing locator only in the page URL and a separately entered code. */
 export function continuationApprovalSurface(authOrigin:string,browserBundle:string,
- approve:(request:Request)=>Promise<Response>,readback:(request:Request)=>Promise<Response>,handoff?:(request:Request)=>Promise<Response>){
+ approve:(request:Request)=>Promise<Response>,readback:(request:Request)=>Promise<Response>,handoff?:(request:Request)=>Promise<Response>,devicePoll?:(request:Request)=>Promise<Response>){
  const assets=continuationApprovalPage(authOrigin,browserBundle);
  return (request:Request)=>{
   const u=new URL(request.url);
   if(u.origin===authOrigin&&!u.search){
    if(u.pathname==='/v1/auth/continuation-approval/begin'||u.pathname==='/v1/auth/continuation-approval/complete')return approve(request);
    if(u.pathname==='/v1/auth/continuation-receipt')return readback(request);
+   if(devicePoll&&u.pathname==='/v1/auth/continuation-handoff/poll')return devicePoll(request);
    if(handoff&&u.pathname.startsWith('/v1/auth/continuation-handoff/'))return handoff(request);
   }
   return assets(request);

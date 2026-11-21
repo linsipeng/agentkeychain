@@ -67,3 +67,81 @@ test('CLI restarts with the same protected handoff; no plaintext pair code in ne
   }finally{restarted.destroy();}
  }finally{destroyCloudKeys(keys);store.destroy();db.close();}
 });
+
+test('synthetic continuation reuses one exact handoff and Main commit after losing its reply',async()=>{
+ await sodium.ready;
+ const {advanceSyntheticContinuation}=await import('../src/cloud/continuation-machine.ts');
+ const {canonicalContinuationReceipt}=await import('../managed-cloud/shared/enrollment-continuation.ts');
+ const {rosterDigest}=await import('../managed-cloud/shared/roster.ts');
+ const {WITNESS_DOMAIN}=await import('../managed-cloud/shared/roster-witness.ts');
+ const {genesisRoot}=await import('../managed-cloud/shared/checkpoints.ts');
+ const keys=await createCloudKeys(),secure=new MemorySecureStore(),db=new Database(':memory:'),store=new CloudStore(db,keys.csk);
+ const actor=()=>sodium.crypto_sign_keypair(),root=actor(),w=actor(),cp=actor(),auth=actor(),main=actor(),rollout=actor();
+ const b64=(v:Uint8Array)=>Buffer.from(v).toString('base64');
+ const signed=(canonical:string,who:typeof root,domain='')=>({canonical,signature:b64(sodium.crypto_sign_detached(domain+canonical,who.privateKey))});
+ const sd=(v:{canonical:string;signature:string})=>digest(JSON.stringify([v.canonical,v.signature]));
+ const now=Math.floor(Date.now()/1000),authOrigin='https://auth.local.invalid',apiOrigin='https://api.local.invalid';
+ const manifest=canonicalManifest({version:1,releaseId:'fixture',apiOrigin,webOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,
+  checkpointKeys:[{keyId:'cp',publicKey:b64(cp.publicKey)}],witnessKeys:[{keyId:'custody',publicKey:b64(w.publicKey)}]});
+ const policy=verifyReleaseManifest(signed(manifest,root),root.publicKey),manifestDigest=await digest(manifest);
+ const appendix=(domain:string,keyId:string,who:typeof root)=>signed(JSON.stringify({version:1,domain,manifestDigest,keyId,publicKey:b64(who.publicKey)}),root);
+ const authAppendix=appendix('AgentKeychain-continuation-release-pin-v1','auth',auth),commitAppendix=appendix('AgentKeychain-continuation-main-commit-release-pin-v1','main',main);
+ const rolloutAppendix=appendix('AgentKeychain-continuation-rollout-release-pin-v1','rollout',rollout);
+ const authOriginAppendix=signed(JSON.stringify({version:1,domain:'AgentKeychain-continuation-auth-origin-pilot-v1',manifestDigest,authOrigin}),root);
+ const grant={version:1 as const,requestId:'r',accountId:'a',tenantId:'t',vaultId:'v',deviceId:'d',keyEpoch:1,issuerDeviceId:null,
+  signingKey:b64(keys.signingPublic),wrappingKey:b64(keys.wrappingPublic),expiresAt:now-5};
+ const oldGrantCanonical=canonicalGrant(grant),roster=selfAnchor({...grant,expiresAt:now+150},keys,policy,true).signedRoster,head=await rosterDigest(roster);
+ const keyPackage=sealKeyPackage(keys.vdk,{vaultId:'v',targetDeviceId:'d',keyEpoch:1,issuerDeviceId:'d',grantId:'r'},keys.wrappingPublic,keys.signingPrivate);
+ const witness=signed(JSON.stringify({version:1,keyId:'custody',accountId:'a',tenantId:'t',vaultId:'v',event:1,revision:1,digest:head,sequence:0,
+  root:await genesisRoot('t','v'),checkpointDigest:await digest('synthetic-checkpoint')}),w,WITNESS_DOMAIN);
+ const payloadDigest=await digest(JSON.stringify(['AgentKeychain-enrollment-continuation-package-v1',keyPackage.canonical,keyPackage.signature]));
+ let publish=0,polls=0,launches=0,displayed=0,commits=0,posts=0;
+ const nonces:string[]=[];
+ type Flow=Parameters<typeof advanceSyntheticContinuation>[3];
+ const flow:Flow={authOriginAppendix,oldGrantCanonical,roster,keyPackage,
+  prepareNetwork:async(url,init)=>{expect(url).toBe(authOrigin+'/v1/auth/continuation-handoff/prepare');publish++;return Response.json({locator:JSON.parse(String(init.body)).locator});},
+  authorize:async intentDigest=>({authAppendix,commitAppendix,rolloutAppendix,capability:signed(JSON.stringify({version:1,domain:'AgentKeychain-continuation-rollout-capability-v1',
+   mode:'synthetic-only',manifestDigest,keyId:'rollout',intentDigest,authAppendixDigest:await sd(authAppendix),commitAppendixDigest:await sd(commitAppendix),witnessKeyId:'custody',
+   issuedAt:now,expiresAt:now+60}),rollout)}),
+  open:async browserUrl=>{expect(browserUrl.startsWith(authOrigin+'/continuation/approve#handoff=')).toBe(true);launches++;},
+  displayPairCode:code=>{expect(code).toMatch(/^[0-9]{8}$/);displayed++;},
+  poll:async (origin,handoff)=>{
+   expect(origin).toBe(authOrigin);
+   if(++polls===1)return {status:'pending'};
+   return {status:'approved',approval:signed(canonicalContinuationReceipt({version:1,domain:'AgentKeychain-enrollment-continuation-approval-v1',
+    intentDigest:await digest(handoff.stage.target.canonical),authorityKeyId:'auth',approvedAt:now,expiresAt:now+60}),auth)};
+  },
+  custodyHead:async ({nonce,approval})=>({witness,freshHead:signed(JSON.stringify({domain:'AgentKeychain-enrollment-continuation-current-head-v1',
+   keyId:'custody',nonce,requestId:'r',witnessDigest:await sd(witness),approvalDigest:await sd(approval),payloadDigest,issuedAt:now,expiresAt:now+50}),w)}),
+  commitOrRead:async (origin,{stage,approval,nonce,fresh})=>{
+   expect(origin).toBe(apiOrigin);nonces.push(nonce);
+   if(++commits===1)throw new Error('test_main_response_lost');
+   return signed(JSON.stringify({version:1,domain:'AgentKeychain-enrollment-continuation-main-commit-v1',keyId:'main',nonce,
+    continuationId:JSON.parse(stage.target.canonical).id,requestId:'r',accountId:'a',tenantId:'t',vaultId:'v',deviceId:'d',keyEpoch:1,stage:'put-key-package',
+    intentDigest:await digest(stage.target.canonical),approvalDigest:await sd(approval),payloadDigest,witnessDigest:await sd(witness),custodyFreshHeadDigest:await sd(fresh.freshHead),
+    issuedAt:now,expiresAt:now+40}),main);
+  },
+  custodyPost:async (nonce,commit)=>{
+   posts++;expect(nonces).not.toContain(nonce);
+   return signed(JSON.stringify({version:1,domain:'AgentKeychain-enrollment-continuation-custody-post-commit-v1',keyId:'custody',nonce,
+    mainCommitDigest:await sd(commit),requestId:'r',continuationId:JSON.parse(commit.canonical).continuationId,accountId:'a',tenantId:'t',vaultId:'v',
+    deviceId:'d',keyEpoch:1,witnessDigest:await sd(witness),payloadDigest,issuedAt:now,expiresAt:now+35}),w);
+  },
+ };
+ try{
+  await protectEnrollmentKeys(secure,keys);
+  store.put('state','pending',{requestId:'r',deviceId:'d'});store.put('state','pending-approved',{requestId:'r',deviceId:'d',vaultId:'v'});
+  store.put('state','pending-self-roster',roster);store.put('state','pending-package',keyPackage);
+  const step=()=>advanceSyntheticContinuation(secure,store,policy,flow);
+  expect(await step()).toBe('waiting-for-approval');
+  expect(await step()).toBe('waiting-for-approval');
+  expect(commits).toBe(0);
+  await expect(step()).rejects.toThrow('test_main_response_lost');
+  expect(store.get('state','enrollment')).toBeNull();
+  expect(await step()).toBe('active');
+  expect(nonces).toHaveLength(2);expect(new Set(nonces).size).toBe(1);
+  expect([publish,launches,displayed,polls,commits,posts]).toEqual([1,1,1,2,2,1]);
+  expect(store.get('state','enrollment')).toMatchObject({deviceId:'d',vdk:b64(keys.vdk)});
+  expect(store.get('state','pending-continuation-browser-handoff')).toBeNull();
+ }finally{destroyCloudKeys(keys);store.destroy();db.close();}
+});

@@ -135,7 +135,7 @@ async function validateCommitProof(policy:ManagedEndpointPolicy,nonce:string,inp
 /** Unwired local phase. The caller must serialize managed enrollment on this
  * store; SecureStore does not offer compare-and-swap across processes. No
  * profile, SQLite activation row, trust anchor or sync permission is written. */
-export async function stageGenesisContinuation(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,nonce:string,evidence:ContinuationEvidence):Promise<void>{
+export async function stageGenesisContinuation(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,nonce:string,evidence:ContinuationEvidence,lease?:EnrollmentLease):Promise<void>{
  const old=await load(secure);
  if(!old||old.activation)throw denied();
  if(old.continuation){
@@ -153,6 +153,7 @@ export async function stageGenesisContinuation(secure:SecureStore,store:CloudSto
  await validateCommitProof(policy,nonce,exact,acceptedAt);
  const deadline=(JSON.parse(exact.commit.canonical) as {expiresAt:number}).expiresAt;
  if(Math.floor(Date.now()/1000)>=deadline||JSON.stringify(await load(secure))!==JSON.stringify(old))throw denied();
+ if(lease)assertContinuationLease(store,lease);
  await save(secure,{...old,continuation});
 }
 
@@ -201,11 +202,13 @@ async function validatePostCommit(policy:ManagedEndpointPolicy,e:ContinuationEvi
  return expiresAt*1000;
 }
 
-/** Isolated continuation activation. No production caller. The supplied transport
- * must obtain a new post-commit Custody response for the generated challenge.
- * Before any wider integration all enrollment writers must honor this lease. */
-// eslint-disable-next-line no-unused-vars -- callback argument is a typed transport contract
-export async function finalizeGenesisContinuation(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,obtain:(nonce:string)=>Promise<SignedManagedOperation>,rollout?:VerifiedContinuationRollout):Promise<boolean>{
+type EnrollmentLease=Readonly<{serial:string}>;
+const continuationLeases=new WeakMap<EnrollmentLease,{store:CloudStore;fence:()=>void}>();
+export function assertContinuationLease(store:CloudStore,lease:EnrollmentLease){
+ const current=continuationLeases.get(lease);if(current?.store!==store)throw new Error('cloud_lease_lost');current.fence();
+}
+// eslint-disable-next-line no-unused-vars -- private callback contract
+export async function withContinuationEnrollmentLease<T>(store:CloudStore,action:(lease:EnrollmentLease)=>Promise<T>):Promise<T>{
  const owner=newContinuationReadbackNonce(),leaseMs=30_000;
  store.db.exec('CREATE TABLE IF NOT EXISTS cloud_enrollment_lock(id INTEGER PRIMARY KEY CHECK(id=1),owner TEXT NOT NULL,expires INTEGER NOT NULL)');
  store.transaction(()=>{
@@ -217,7 +220,20 @@ export async function finalizeGenesisContinuation(secure:SecureStore,store:Cloud
   const row=store.db.query('SELECT owner,expires FROM cloud_enrollment_lock WHERE id=1').get() as {owner:string;expires:number}|null;
   if(row?.owner!==owner||row.expires<=Date.now()+6000)throw new Error('cloud_lease_lost');
  };
- try{
+ const lease=Object.freeze({serial:owner});
+ continuationLeases.set(lease,{store,fence});
+ try{return await action(lease);}
+ finally{continuationLeases.delete(lease);store.db.run('DELETE FROM cloud_enrollment_lock WHERE id=1 AND owner=?',[owner]);}
+}
+/** Existing synthetic test call site always acquires the same enrollment lease. */
+// eslint-disable-next-line no-unused-vars -- private transport contract
+export async function finalizeGenesisContinuation(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,obtain:(nonce:string)=>Promise<SignedManagedOperation>,rollout?:VerifiedContinuationRollout):Promise<boolean>{
+ return withContinuationEnrollmentLease(store,lease=>finalizeGenesisContinuationLocked(secure,store,policy,obtain,lease,rollout));
+}
+/** Internal branch used only while the caller holds withContinuationEnrollmentLease. */
+// eslint-disable-next-line no-unused-vars -- private transport contract
+export async function finalizeGenesisContinuationLocked(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,obtain:(nonce:string)=>Promise<SignedManagedOperation>,lease:EnrollmentLease,rollout?:VerifiedContinuationRollout):Promise<boolean>{
+  const fence=()=>assertContinuationLease(store,lease);fence();
   const validated=await validatedStage(secure,store,policy);if(!validated)return false;
   const {intent,stage,stageDigest,marker,profile}=validated;
   const {evidence:e}=stage,g=e.grant,s=e.roster,roster=rosterPins(parseRoster(s));
@@ -250,8 +266,9 @@ export async function finalizeGenesisContinuation(secure:SecureStore,store:Cloud
   stillLive();
   await secure.remove('enrollment-intent');
   return true;
- }finally{store.db.run('DELETE FROM cloud_enrollment_lock WHERE id=1 AND owner=?',[owner]);}
+
 }
+
 /** Called only after the local SAS/trust/package checks have succeeded. */
 export async function prepareEnrollmentActivation(secure:SecureStore,store:CloudStore,keys:CloudKeys,activation:Activation){
  const previous=await load(secure);if(previous?.continuation)throw new Error('cloud_enrollment_intent_conflict');if(previous?.activation&&JSON.stringify(previous.activation)!==JSON.stringify(activation))throw new Error('cloud_enrollment_intent_conflict');
