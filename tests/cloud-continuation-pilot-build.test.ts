@@ -207,3 +207,48 @@ test('installed transport uses independent exact origins, and only post-queries 
   });
  }finally{store.destroy();db.close();destroyCloudKeys(keys);}
 });
+
+test('isolated pilot location requires the signed directory identity and refuses existing profile data',async()=>{
+ if(process.platform!=='linux'||!process.getuid?.())return;
+ const {chmodSync,lstatSync,mkdirSync,realpathSync,renameSync,symlinkSync}=await import('node:fs');
+ const {inspectInstalledPilotLocation}=await import('../src/cloud/continuation-pilot-location.ts');
+ const {artifact,root,target,rollout,expiresAt}=await makeArtifact();
+ const gate=await verifyInstalledContinuationPilot(artifact,root.publicKey,target);
+ const base=realpathSync.native(await mkdtemp(join(tmpdir(),'akc-pilot-location-')));
+ try{
+  const path=join(base,'agentkeychain-pilot-case'),uid=process.getuid(),issuedAt=Math.floor(Date.now()/1000);
+  mkdirSync(path,{mode:0o700});
+  const stat=lstatSync(path,{bigint:true}),installationDigest=await digest(JSON.stringify([artifact.installation.canonical,artifact.installation.signature]));
+  const input={version:1,domain:'AgentKeychain-installed-continuation-pilot-location-v1',keyId:rollout.pin.keyId,
+   installationDigest,path,uid,device:stat.dev.toString(),inode:stat.ino.toString(),issuedAt,expiresAt};
+  const signed=await rollout.sign(JSON.stringify(input)),check=()=>inspectInstalledPilotLocation(gate,signed);
+  const result=await check();
+  expect(result).toMatchObject({state:'empty-disposable-directory',expiresAt});
+  expect(result.namespace).toMatch(/^agentkeychain\.pilot\.[a-f0-9]{64}$/);
+  expect(await check()).toEqual(result);
+  const reject='cloud_continuation_pilot_location_unavailable';
+  await expect(inspectInstalledPilotLocation({...gate},signed)).rejects.toThrow(reject);
+  for(const change of [{path:join(base,'.agentkeychain')},{installationDigest:'f'.repeat(64)},{uid:uid+1},
+   {expiresAt:issuedAt-1},{inode:'123'}]){
+   await expect(inspectInstalledPilotLocation(gate,await rollout.sign(JSON.stringify({...input,...change})))).rejects.toThrow(reject);
+  }
+  const other=await root.sign(signed.canonical);
+  await expect(inspectInstalledPilotLocation(gate,other)).rejects.toThrow(reject);
+  chmodSync(base,0o777);
+  await expect(check()).rejects.toThrow(reject);
+  chmodSync(base,0o700);chmodSync(path,0o750);
+  await expect(check()).rejects.toThrow(reject);
+  chmodSync(path,0o700);
+  const marker=join(path,'vault.db');
+  await writeFile(marker,'do not touch');
+  await expect(check()).rejects.toThrow(reject);
+  expect(await readFile(marker,'utf8')).toBe('do not touch');
+  await rm(marker);
+  const original=join(base,'relocated');
+  renameSync(path,original);symlinkSync(original,path);
+  await expect(check()).rejects.toThrow(reject);
+  await rm(path);
+  mkdirSync(path,{mode:0o700});
+  await expect(check()).rejects.toThrow(reject);
+ }finally{await rm(base,{force:true,recursive:true});}
+});

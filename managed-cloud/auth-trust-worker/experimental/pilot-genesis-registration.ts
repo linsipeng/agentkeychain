@@ -46,6 +46,17 @@ export function pilotGenesisRegistration(db:D1Database,identity:WebAuthnPolicy,p
   return {id,accountId,tenantId,vaultId,grantDigest,rosterHash,expiresAt};
  }
  return {
+  async authorizeConsent(invite:SignedManagedOperation,grant:string,roster:SignedManagedOperation,browserDigest:string){
+   try{
+    const s=await scope(invite,grant,roster,browserDigest);
+    const row=await db.prepare(`SELECT r.credential FROM pilot_genesis_registration r JOIN auth_genesis_pins p USING(account,tenant,vault,credential)
+     WHERE r.id=? AND r.account=? AND r.tenant=? AND r.vault=? AND r.grant_digest=? AND r.roster_digest=? AND r.browser_digest=?
+     AND r.expires=? AND r.expires>unixepoch() AND p.active=1`).bind(s.id,s.accountId,s.tenantId,s.vaultId,s.grantDigest,s.rosterHash,browserDigest,s.expiresAt)
+      .first<{credential:string}>();
+    if(!row)throw denied();
+    return {...s,browserDigest,credential:row.credential};
+   }catch{throw denied();}
+  },
   async begin(invite:SignedManagedOperation,grant:string,roster:SignedManagedOperation,browserDigest:string){
    try{
     const s=await scope(invite,grant,roster,browserDigest),challenge=random(),handle=random();

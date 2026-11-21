@@ -12,9 +12,13 @@ import {continuationReadback} from './experimental/continuation-readback.ts';
 import {continuationDevicePoll} from './experimental/continuation-device-poll.ts';
 
 import {pilotGenesisRegistration} from './experimental/pilot-genesis-registration.ts';
-import {PILOT_GENESIS_REGISTER_PATH,pilotGenesisRegistrationHttp} from './experimental/pilot-genesis-registration-http.ts';
+import {PILOT_GENESIS_CONSENT_PATH,PILOT_GENESIS_REGISTER_PATH,pilotGenesisRegistrationHttp} from './experimental/pilot-genesis-registration-http.ts';
 
+import {pilotGenesisConsent} from './experimental/pilot-genesis-consent.ts';
+
+import {PILOT_GENESIS_PAGE,pilotGenesisBrowserPage} from './experimental/pilot-genesis-browser-page.ts';
 declare const AKC_PILOT_BROWSER_BUNDLE:string;
+declare const AKC_PILOT_GENESIS_BROWSER_BUNDLE:string;
 
 interface Env {
  AUTH:D1Database;
@@ -27,14 +31,18 @@ interface Env {
  PILOT_HANDOFF_HMAC:string;
  PILOT_GENESIS_REGISTRATION_MODE?:string;
  PILOT_GENESIS_INVITE_PIN?:string;
+ PILOT_GENESIS_CONSENT_MODE?:string;
+ PILOT_GENESIS_APPROVAL_SIGNER?:CheckpointSigner;
 }
 const paths=new Map([
+ [PILOT_GENESIS_PAGE,'GET'],[PILOT_GENESIS_PAGE+'/browser.js','GET'],
  ['/continuation/approve','GET'],['/continuation/approve/browser.js','GET'],
  ['/v1/auth/continuation-handoff/prepare','POST'],['/v1/auth/continuation-handoff/browser','POST'],
  ['/v1/auth/continuation-handoff/claim','POST'],['/v1/auth/continuation-handoff/poll','POST'],
  ['/v1/auth/continuation-approval/begin','POST'],['/v1/auth/continuation-approval/complete','POST'],
  ['/v1/auth/continuation-receipt','POST'],
  [PILOT_GENESIS_REGISTER_PATH+'/begin','POST'],[PILOT_GENESIS_REGISTER_PATH+'/complete','POST'],
+ [PILOT_GENESIS_CONSENT_PATH+'/begin','POST'],[PILOT_GENESIS_CONSENT_PATH+'/complete','POST'],[PILOT_GENESIS_CONSENT_PATH+'/readback','POST'],
 ]);
 const reject=()=>new Error('pilot_continuation_unavailable');
 const closed=()=>new Response(null,{status:404,headers:{'cache-control':'no-store','referrer-policy':'no-referrer'}});
@@ -83,13 +91,26 @@ export default {
    let macKey:CryptoKey;
    try{macKey=await crypto.subtle.importKey('raw',secret,{name:'HMAC',hash:'SHA-256'},false,['sign']);}
    finally{secret.fill(0);}
-   if(u.pathname.startsWith(PILOT_GENESIS_REGISTER_PATH+'/')){
+   const pageRoute=u.pathname===PILOT_GENESIS_PAGE||u.pathname===PILOT_GENESIS_PAGE+'/browser.js';
+   const consentRoute=u.pathname.startsWith(PILOT_GENESIS_CONSENT_PATH+'/');
+   if(pageRoute||consentRoute||u.pathname.startsWith(PILOT_GENESIS_REGISTER_PATH+'/')){
     const raw=env.PILOT_GENESIS_INVITE_PIN;
     if(env.PILOT_GENESIS_REGISTRATION_MODE!=='invitation-v1'||typeof raw!=='string'||raw.length>512)return closed();
     const inviteKey=await pin(JSON.parse(raw));
     if([policy.authority,policy.genesis.authority,...policy.genesis.checkpointKeys,...policy.genesis.recoveryAuthorities,...policy.witnesses]
        .some(k=>k.keyId===inviteKey.keyId||k.publicKey===inviteKey.publicKey)||now()>=deadline)return closed();
-    return await pilotGenesisRegistrationHttp(origin,deadline,pilotGenesisRegistration(env.AUTH,{origin,rpId:u.hostname},policy.genesis,inviteKey,deadline))(req);
+    const identity={origin,rpId:u.hostname},registration=pilotGenesisRegistration(env.AUTH,identity,policy.genesis,inviteKey,deadline);
+    if(!consentRoute&&!pageRoute)return await pilotGenesisRegistrationHttp(origin,deadline,registration)(req);
+    const role=env.PILOT_GENESIS_APPROVAL_SIGNER;
+    if(env.PILOT_GENESIS_CONSENT_MODE!=='consent-v1'||typeof role?.key!=='function'||typeof role?.sign!=='function')return closed();
+    const key=await pin(await rpcData(role.key()));
+    if(key.keyId!==policy.genesis.authority.keyId||key.publicKey!==policy.genesis.authority.publicKey||now()>=deadline)return closed();
+    if(pageRoute)return pilotGenesisBrowserPage(origin,AKC_PILOT_GENESIS_BROWSER_BUNDLE,req);
+    const consent=pilotGenesisConsent(env.AUTH,identity,policy.genesis,{key:async()=>key,sign:async(value)=>{
+     if(now()>=deadline)throw reject();
+     return role.sign(value);
+    }},registration);
+    return await pilotGenesisRegistrationHttp(origin,deadline,registration,consent)(req);
    }
    const issuer=continuationIssuer(env.AUTH,{origin,rpId:u.hostname},policy,{
     key:async()=>signerPin,

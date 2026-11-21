@@ -51,3 +51,20 @@ jobs:
           node --test managed-cloud/tests/continuation-pilot-bundle.test.mjs
           npm run test:recovery-resources --prefix managed-cloud
           npm run test:recovery-process --prefix managed-cloud
+
+  isolated-browser-https:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts --prefix managed-cloud
+      - name: Run synthetic HTTPS with the sandboxed browser
+        env:
+          CHROMIUM: google-chrome
+        run: |
+          command -v "$CHROMIUM"
+          command -v certutil
+          node --experimental-strip-types managed-cloud/tests/continuation-https-rehearsal.mjs --browser

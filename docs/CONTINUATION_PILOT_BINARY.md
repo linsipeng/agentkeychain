@@ -119,3 +119,40 @@ there without copying normal vault credentials. Session acquisition must
 target the same signed pilot origin and only the original protected device.
 Until acceptance of that native base and an actual hosted transport rehearsal,
 normal and standalone CLI dispatch remain closed.
+
+## Linux empty-directory inspection (not a native storage capability)
+
+The pilot now has a local-only inspection gate for a newly created Linux
+directory. An installation's distinct rollout pin signs canonical JSON fields
+in this order, domain `AgentKeychain-installed-continuation-pilot-location-v1`:
+
+```text
+version, domain, keyId, installationDigest, path, uid, device, inode, issuedAt, expiresAt
+```
+
+Version 1. The exact normalized absolute path ends in
+`agentkeychain-pilot-<name>`, never contains an ordinary `.agentkeychain`
+component, and identifies an owner-only 0700 directory. Device and inode
+are decimals from `stat` of that exact directory; UID must match the current
+non-root effective and real UID. Grant lifetime is at most 24 hours and
+cannot outlast the verified installation. Only root- or caller-owned
+ancestors are accepted, and other-writable ancestors must be root-owned
+and sticky. Home and vault environment variables are not consulted.
+Checks include canonical real path, final directory `O_NOFOLLOW`, repeated
+stat comparison and empty directory listing through `/proc/self/fd`.
+No path, directory, file or native credential is created or modified.
+MacOS and systems without the needed Unix primitives deny in this gate.
+
+Inspection derives a separate `agentkeychain.pilot.<sha256>` namespace
+from the installation and exact directory identity. The macOS helper
+currently allows only ordinary `agentkeychain.vault` and
+`agentkeychain.cloud.*` services, so it cannot read, write or clear this
+namespace. The existing Linux Secret Service wrapper selects by service
+attributes and does not isolate the secret collection. Neither is wired or
+changed here. The returned namespace describes membership, not permission
+to call a native backend. A real installation still needs a separately
+reviewed pilot helper/collection, descriptor-relative profile/lock opening
+and revalidation (including safe SQLite sidecars), pilot initialization and
+session acquisition. The check assumes the local UID/kernel are trusted;
+it is not isolation from an adversarial process already running as the same
+UID. Normal and standalone CLI dispatch remain closed.

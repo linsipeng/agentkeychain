@@ -324,8 +324,12 @@ test('pilot independently registers once and approves only invited exact origina
  await expect(registration.begin(invite,wrongGrant,roster,browser)).rejects.toThrow('pilot_genesis_registration_unavailable');
  const wrongRole=pilotGenesisRegistration(db,identity,policy,authority!.pin);
  await expect(wrongRole.begin(invite,grantBytes,roster,browser)).rejects.toThrow('pilot_genesis_registration_unavailable');
- const {pilotGenesisRegistrationHttp,PILOT_GENESIS_REGISTER_PATH}=await import('../auth-trust-worker/experimental/pilot-genesis-registration-http.ts');
- const http=pilotGenesisRegistrationHttp(identity.origin,now+110,registration);
+ const {pilotGenesisRegistrationHttp,PILOT_GENESIS_REGISTER_PATH,PILOT_GENESIS_CONSENT_PATH}=await import('../auth-trust-worker/experimental/pilot-genesis-registration-http.ts');
+ const {pilotGenesisConsent}=await import('../auth-trust-worker/experimental/pilot-genesis-consent.ts');
+ let signatures=0;
+ const signer={key:async()=>authority!.pin,sign:async(message:string)=>{signatures++;return authority!.sign(message);}};
+ const consent=pilotGenesisConsent(db,identity,policy,signer,registration);
+ const http=pilotGenesisRegistrationHttp(identity.origin,now+110,registration,consent);
  const body={invite,oldGrantCanonical:grantBytes,roster};
  const post=(part:string,input:unknown,extra:Record<string,string>={})=>http(new Request(identity.origin+PILOT_GENESIS_REGISTER_PATH+'/'+part,{
   method:'POST',headers:{origin:identity.origin,'sec-fetch-site':'same-origin','content-type':'application/json',...extra},body:JSON.stringify(input),
@@ -338,6 +342,11 @@ test('pilot independently registers once and approves only invited exact origina
  expect(setCookie).toMatch(/^__Host-akc_pilot_genesis_registration=[A-Za-z0-9_-]{43}; Path=\/; Secure; HttpOnly; SameSite=Strict; Max-Age=120$/);
  const session=setCookie.split(';')[0]!;
  const {options:option,csrf}=await opened.json() as {options:{challenge:string};csrf:string};
+ const submit=(part:string,input:unknown,extra:Record<string,string>={})=>http(new Request(identity.origin+PILOT_GENESIS_CONSENT_PATH+'/'+part,{
+  method:'POST',headers:{origin:identity.origin,'sec-fetch-site':'same-origin','content-type':'application/json',cookie:session,'x-csrf-token':csrf,...extra},
+  body:JSON.stringify(input),
+ }));
+ expect((await submit('begin',body)).status).toBe(401);
  const sessionDigest=await digest(JSON.stringify([session.split('=')[1]!,csrf]));
  await expect(registration.begin(invite,grantBytes,roster,browser)).rejects.toThrow('pilot_genesis_registration_unavailable');
  const auth=await virtualAuthenticator(),response=await auth.register(option.challenge,identity);
@@ -348,14 +357,31 @@ test('pilot independently registers once and approves only invited exact origina
  expect(attempts.map(x=>x.status).sort()).toEqual([204,401]);
  expect(await db.prepare('SELECT COUNT(*) n FROM auth_genesis_pins').first('n')).toBe(1);
  expect(await db.prepare('SELECT COUNT(*) n FROM auth_genesis_decisions').first('n')).toBe(0);
- const signer={key:async()=>authority!.pin,sign:authority!.sign};
- await expect(genesisIssuer(db,identity,policy,signer,sessionDigest).begin(wrongGrant,roster)).rejects.toThrow('genesis_approval_unavailable');
- await expect(genesisIssuer(db,identity,policy,signer,await digest(random())).begin(grantBytes,roster)).rejects.toThrow('genesis_approval_unavailable');
- const issuer=genesisIssuer(db,identity,policy,signer,sessionDigest),challenge=await issuer.begin(grantBytes,roster);
- await expect(issuer.complete(challenge.id,grantBytes,roster,await auth.assert(challenge.options.challenge,{...identity,uv:false}))).rejects.toThrow('genesis_approval_unavailable');
+ expect((await submit('begin',{...body,oldGrantCanonical:wrongGrant})).status).toBe(401);
+ expect((await submit('begin',body,{'x-csrf-token':random()})).status).toBe(401);
+ const otherBytes=JSON.stringify({...inviteBody,id:random()}),otherInvite={canonical:otherBytes,signature:await inviteKey!.sign(otherBytes)};
+ expect((await submit('begin',{...body,invite:otherInvite})).status).toBe(401);
+ const pending=await submit('begin',body);
+ expect(pending.status).toBe(200);
+ const challenge=await pending.json() as {id:string;options:{challenge:string;userVerification:string};display:{purpose:string;deviceId:string}};
+ expect(challenge.options.userVerification).toBe('required');
+ expect(challenge.display).toMatchObject({purpose:'approve-first-device-genesis',deviceId});
+ const id=challenge.id;
+ expect((await submit('readback',{...body,id})).status).toBe(401);
+ expect((await submit('complete',{...body,id,response:await auth.assert(challenge.options.challenge,{...identity,uv:false})})).status).toBe(401);
+ expect(signatures).toBe(0);
  const assertion=await auth.assert(challenge.options.challenge,{...identity,counter:1});
- // The legacy kernel, even if miswired to this pilot DB, cannot commit a scoped pilot challenge.
  expect(()=>genesisIssuer(db,identity,policy,signer)).toThrow('genesis_approval_unavailable');
- const proof=await issuer.complete(challenge.id,grantBytes,roster,assertion);
+ const completed=await submit('complete',{...body,id,response:assertion});
+ expect(completed.status).toBe(200);
+ const proof=await completed.json();
  await expect(verifyGenesisApproval(proof,grantBytes,roster,policy)).resolves.toBeTruthy();
+ const recovered=await submit('readback',{...body,id});
+ expect(recovered.status).toBe(200);
+ expect(await recovered.json()).toEqual(proof);
+ expect((await submit('readback',{...body,id},{cookie:'__Host-akc_pilot_genesis_registration='+random()})).status).toBe(401);
+ expect((await submit('complete',{...body,id,response:assertion})).status).toBe(401);
+ expect(signatures).toBe(1);
+ await db.prepare('UPDATE auth_genesis_pins SET active=0').run();
+ expect((await submit('readback',{...body,id})).status).toBe(401);
 });
