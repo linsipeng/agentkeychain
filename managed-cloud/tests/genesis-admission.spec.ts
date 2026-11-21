@@ -4,6 +4,7 @@ import {env} from 'cloudflare:workers';
 import {checkpoint,genesisRoot} from '../shared/checkpoints.ts';
 import {canonicalGrant} from '../shared/device-protocol.ts';
 import {admitGenesis} from '../shared/genesis-admission.ts';
+import {MAIN_BIND_GENESIS,mainGenesisBindingDeviceProof,readExactMainGenesisAdmission,verifyMainGenesisBinding} from '../shared/genesis-main-binding.ts';
 import {custodyAbsenceHeadRequestProof,proveCustodyAbsenceHead} from '../custody-trust-worker/package-absence-head.ts';
 import {digest,verify} from '../shared/contracts.ts';
 import {rosterDigest} from '../shared/roster.ts';
@@ -194,4 +195,47 @@ test('an exact already-admitted genesis can be reconciled from independently ret
   await auth.prepare('UPDATE auth_genesis_decisions SET signature=?').bind(accepted.signature).run();
   expect(await reconcile()).toBeNull();
  }finally{clock.mockRestore();}
+});
+
+test('first-device Main bind readback requires exact independent admission, not the same generic witness',async()=>{
+ const {f,witness,request}=await attempt(current(),'main-bind');
+ const policy={...f.policy,witness:{keyId:witness.keyId,publicKey:witness.publicKey}},nonce='A'.repeat(43),requestedAt=current();
+ const body=async(input:typeof request,keys=f.device)=>{
+  const {proof,grant,roster,checkpoint}=input;
+  const hash=await digest(JSON.stringify(['AgentKeychain-genesis-admission-attempt-v1',proof,grant,roster,checkpoint]));
+  const deviceSignature=await keys.sign(mainGenesisBindingDeviceProof(nonce,requestedAt,hash));
+  return {hash,text:JSON.stringify({version:1,domain:MAIN_BIND_GENESIS,nonce,requestedAt,proof,grant,roster,checkpoint,deviceSignature})};
+ };
+ const requestBody=await body(request),reject='genesis_main_binding_unavailable';
+ expect((await verifyMainGenesisBinding(requestBody.text,policy)).attemptDigest).toBe(requestBody.hash);
+ await expect(readExactMainGenesisAdmission(db,requestBody.text,policy)).rejects.toThrow(reject);
+ const receipt=await admitGenesis(db,request,f.policy,witness);
+ expect(await readExactMainGenesisAdmission(db,requestBody.text,policy)).toMatchObject({nonce,attemptDigest:requestBody.hash,receipt});
+ expect(await readExactMainGenesisAdmission(db,requestBody.text,policy)).toMatchObject({receipt});
+ expect(await count('genesis_admissions',f.grant.vaultId)).toBe(1);
+ expect(await count('roster_witness',f.grant.vaultId)).toBe(1);
+
+ const alternate=await f.approval({decisionId:'independently-signed-other-decision'},request.grant);
+ const changed=await body({...request,proof:alternate.proof});
+ expect((await verifyMainGenesisBinding(changed.text,policy)).attemptDigest).not.toBe(requestBody.hash);
+ await expect(readExactMainGenesisAdmission(db,changed.text,policy)).rejects.toThrow(reject);
+ await expect(readExactMainGenesisAdmission(db,requestBody.text,{...policy,witness:f.policy.authority})).rejects.toThrow(reject);
+ await expect(verifyMainGenesisBinding((await body(request,await signingFixture())).text,policy)).rejects.toThrow(reject);
+ await expect(verifyMainGenesisBinding(' '+requestBody.text,policy)).rejects.toThrow(reject);
+ const future=vi.spyOn(Date,'now').mockReturnValue((requestedAt+31)*1000);
+ try{await expect(readExactMainGenesisAdmission(db,requestBody.text,policy)).rejects.toThrow(reject);}
+ finally{future.mockRestore();}
+});
+
+test('first-device readback denies a valid legacy genesis head without independent provenance',async()=>{
+ const {f,witness,request}=await attempt(current(),'legacy-main-bind');
+ const policy={...f.policy,witness:{keyId:witness.keyId,publicKey:witness.publicKey}};
+ const legacy=await rosterWitness(db,witness.signer,f.policy.checkpointKeys,async()=>true,f.policy.recoveryAuthorities)
+  .accept({rosters:[request.roster],checkpoints:[request.checkpoint]});
+ expect(legacy.signature).toBeTruthy();
+ const nonce='A'.repeat(43),requestedAt=current(),{proof,grant,roster,checkpoint}=request;
+ const hash=await digest(JSON.stringify(['AgentKeychain-genesis-admission-attempt-v1',proof,grant,roster,checkpoint]));
+ const deviceSignature=await f.device.sign(mainGenesisBindingDeviceProof(nonce,requestedAt,hash));
+ await expect(readExactMainGenesisAdmission(db,JSON.stringify({version:1,domain:MAIN_BIND_GENESIS,nonce,requestedAt,proof,grant,roster,
+  checkpoint,deviceSignature}),policy)).rejects.toThrow('genesis_main_binding_unavailable');
 });
