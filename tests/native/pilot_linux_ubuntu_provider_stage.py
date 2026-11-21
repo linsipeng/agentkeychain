@@ -108,9 +108,10 @@ def run():
     need("ID=ubuntu" in os_release.splitlines() and "VERSION_CODENAME=noble" in os_release.splitlines())
     need(len(sys.argv) == 1 and os.environ.get("GITHUB_ACTIONS") == "true"
          and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("archive-only-v1", "private-peer-v1", "encrypted-session-v1"))
+         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("archive-only-v1", "private-peer-v1", "encrypted-session-v1", "collection-offer-v1"))
     verify_peer = os.environ["AKC_UBUNTU_PROVIDER_STAGE"] != "archive-only-v1"
-    encrypted = os.environ["AKC_UBUNTU_PROVIDER_STAGE"] == "encrypted-session-v1"
+    encrypted = os.environ["AKC_UBUNTU_PROVIDER_STAGE"] in ("encrypted-session-v1", "collection-offer-v1")
+    collection_offer = os.environ["AKC_UBUNTU_PROVIDER_STAGE"] == "collection-offer-v1"
     os.umask(0o077)
     with tempfile.TemporaryDirectory(prefix="akc-noble-stage-", dir="/tmp") as location:
         work = Path(location)
@@ -228,10 +229,14 @@ APT::Get::AllowUnauthenticated "false";
         need(len(staged_libraries) == 2)
         candidate.chmod(0o500)
         try:
-            lane["verify_private_provider"](candidate, provider, library_dir, staged_libraries, encrypted=encrypted)
+            lane["verify_private_provider"](candidate, provider, library_dir, staged_libraries,
+                                           encrypted=encrypted, collection_offer=collection_offer)
         except Exception:
             phase = "private-peer-" + lane["verify_private_provider"].__globals__["phase"]
             raise ValueError("private provider peer denied") from None
+        if collection_offer:
+            print("linux_private_secret_bus_collection_offer_verified_not_prompted_or_created")
+            return
         print("linux_private_secret_bus_encrypted_negotiation_verified_not_storage" if encrypted else
               "linux_private_secret_bus_peer_identity_verified_not_storage")
 

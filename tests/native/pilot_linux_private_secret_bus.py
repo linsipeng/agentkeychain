@@ -46,6 +46,49 @@ SESSION_POLICY = """
        receive_requested_reply="true" max_fds="0"/>
 """
 
+# Separate unattended offer-only fixture. Deliberately does not allow Prompt,
+# Dismiss, prompter activation, alias access, or any collection/item operations.
+COLLECTION_OFFER_POLICY = """
+<allow send_destination="org.freedesktop.secrets" send_interface="org.freedesktop.Secret.Service"
+       send_member="CreateCollection" send_path="/org/freedesktop/secrets" send_type="method_call" max_fds="0"/>
+<allow receive_interface="org.freedesktop.Secret.Service" receive_member="CreateCollection"
+       receive_path="/org/freedesktop/secrets" receive_type="method_call" max_fds="0"/>
+"""
+COLLECTION_LABEL = "AgentKeychain disposable offer only"
+
+
+def validate_collection_offer(reply):
+    need(reply is not None and reply.get_type_string() == "(oo)")
+    collection, prompt = reply.unpack()
+    need(collection == "/")
+    # GNOME 46.1 gkd_secret_prompt_constructed uses SECRET_PROMPT_PREFIX "/p%d".
+    need(re.fullmatch(r"/org/freedesktop/secrets/prompt/p[1-9][0-9]{0,9}", prompt))
+
+
+def verify_collection_offer(bus, unique_owner):
+    global phase
+    phase = "collection-offer-rpc"
+    properties = {"org.freedesktop.Secret.Collection.Label": GLib.Variant("s", COLLECTION_LABEL)}
+    try:
+        reply = bus.call_sync(unique_owner, "/org/freedesktop/secrets", "org.freedesktop.Secret.Service",
+                             "CreateCollection", GLib.Variant("(a{sv}s)", (properties, "")), None,
+                             Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+    except GLib.Error as error:
+        phase = "collection-offer-rpc-" + session_rpc_failure(error)
+        raise
+    phase = "collection-offer-shape"
+    validate_collection_offer(reply)
+
+
+def require_no_fixture_keyring_files(data_home):
+    keyrings = Path(data_home) / "keyrings"
+    try:
+        row = keyrings.lstat()
+    except FileNotFoundError:
+        return
+    need(stat.S_ISDIR(row.st_mode) and row.st_uid == os.getuid())
+    need(next(keyrings.iterdir(), None) is None)
+
 ALGORITHM = "dh-ietf1024-sha256-aes128-cbc-pkcs7"
 # RFC 2409 Section 6.2, 1024-bit MODP group. Protocol compatibility test only;
 # not a general encryption recommendation.
@@ -175,7 +218,7 @@ def interrupted(_signum, _frame):
     raise RuntimeError("interrupted")
 
 
-def verify_private_provider(provider_path, staged_provider, library_dir, staged_libraries, encrypted=False):
+def verify_private_provider(provider_path, staged_provider, library_dir, staged_libraries, encrypted=False, collection_offer=False):
     global phase
     need(sys.platform == "linux" and os.getuid() == os.geteuid() != 0)
     os.umask(0o077)
@@ -202,7 +245,11 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
             endpoint = root / "broker"
             phase = "broker"
             conf = root / "bus.xml"
-            conf.write_text(BUS_CONFIG.format(endpoint, os.getuid(), SESSION_POLICY if encrypted else ""), encoding="ascii")
+            need(not collection_offer or encrypted)
+            policy = SESSION_POLICY if encrypted else ""
+            if collection_offer:
+                policy += COLLECTION_OFFER_POLICY
+            conf.write_text(BUS_CONFIG.format(endpoint, os.getuid(), policy), encoding="ascii")
             def start(argv, environment):
                 child = subprocess.Popen(argv, env=environment, cwd=root, stdin=subprocess.DEVNULL,
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -287,6 +334,19 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                     need(call(conn, "GetNameOwner", SERVICE, "(s)") == owner)
                     credentials = call(conn, "GetConnectionCredentials", owner, "(a{sv})")
                     need(credentials.get("UnixUserID") == os.getuid() and credentials.get("ProcessID") == provider.pid)
+                if collection_offer:
+                    phase = "collection-offer-fresh-data"
+                    require_no_fixture_keyring_files(env["XDG_DATA_HOME"])
+                    need(call(conn, "GetNameOwner", SERVICE, "(s)") == owner)
+                    verify_collection_offer(conn, owner)
+                    phase = "collection-offer-owner"
+                    owned_image(provider, provider_path, staged_provider)
+                    owned_image(broker, BROKER)
+                    need(call(conn, "GetNameOwner", SERVICE, "(s)") == owner)
+                    credentials = call(conn, "GetConnectionCredentials", owner, "(a{sv})")
+                    need(credentials.get("UnixUserID") == os.getuid() and credentials.get("ProcessID") == provider.pid)
+                    phase = "collection-offer-no-fixture-files"
+                    require_no_fixture_keyring_files(env["XDG_DATA_HOME"])
             finally:
                 signal.alarm(0)
                 try:
