@@ -61,52 +61,14 @@ FIRST_PROMPT = "/org/freedesktop/secrets/prompt/p1"
 PROMPT_IFACE = "org.freedesktop.Secret.Prompt"
 
 
-# dbus-daemon omits message paths from rejection diagnostics but reports
-# the number of matched rules. Add DENY-only diagnostic rules *before* the
-# existing allow rules. Last-match semantics keep every decision unchanged.
-# The previous hosted run already established the pinned destination, exact
-# interface and zero FDs. Gate every marker on all three; classify only a
-# fixed path candidate on the same route, without logging the actual path.
-CALLBACK_PATH_CANDIDATES = tuple(f"callback-p{value}" for value in range(9))
-
-
-def prompt_ready_deny_markers():
-    base = ('send_interface="org.gnome.keyring.internal.Prompter.Callback" '
-            'send_member="PromptReady" send_type="method_call" '
-            f'send_destination="{SERVICE}" max_fds="0"')
-    markers = [f"<deny {base}/>"]
-    # Distinct paths are mutually exclusive, so one plus the number of
-    # identical matches identifies the exact allowlisted diagnostic label.
-    for value in range(len(CALLBACK_PATH_CANDIDATES)):
-        markers.extend([f'<deny {base} send_path="/org/gnome/keyring/Prompt/p{value}"/>'] * (value + 1))
-    return markers
-
-
-def prompt_ready_denial_shape(raw):
-    if b' type="method_call"' not in raw:
-        return "other-type"
-    if b' interface="org.gnome.keyring.internal.Prompter.Callback"' not in raw:
-        return "other-interface"
-    shape = re.search(rb"Rejected send message, ([0-9]{1,2}) matched rules;", raw)
-    if shape is None:
-        return "unclassified"
-    count = int(shape[1])
-    if count == 0:
-        return "destination-or-fd-mismatch"
-    if count == 1:
-        return "other-path"
-    if 2 <= count <= len(CALLBACK_PATH_CANDIDATES) + 1:
-        return CALLBACK_PATH_CANDIDATES[count - 2]
-    return "unclassified"
-
-
 def prompt_cancel_policy():
-    rules = prompt_ready_deny_markers() + [f'<allow own="{PROMPTER}"/>', f'<allow own="{FIXTURE_CLIENT}"/>']
+    rules = [f'<allow own="{PROMPTER}"/>', f'<allow own="{FIXTURE_CLIENT}"/>']
+    # Exact pinned Ubuntu fixture observed callback p2; no other GCR callback path is enabled.
     routes = (
         (FIXTURE_CLIENT, SERVICE, FIRST_PROMPT, PROMPT_IFACE, ("Prompt", "Dismiss")),
         (SERVICE, PROMPTER, "/org/gnome/keyring/Prompter", "org.gnome.keyring.internal.Prompter",
          ("BeginPrompting", "PerformPrompt", "StopPrompting")),
-        (PROMPTER, SERVICE, "/org/gnome/keyring/Prompt/p0", "org.gnome.keyring.internal.Prompter.Callback",
+        (PROMPTER, SERVICE, "/org/gnome/keyring/Prompt/p2", "org.gnome.keyring.internal.Prompter.Callback",
          ("PromptReady", "PromptDone")),
     )
     for sender, destination, path, interface, members in routes:
@@ -456,8 +418,6 @@ def prompt_child_label(role, raw):
         if direction is not None:
             member = re.search(rb' member="([A-Za-z]{1,32})"', raw)
             method = PROMPT_METHODS.get(member[1], "other") if member else "other"
-            if direction == "send" and method == "ready":
-                method += "-" + prompt_ready_denial_shape(raw)
             return "bus-rejected-" + direction + "-" + method
         return "bus-stderr-other"
     if b"cannot open display" in line or b"failed to open display" in line:
