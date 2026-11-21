@@ -186,8 +186,27 @@ def screen_windows(display, mark, input_scope=None):
             mark(label + "-rpc")
             request(opcode, data, minor)
             header = read(32)
-            mark(label + "-frame")
-            need(header[0] == 1 and struct.unpack_from("<H", header, 2)[0] == sequence)
+            # MappingNotify is server-originated and unrequested (core X11).
+            # It can interleave between a query and its reply. No other event
+            # or send-event form is accepted, and the burst is bounded.
+            if label.startswith("input-dialog-"):
+                for _ in range(4):
+                    if header[0] != 34:
+                        break
+                    mark(label + "-mapping-notify")
+                    header = read(32)
+                if header[0] == 0:
+                    # Core error code 3=BadWindow, 5=BadAtom, 8=BadMatch.
+                    mark(label + "-error-" + {3: "window", 5: "atom", 8: "match"}.get(header[1], "other"))
+                    need(False)
+                mark(label + "-unexpected-event")
+                need(header[0] == 1)
+                mark(label + "-sequence")
+                need(struct.unpack_from("<H", header, 2)[0] == sequence)
+                mark(label + "-body-bound")
+            else:
+                mark(label + "-frame")
+                need(header[0] == 1 and struct.unpack_from("<H", header, 2)[0] == sequence)
             return header, read(struct.unpack_from("<I", header, 4)[0] * 4)
 
         query = b"X-Resource"
@@ -226,19 +245,49 @@ def screen_windows(display, mark, input_scope=None):
             mark("input-pinned-window")
             need(len(resolved) == 1 and tuple(resolved.values()) == (expected_pid,))
             window = next(iter(resolved))
-            authenticate_named_dialog(reply, window)
+            authenticate_named_dialog(reply, mark, window)
             enter_fixture_password(reply, request, mark, setup, root, window, password)
         mark("mapped" if resolved else "no-viewable-top-level" if count else "no-top-level")
         return set(resolved.values())
 
 
-def authenticate_named_dialog(reply, window):
-    # Core X11 WM_NAME (atom 39). GCR receives an exact source-confirmed
-    # ASCII title in the clean C locale. Check, never print the property.
-    header, body = reply("input-dialog-title", 20, struct.pack("<IIIII", window, 39, 0, 0, 16))
-    remaining, count = struct.unpack_from("<II", header, 12)
+def authenticate_named_dialog(reply, mark, window):
+    # The window ID and owner were checked on this exact authenticated X11
+    # connection. Resolve only the fixed EWMH title and its UTF-8 type with
+    # InternAtom(only-if-exists); never create atoms or accept a caller name.
+    def known_atom(label, name):
+        header, body = reply("input-dialog-atom-" + label, 16, struct.pack("<H2x", len(name)) + padded(name), minor=1)
+        mark("input-dialog-atom-" + label + "-shape")
+        need(not body)
+        return struct.unpack_from("<I", header, 8)[0]
+
     expected = b"New Keyring Password"
-    need(header[1] == 8 and remaining == 0 and count == len(expected) and body[:count] == expected)
+
+    def title(kind, prop, expected_type):
+        header, body = reply("input-dialog-title-" + kind, 20, struct.pack("<IIIII", window, prop, 0, 0, 16))
+        typ, remaining, count = struct.unpack_from("<III", header, 8)
+        if typ == 0:
+            mark("input-dialog-title-" + kind + "-absent")
+            need(header[1] == count == remaining == 0 and not body)
+            return False
+        mark("input-dialog-title-" + kind + "-encoding")
+        need(typ == expected_type and header[1] == 8)
+        mark("input-dialog-title-" + kind + "-length")
+        need(remaining == 0 and count == len(expected) and len(body) == ((count + 3) & ~3))
+        mark("input-dialog-title-" + kind + "-value")
+        need(body[:count] == expected)
+        return True
+
+    modern = known_atom("net-wm-name", b"_NET_WM_NAME")
+    if modern:
+        utf8 = known_atom("utf8", b"UTF8_STRING")
+        mark("input-dialog-title-utf8-atom")
+        need(utf8 != 0)
+        if title("modern", modern, utf8):
+            return
+    # Legacy XA_WM_NAME=39, XA_STRING=31. Use only if the modern property is
+    # absent, never after a contradictory title or malformed modern reply.
+    need(title("legacy", 39, 31))
 
 
 def enter_fixture_password(reply, request, mark, setup, root, window, password):
