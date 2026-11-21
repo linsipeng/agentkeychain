@@ -18,7 +18,7 @@ function authority(){
  return {pin:{keyId:sha(publicKey),publicKey},sign:(canonical:string)=>({canonical,signature:sign(null,Buffer.from(canonical),k.privateKey).toString('base64')})};
 }
 type ArchitecturePhase = 'matrix-architecture'|'bun-process-arch'|'uname-os'|'uname-arch'|'bun-native-query'|'bun-native-translated'|
- 'bun-image-path'|'bun-lipo-tool'|'bun-lipo-arch'|'fixture-lipo-tool'|'fixture-lipo-arch'|'helper-lipo-tool'|'helper-lipo-arch';
+ 'bun-workflow-image'|'bun-os-image'|'bun-canonical-image'|'bun-image-identity'|'bun-lipo-tool'|'bun-lipo-arch'|'fixture-lipo-tool'|'fixture-lipo-arch'|'helper-lipo-tool'|'helper-lipo-arch';
 let phase: 'runner'|ArchitecturePhase|'fixture'|'build'|'digest'|'positive'|'invalid-wire'|'missing-wrong-inode'|'unchanged-original'|'configuration'='runner';
 const wireHash=(value:{canonical:string;signature:string})=>sha(JSON.stringify([value.canonical,value.signature]));
 async function main(){
@@ -87,8 +87,50 @@ async function main(){
    must(output.stdout.toString().trim()===expectedArch);
    phase=previous;
   };
-  phase='bun-image-path';
-  nativeArch(realpathSync.native(process.execPath),'bun');
+  phase='bun-workflow-image';
+  const workflowBun=process.env.AKC_SIGNED_WIRE_BUN;
+  must(typeof workflowBun==='string'&&workflowBun.startsWith('/')&&workflowBun.length<=4095&&!/[\x00-\x1f\x7f]/.test(workflowBun));
+  phase='bun-os-image';
+  // Read the actual process text vnode path from Darwin, not Bun's
+  // process.execPath shim or shell PATH. No falling back to either.
+  const proc=dlopen('/usr/lib/libproc.dylib',{
+   proc_pidpath:{args:[FFIType.i32,FFIType.ptr,FFIType.u32],returns:FFIType.i32},
+  });
+  const image=Buffer.alloc(4096);
+  try{
+   const length=proc.symbols.proc_pidpath(process.pid,ptr(image),image.length),end=image.indexOf(0);
+   must(length>0&&length<=image.length&&end>0&&end<=length&&image[0]===47);
+  }finally{proc.close();}
+  const imagePath=new TextDecoder('utf-8',{fatal:true}).decode(image.subarray(0,image.indexOf(0)));
+  phase='bun-canonical-image';
+  // Use POSIX realpath, not a runtime-specific .native shim.
+  const libc=dlopen('/usr/lib/libSystem.B.dylib',{
+   realpath:{args:[FFIType.ptr,FFIType.ptr],returns:FFIType.ptr},
+  });
+  function canonical(path:string){
+   const arg=Buffer.from(path+'\0','utf8'),out=Buffer.alloc(4096);
+   const result=libc.symbols.realpath(ptr(arg),ptr(out)),end=out.indexOf(0);
+   must(result!==null&&result!==0&&end>0&&out[0]===47);
+   return new TextDecoder('utf-8',{fatal:true}).decode(out.subarray(0,end));
+  }
+  let actualBun:string,expectedBun:string;
+  try{actualBun=canonical(imagePath);expectedBun=canonical(workflowBun);}
+  finally{libc.close();}
+  phase='bun-image-identity';
+  must(actualBun===expectedBun);
+  const bunFD=openSync(actualBun,constants.O_RDONLY|constants.O_NOFOLLOW);
+  let bunImage;
+  try{
+   bunImage=fstatSync(bunFD,{bigint:true});
+   const named=lstatSync(expectedBun,{bigint:true});
+   must(bunImage.isFile()&&named.isFile()&&(bunImage.mode&0o111n)!==0n&&
+    named.dev===bunImage.dev&&named.ino===bunImage.ino&&named.mode===bunImage.mode);
+  }finally{closeSync(bunFD);}
+  const verifyBunName=()=>{
+   const current=lstatSync(actualBun,{bigint:true});
+   must(current.isFile()&&current.dev===bunImage.dev&&current.ino===bunImage.ino&&current.mode===bunImage.mode);
+  };
+  nativeArch(actualBun,'bun');
   const baseline=capture(['/bin/bash','tests/native/pilot_darwin_keychain_config_digest.sh']);
   must(/^[a-f0-9]{64}\n$/.test(baseline));
   try{
@@ -129,7 +171,8 @@ async function main(){
    writeFileSync(pin,root.pin.publicKey,{mode:0o600,flag:'wx'});
    const helper=join(install,'agentkeychain-continuation-pilot-darwin-check');
    const nativeEnv={AKC_DARWIN_NATIVE_CANDIDATE:'check-signed-disposable-v1'};
-   const build=Bun.spawnSync([process.execPath,'scripts/build-continuation-pilot-darwin-check.ts','--artifact',material,
+   verifyBunName();
+   const build=Bun.spawnSync([actualBun,'scripts/build-continuation-pilot-darwin-check.ts','--artifact',material,
     '--root-public-key',pin,'--outfile',helper],{env:{...env,...nativeEnv},cwd:process.cwd(),stdout:'pipe',stderr:'pipe',timeout:155_000});
    must(build.exitCode===0&&build.stdout.length===0&&build.stderr.length===0);
    nativeArch(helper,'helper');

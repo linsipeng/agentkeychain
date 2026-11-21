@@ -127,7 +127,12 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          bun tests/native/pilot_darwin_signed_wire.ts
+          bun_entry="$(command -v bun)"
+          case "$bun_entry" in
+            /*) ;;
+            *) echo 'Pinned Bun entry is not absolute' >&2; exit 1 ;;
+          esac
+          AKC_SIGNED_WIRE_BUN="$bun_entry" "$bun_entry" tests/native/pilot_darwin_signed_wire.ts
 
       - name: Independently recheck configuration after signed-wire attempt
         if: ${{ always() }}
