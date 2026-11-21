@@ -272,10 +272,19 @@ def authenticate_named_dialog(reply, mark, window):
             return False
         mark("input-dialog-title-" + kind + "-encoding")
         need(typ == expected_type and header[1] == 8)
-        mark("input-dialog-title-" + kind + "-length")
-        need(remaining == 0 and count == len(expected) and len(body) == ((count + 3) & ~3))
-        mark("input-dialog-title-" + kind + "-value")
-        need(body[:count] == expected)
+        mark("input-dialog-title-" + kind + "-wire-length")
+        need(0 <= count <= 64 and remaining == 0 and len(body) == ((count + 3) & ~3))
+        value = body[:count]
+        if value != expected:
+            # Static diagnostics only; neither GTK's fallback nor a source
+            # string used for an on-screen label grants input authority.
+            observed = {
+                b"": "empty",
+                b"gcr-prompter": "program-default",
+                b"Choose password for new keyring": "provider-message",
+            }.get(bytes(value), "other-same-length" if count == len(expected) else "other-length")
+            mark("input-dialog-title-" + kind + "-" + observed)
+            need(False)
         return True
 
     modern = known_atom("net-wm-name", b"_NET_WM_NAME")
