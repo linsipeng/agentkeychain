@@ -871,3 +871,34 @@ test('Main signs only the exact scoped absence and withholds the result after a 
  }})).rejects.toThrow('not_found');
  await expect(proveGenesisPackageAbsence(db(),await context(),request,pins,local)).rejects.toThrow('not_found');
 });
+
+import {canonicalPilotPostProof,PILOT_POST_PROOF_PATH} from '../shared/pilot-continuation-post-wire.ts';
+test('compiled disabled-by-default Main pilot HTTP proof binds the exact original device and fails on revocation',async()=>{
+ const {f,input,expected,commit}=await continuationReadbackFixture(true);
+ const pre='A'.repeat(43),post='B'.repeat(42)+'A',scope=f.custodyInput(input,pre);
+ await commit();
+ const fresh=await rpcData(env.TRANSPORT_CUSTODY.fresh(scope));
+ const mainBody=canonicalGenesisCommitProofExpectation({commit:expected,nonce:pre,
+  custodyFreshHeadDigest:await digest(JSON.stringify([fresh.freshHead.canonical,fresh.freshHead.signature]))});
+ const main=await rpcData(env.TRANSPORT_MAIN.commitProof(await f.signedHeaders(new URL(fixtureTransportOrigin+'/commit-proof'),mainBody),mainBody,fresh));
+ const url=new URL('https://api.web-pilot-device.fixture.invalid'+PILOT_POST_PROOF_PATH);
+ const body=canonicalPilotPostProof({request:{...scope,nonce:post},prior:fresh.freshHead,main});
+ const headers={...await f.signedHeaders(url,body),'content-type':'application/json'};
+ const send=(target=url.toString(),data=body)=>new Request(target,{method:'POST',headers,body:data});
+ expect((await env.PILOT_MAIN_OFF.fetch(send())).status).toBe(404);
+ expect((await env.PILOT_MAIN_POST.fetch(send('https://api.web-pilot-other.fixture.invalid'+PILOT_POST_PROOF_PATH))).status).toBe(404);
+ expect((await env.PILOT_MAIN_POST.fetch(new Request(url,{method:'POST',headers:{'content-type':'application/json'},body}))).status).toBe(404);
+
+ expect((await env.PILOT_MAIN_POST.fetch(send(url.toString()+'?x=1'))).status).toBe(404);
+ expect((await env.PILOT_MAIN_POST.fetch(send(url.toString(),body+' '))).status).toBe(404);
+ const wrongMethod=new Request(url,{method:'GET',headers});
+ expect((await env.PILOT_MAIN_POST.fetch(wrongMethod)).status).toBe(404);
+ const res=await env.PILOT_MAIN_POST.fetch(send());
+ expect(res.status).toBe(200);
+ expect(res.headers.get('cache-control')).toBe('no-store');
+ const proof=await res.json<{canonical:string;signature:string}>();
+ expect(await verify(f.transportPins.witness.publicKey,proof.signature,proof.canonical)).toBe(true);
+ expect(JSON.parse(proof.canonical)).toMatchObject({nonce:post,domain:CUSTODY_CONTINUATION_POST_COMMIT_DOMAIN});
+ await f.veto();
+ expect((await env.PILOT_MAIN_POST.fetch(send())).status).toBe(404);
+});

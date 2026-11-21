@@ -10,6 +10,8 @@ declare global {
             CUSTODIAN_TEST_TRUST_SIGNER:import('./synthetic-recovery.ts').RecoveryTrustSigner;
             CUSTODIAN_TEST_RELEASE:import('../shared/recovery-release.ts').RecoveryReleaseSigner;
             CUSTODIAN_TEST:D1Database;
+            PILOT_MAIN_POST:Fetcher;
+            PILOT_MAIN_OFF:Fetcher;
             TRANSPORT_MAIN:import('./continuation-transport.fixture.ts').MainContinuationTransport;
             TRANSPORT_CUSTODY:import('./continuation-transport.fixture.ts').CustodyContinuationTransport;
             TRANSPORT_CUSTODY_READY:import('../custody-trust-worker/continuation-readiness.ts').CustodyContinuationReadinessTransport;

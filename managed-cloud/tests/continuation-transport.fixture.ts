@@ -46,6 +46,17 @@ export class CustodyContinuationTransport extends WorkerEntrypoint<CustodyEnv>{
  }
 }
 
+/** Test-only role binding for the hosted Main adapter: no test seeding capability. */
+export class PilotCustodyPostFixture extends WorkerEntrypoint<CustodyEnv>{
+ override async fetch(){return new Response(null,{status:404});}
+ async post(input:ContinuationFreshHeadRequest,prior:SignedManagedOperation,main:SignedManagedOperation){
+  const p=JSON.parse(this.env.PINS) as PinPolicy;
+  return provePostCommitContinuationHead(this.env.CUSTODIAN,input,prior,main,
+   {mainCommitAuthority:p.main,authority:p.approval,witnessKeys:[p.witness],checkpointKeys:[p.checkpoint],recoveryAuthorities:[],otherReleaseKeys:[]},
+   await localSigner(this.env.ROLE_KEY,p.witness));
+ }
+}
+
 export class MainContinuationTransport extends WorkerEntrypoint<MainEnv>{
  override async fetch(_request?:Request|string){return new Response(null,{status:404});}
  async commitProof(headers:Headers,body:string,custody:Fresh){
