@@ -10,6 +10,10 @@ on:
       - 'tests/native/pilot_broker_unix_peer.c'
       - 'tests/native/pilot_broker_unix_receipt.c'
       - 'tests/native/pilot_broker_unix_inspect.c'
+      - 'tests/native/pilot_linux_installed_inspect_*'
+      - 'native/pilot-linux-*.c'
+      - 'native/pilot-linux-*.h'
+      - 'src/cloud/continuation-pilot-native-*.ts'
       - 'tests/native/PILOT_BROKER_UNIX_INSPECT.md'
       - 'tests/native/PILOT_SQLITE_DIRFD_ACCEPTANCE.md'
 
@@ -128,3 +132,21 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I"$fixture" -c tests/native/pilot_broker_unix_inspect.c -o "$fixture/broker-inspect.o"
           cc "$fixture/broker-inspect.o" "$fixture/sqlite3.o" -lm -lpthread -lcrypto -o "$fixture/broker-inspect"
           "$fixture/broker-inspect"
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: matrix.runner == 'ubuntu-24.04'
+        with:
+          bun-version: '1.4.5'
+
+      - name: Verify a separately installed pilot against sealed native SQLite reader
+        if: matrix.runner == 'ubuntu-24.04'
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(id -u)" != 0
+          pkg-config --atleast-version=3.0.0 libcrypto
+          bun install --frozen-lockfile --ignore-scripts
+          bun test tests/native/pilot_linux_installed_inspect_rehearsal.ts
