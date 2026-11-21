@@ -40,9 +40,21 @@ Do not unlock sync from that intent without a valid live head and revocation
 check. Unwired fixtures and unsigned projections do not meet this release gate.
 The experimental Auth issuer's provider returns a raw signed witness; before
 enabling it, require nonce-bound current Custody state and revocation checks at
-approval finalization and again during consumption. A lost Auth response must
-retrieve the stored exact-intent decision under an Auth-owned, scoped grant;
-do not reapprove or expose general decision lookup.
+approval finalization and again during consumption. The experimental Auth
+readback can return a byte-identical committed approval to a current session
+with an exact ceremony/credential-bound read grant; the real independent UI
+and grant-mint lifecycle are not wired. Do not reapprove or expose general
+decision lookup.
+
+The internal Main proof binds one currently valid approval, exact durable
+package and scoped device request to a nonce and a separately signed Custody
+assertion. It neither proves independent package storage nor guarantees
+Custody was sampled after Main's commit. Production transport must obtain
+Custody state after the exact commit and make the ordering auditable, with
+revocation checks before activation and unlock. This revision fails closed
+after the short approval window; safely recovering an older committed
+decision requires a separate time-of-commit contract, not replaying an
+expired approval.
 
 ## 2. Rehearse the rollout in disposable staging
 
@@ -61,3 +73,16 @@ Send one proposed production change to the owner. It must identify the exact can
 - Apply the approved compatible database and Worker/asset changes in the rehearsed dependency order. Independently read back the expected versions and safe service health. Validate a designated isolated account; never test by modifying someone's existing Vault.
 - Only after production checks pass, create the approved version tag from the exact candidate and verify the GitHub release and exact asset checksums, including both Darwin helpers. Link the release and the tested rollback path.
 - If any stop condition is reached, do not publish or quietly weaken a trust boundary. Use only the preapproved rollback if applicable and clearly report which stage actually took effect.
+
+The isolated CLI staging slice records `genesis-package-continuation-v1` in
+the existing protected intent only after validating both proofs. The Main
+commit-key appendix and Auth approval-key appendix have distinct domains,
+verify under the same signed release root and are tied to the exact release
+manifest. The signed Main commit links the exact Auth approval and fresh
+Custody evidence by digest; the three keys must differ. A dropped local
+acknowledgment may be recovered by read-only validation of the protected
+historical record at its accepted time. That record never grants activation,
+does not renew authorization, and must not be used to unlock synchronization.
+Production integration still needs a fresh revocation/head check and an
+exclusive cross-process enrollment lease before any local write that activates
+the profile. The native secure store does not expose compare-and-swap.

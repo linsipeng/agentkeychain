@@ -63,7 +63,7 @@ export function assertVerifiedPolicy(policy: ManagedEndpointPolicy): void {
 }
 // Separate v1 appendix: existing signed release artifacts and their format are
 // unchanged. The caller cannot opt into a different root or inject a default pin.
-export async function verifyContinuationAuthority(policy:ManagedEndpointPolicy,appendix:SignedManagedOperation):Promise<Readonly<CheckpointKey>>{
+async function verifyContinuationPin(policy:ManagedEndpointPolicy,appendix:SignedManagedOperation,domain:string):Promise<Readonly<CheckpointKey>>{
   assertVerifiedPolicy(policy);
   const provenance=verified.get(policy)!;
   exactFields(appendix,['canonical','signature']);
@@ -72,7 +72,7 @@ export async function verifyContinuationAuthority(policy:ManagedEndpointPolicy,a
   const value:unknown=JSON.parse(appendix.canonical);
   exactFields(value,['version','domain','manifestDigest','keyId','publicKey']);
   identifier(value.keyId);base64(value.publicKey,32,32);
-  const expected={version:1,domain:'AgentKeychain-continuation-release-pin-v1',manifestDigest:await digest(provenance.canonical),keyId:value.keyId,publicKey:value.publicKey};
+  const expected={version:1,domain,manifestDigest:await digest(provenance.canonical),keyId:value.keyId,publicKey:value.publicKey};
   const existing=[...policy.checkpointKeys,...policy.witnessKeys,...(policy.recoveryAuthorities??[]),...(policy.recoveryServices?[policy.recoveryServices.api,policy.recoveryServices.custodian]:[])];
   const rootKey=Buffer.from(provenance.root).toString('base64');
   if(appendix.canonical!==JSON.stringify(expected)||rootKey===value.publicKey||existing.some(p=>p.keyId===value.keyId||p.publicKey===value.publicKey)||
@@ -80,6 +80,10 @@ export async function verifyContinuationAuthority(policy:ManagedEndpointPolicy,a
     throw new Error('invalid_continuation_authority_pin');
   return Object.freeze({keyId:value.keyId,publicKey:value.publicKey});
 }
+export const verifyContinuationAuthority=(policy:ManagedEndpointPolicy,appendix:SignedManagedOperation)=>
+  verifyContinuationPin(policy,appendix,'AgentKeychain-continuation-release-pin-v1');
+export const verifyContinuationCommitAuthority=(policy:ManagedEndpointPolicy,appendix:SignedManagedOperation)=>
+  verifyContinuationPin(policy,appendix,'AgentKeychain-continuation-main-commit-release-pin-v1');
 export function productionPolicy(): ManagedEndpointPolicy {
   const artifact = releaseArtifact();
   if (!artifact) throw new Error('cloud_unavailable_not_provisioned');

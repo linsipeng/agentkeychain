@@ -1,8 +1,8 @@
 import type {CloudFetch} from '../src/cloud/http.ts';
 import {URL} from 'node:url';
-import {test,expect} from 'bun:test';
+import {test,expect,spyOn} from 'bun:test';
 import {Database} from 'bun:sqlite';
-import {MemorySecureStore} from '../src/platform/secure-store.ts';
+import {MemorySecureStore,type SecureAccount} from '../src/platform/secure-store.ts';
 import {createCloudKeys} from '../src/cloud/crypto.ts';
 import {CloudStore} from '../src/cloud/persistence.ts';
 import {protectEnrollmentKeys,restoreEnrollmentKeys} from '../src/cloud/enrollment-intent.ts';
@@ -149,7 +149,7 @@ test('read-only first-device continuation preflight keeps the protected intent a
  const {rosterDigest}=await import('../managed-cloud/shared/roster.ts');
  const {WITNESS_DOMAIN}=await import('../managed-cloud/shared/roster-witness.ts');
  const {genesisRoot}=await import('../managed-cloud/shared/checkpoints.ts');
- const {verifyGenesisContinuationPreflight,newContinuationReadbackNonce,CONTINUATION_HEAD_DOMAIN,prepareEnrollmentActivation,resumeEnrollmentActivation}=await import('../src/cloud/enrollment-intent.ts');
+ const {verifyGenesisContinuationPreflight,newContinuationReadbackNonce,CONTINUATION_HEAD_DOMAIN,prepareEnrollmentActivation,resumeEnrollmentActivation,stageGenesisContinuation,readStagedGenesisContinuation}=await import('../src/cloud/enrollment-intent.ts');
  const {selfAnchor}=await import('../src/cloud/enrollment.ts');
  const {sealKeyPackage,destroyCloudKeys}=await import('../src/cloud/crypto.ts');
  const keys=await createCloudKeys(),secure=new MemorySecureStore(), b64=(v:Uint8Array)=>Buffer.from(v).toString('base64');
@@ -198,6 +198,43 @@ test('read-only first-device continuation preflight keeps the protected intent a
   const advancedHead=JSON.stringify({...JSON.parse(f),witnessDigest:await digest(JSON.stringify([advanced,advancedWitness.signature]))});
   await expect(verifyGenesisContinuationPreflight(secure,store,policy,nonce,{...input,witness:advancedWitness,
    freshHead:{canonical:advancedHead,signature:sign(advancedHead,witnessKey.privateKey)}})).rejects.toThrow('cloud_invalid_continuation_readback');
+  // On a separate protected store, stage only the exact signed Main commit plus
+  // the already-proven independent head. Never use them as activation.
+  const owner=sodium.crypto_sign_keypair(),ownerAppendix=JSON.stringify({version:1,domain:'AgentKeychain-continuation-main-commit-release-pin-v1',
+   manifestDigest:await digest(manifest),keyId:'owner',publicKey:b64(owner.publicKey)});
+  const commitAppendix={canonical:ownerAppendix,signature:sign(ownerAppendix,root.privateKey)};
+  const commitBytes=JSON.stringify({version:1,domain:'AgentKeychain-enrollment-continuation-main-commit-v1',keyId:'owner',nonce,
+   continuationId:'a'.repeat(43),requestId:grant.requestId,accountId:grant.accountId,tenantId:grant.tenantId,vaultId:grant.vaultId,deviceId:grant.deviceId,
+   keyEpoch:1,stage:'put-key-package',intentDigest:await digest(exact),approvalDigest:await digest(JSON.stringify([receipt,approval.signature])),
+   payloadDigest,witnessDigest:await digest(JSON.stringify([w,witness.signature])),custodyFreshHeadDigest:await digest(JSON.stringify([f,freshHead.signature])),
+   issuedAt:now,expiresAt:now+20});
+  const commit={canonical:commitBytes,signature:sign(commitBytes,owner.privateKey)},verified={...input,commitAppendix,commit};
+  class InterruptibleStore extends MemorySecureStore {
+   dropAfterPut=false;
+   override async put(account:SecureAccount,value:Uint8Array){
+    await super.put(account,value);
+    if(account==='enrollment-intent'&&this.dropAfterPut){this.dropAfterPut=false;throw new Error('test_stopped_after_secure_save');}
+   }
+  }
+  const journal=new InterruptibleStore();
+  await protectEnrollmentKeys(journal,keys);
+  expect(await readStagedGenesisContinuation(journal,store,policy)).toBeNull();
+  const wrong=JSON.stringify({...JSON.parse(commitBytes),deviceId:'unrelated'});
+  await expect(stageGenesisContinuation(journal,store,policy,nonce,{...verified,commit:{canonical:wrong,signature:sign(wrong,owner.privateKey)}}))
+   .rejects.toThrow('cloud_invalid_continuation_commit');
+  const notOwner={...verified,commit:{canonical:commitBytes,signature:sign(commitBytes,auth.privateKey)}};
+  await expect(stageGenesisContinuation(journal,store,policy,nonce,notOwner)).rejects.toThrow('cloud_invalid_continuation_commit');
+  expect(await readStagedGenesisContinuation(journal,store,policy)).toBeNull();
+  journal.dropAfterPut=true;
+  await expect(stageGenesisContinuation(journal,store,policy,nonce,verified)).rejects.toThrow('test_stopped_after_secure_save');
+  const later=spyOn(Date,'now').mockReturnValue((now+65)*1000);
+  try{
+   expect(await readStagedGenesisContinuation(journal,store,policy)).toMatchObject({kind:'genesis-package-continuation-v1',requestId:grant.requestId,deviceId:grant.deviceId});
+   await stageGenesisContinuation(journal,store,policy,nonce,verified);
+   expect(await resumeEnrollmentActivation(journal,store,policy)).toBe(false);
+  }finally{later.mockRestore();}
+  expect(store.get('state','enrollment')).toBeNull();
+  expect(await journal.get('roster-anchor')).toBeNull();
   // An out-of-band preflight never exempts the old activation contract.
   const enrollment={accountId:grant.accountId,tenantId:grant.tenantId,vaultId:grant.vaultId,deviceId:grant.deviceId,keyEpoch:grant.keyEpoch,
    signingPublic:grant.signingKey,wrappingPublic:grant.wrappingKey,vdk:b64(keys.vdk),roster:trust.roster,

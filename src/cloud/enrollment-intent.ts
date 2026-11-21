@@ -1,7 +1,7 @@
 import {randomBytes} from 'node:crypto';
 import {digest,verify} from '../../managed-cloud/shared/contracts.ts';
 import {verifyContinuationApproval} from '../../managed-cloud/shared/enrollment-continuation.ts';
-import {exactFields} from './protocol.ts';
+import {base64,exactFields} from './protocol.ts';
 import {rosterDigest} from '../../managed-cloud/shared/roster.ts';
 import {verifyWitness} from '../../managed-cloud/shared/roster-witness.ts';
 import sodium from 'libsodium-wrappers-sumo';
@@ -11,14 +11,14 @@ import {canonicalGrant,type EnrollmentGrant} from '../../managed-cloud/shared/de
 import {openTrustedEnrollment} from './enrollment.ts';
 import type {CloudEnrollment} from './runtime.ts';
 import type {CloudStore} from './persistence.ts';
-import {assertVerifiedPolicy,verifyContinuationAuthority,type ManagedEndpointPolicy} from './config.ts';
+import {assertVerifiedPolicy,verifyContinuationAuthority,verifyContinuationCommitAuthority,type ManagedEndpointPolicy} from './config.ts';
 import type {SignedManagedOperation} from './protocol.ts';
 import {RosterStore,rosterPins} from './roster.ts';
 import {parseRoster,verifyRoster} from '../../managed-cloud/shared/roster.ts';
 import {genesisRoot} from '../../managed-cloud/shared/checkpoints.ts';
 export interface EnrollmentEvidence {witness?:SignedManagedOperation;grant:EnrollmentGrant;keyPackage:SignedManagedOperation;sealed?:string;phrase?:string;acceptedAt:number}
 interface Activation {enrollment:CloudEnrollment;signedRoster:SignedManagedOperation;evidence:EnrollmentEvidence}
-interface Intent {version:1;keys:Record<keyof CloudKeys,string>;activation?:Activation}
+interface Intent {version:1;keys:Record<keyof CloudKeys,string>;activation?:Activation;continuation?:ContinuationJournal}
 const encode=(keys:CloudKeys)=>Object.fromEntries(Object.entries(keys).map(([k,v])=>[k,Buffer.from(v).toString('base64')])) as Intent['keys'];
 async function load(secure:SecureStore):Promise<Intent|null>{
  const raw=await secure.get('enrollment-intent');if(!raw)return null;
@@ -54,8 +54,11 @@ export const CONTINUATION_HEAD_DOMAIN='AgentKeychain-enrollment-continuation-cur
  * original protected intent, not that a package was committed or this device
  * may become active. There is intentionally no production issuer or caller. */
 export async function verifyGenesisContinuationPreflight(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,nonce:string,input:GenesisContinuationPreflight):Promise<void>{
+ await validateGenesisContinuationPreflight(secure,store,policy,nonce,input,Math.floor(Date.now()/1000));
+}
+async function validateGenesisContinuationPreflight(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,nonce:string,input:GenesisContinuationPreflight,now:number){
  assertVerifiedPolicy(policy);
- const now=Math.floor(Date.now()/1000),g=input.grant,pins=policy.witnessKeys;
+ const g=input.grant,pins=policy.witnessKeys;
  if(!pins?.length||g.issuerDeviceId!==null||!/^[A-Za-z0-9_-]{43}$/.test(nonce))throw new Error('cloud_continuation_not_provisioned');
  const authority=await verifyContinuationAuthority(policy,input.authorityAppendix);
  const previous=await load(secure),pending=store.get<{requestId:string;deviceId:string}>('state','pending'),approved=store.get<{requestId:string;deviceId:string;vaultId:string}>('state','pending-approved');
@@ -99,9 +102,76 @@ export async function verifyGenesisContinuationPreflight(secure:SecureStore,stor
   try{if(!Buffer.from(vdk).equals(savedVDK))throw new Error('cloud_enrollment_intent_conflict');}finally{vdk.fill(0);}
  }finally{wrappingPrivate.fill(0);wrappingPublic.fill(0);savedVDK.fill(0);}
 }
+type ContinuationEvidence=GenesisContinuationPreflight&{commit:SignedManagedOperation;commitAppendix:SignedManagedOperation};
+interface ContinuationJournal {kind:'genesis-package-continuation-v1';acceptedAt:number;nonce:string;evidence:ContinuationEvidence}
+const commitDomain='AgentKeychain-enrollment-continuation-main-commit-v1';
+const denied=()=>new Error('cloud_invalid_continuation_commit');
+const bytesDigest=(value:SignedManagedOperation)=>digest(JSON.stringify([value.canonical,value.signature]));
+async function validateCommitProof(policy:ManagedEndpointPolicy,nonce:string,input:ContinuationEvidence,now:number){
+ const auth=await verifyContinuationAuthority(policy,input.authorityAppendix);
+ const owner=await verifyContinuationCommitAuthority(policy,input.commitAppendix);
+ const g=input.grant;
+ if(owner.keyId===auth.keyId||[auth.publicKey,g.signingKey,g.wrappingKey].includes(owner.publicKey))throw denied();
+ exactFields(input.commit,['canonical','signature']);
+ if(typeof input.commit.canonical!=='string'||input.commit.canonical.length>3072)throw denied();
+ base64(input.commit.signature,64,64);
+ const received:unknown=JSON.parse(input.commit.canonical);
+ exactFields(received,['version','domain','keyId','nonce','continuationId','requestId','accountId','tenantId','vaultId','deviceId','keyEpoch','stage','intentDigest','approvalDigest','payloadDigest','witnessDigest','custodyFreshHeadDigest','issuedAt','expiresAt']);
+ const {id}=JSON.parse(input.target.canonical) as {id:string};
+ const fresh=JSON.parse(input.freshHead.canonical) as {issuedAt:number;expiresAt:number};
+ const approvalWindow=JSON.parse(input.approval.canonical) as {expiresAt:number};
+ const {issuedAt,expiresAt}=received;
+ if(typeof issuedAt!=='number'||typeof expiresAt!=='number'||!Number.isSafeInteger(issuedAt)||!Number.isSafeInteger(expiresAt)||
+    issuedAt<fresh.issuedAt||issuedAt>now||expiresAt<=now||expiresAt>fresh.expiresAt||expiresAt>approvalWindow.expiresAt||expiresAt-issuedAt>60)
+  throw denied();
+ const expected={version:1,domain:commitDomain,keyId:owner.keyId,nonce,continuationId:id,requestId:g.requestId,accountId:g.accountId,
+  tenantId:g.tenantId,vaultId:g.vaultId,deviceId:g.deviceId,keyEpoch:g.keyEpoch,stage:'put-key-package',intentDigest:await digest(input.target.canonical),
+  approvalDigest:await bytesDigest(input.approval),payloadDigest:await digest(JSON.stringify(['AgentKeychain-enrollment-continuation-package-v1',input.keyPackage.canonical,input.keyPackage.signature])),
+  witnessDigest:await bytesDigest(input.witness),custodyFreshHeadDigest:await bytesDigest(input.freshHead),issuedAt,expiresAt};
+ if(input.commit.canonical!==JSON.stringify(expected)||!await verify(owner.publicKey,input.commit.signature,input.commit.canonical))throw denied();
+}
+
+/** Unwired local phase. The caller must serialize managed enrollment on this
+ * store; SecureStore does not offer compare-and-swap across processes. No
+ * profile, SQLite activation row, trust anchor or sync permission is written. */
+export async function stageGenesisContinuation(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,nonce:string,evidence:ContinuationEvidence):Promise<void>{
+ const old=await load(secure);
+ if(!old||old.activation)throw denied();
+ if(old.continuation){
+  if(old.continuation.nonce!==nonce||JSON.stringify(old.continuation.evidence)!==JSON.stringify(evidence))throw denied();
+  if(!await readStagedGenesisContinuation(secure,store,policy))throw denied();
+  return;
+ }
+ // Snapshot caller bytes once across asynchronous checks; don't retain aliases.
+ const exact=globalThis.structuredClone(evidence);
+ exactFields(exact,['grant','target','approval','authorityAppendix','witness','freshHead','roster','keyPackage','commit','commitAppendix']);
+ const acceptedAt=Math.floor(Date.now()/1000);
+ const continuation:ContinuationJournal={kind:'genesis-package-continuation-v1',acceptedAt,nonce,evidence:exact};
+ if(Buffer.byteLength(JSON.stringify(continuation),'utf8')>24_000)throw denied();
+ await validateGenesisContinuationPreflight(secure,store,policy,nonce,exact,acceptedAt);
+ await validateCommitProof(policy,nonce,exact,acceptedAt);
+ const deadline=(JSON.parse(exact.commit.canonical) as {expiresAt:number}).expiresAt;
+ if(Math.floor(Date.now()/1000)>=deadline||JSON.stringify(await load(secure))!==JSON.stringify(old))throw denied();
+ await save(secure,{...old,continuation});
+}
+
+/** Restart read validates historical evidence at its durably accepted time.
+ * This is not renewed authorization: any future activation needs a separate
+ * live Custody head and revocation check and an exclusive enrollment lease. */
+export async function readStagedGenesisContinuation(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy){
+ const intent=await load(secure),stage=intent?.continuation;
+ if(!stage)return null;
+ exactFields(stage,['kind','acceptedAt','nonce','evidence']);
+ if(intent?.activation||stage.kind!=='genesis-package-continuation-v1'||!Number.isSafeInteger(stage.acceptedAt)||stage.acceptedAt<1||
+    stage.acceptedAt>Math.floor(Date.now()/1000)||Buffer.byteLength(JSON.stringify(stage),'utf8')>24_000)throw denied();
+ exactFields(stage.evidence,['grant','target','approval','authorityAppendix','witness','freshHead','roster','keyPackage','commit','commitAppendix']);
+ await validateGenesisContinuationPreflight(secure,store,policy,stage.nonce,stage.evidence,stage.acceptedAt);
+ await validateCommitProof(policy,stage.nonce,stage.evidence,stage.acceptedAt);
+ return {kind:stage.kind,acceptedAt:stage.acceptedAt,requestId:stage.evidence.grant.requestId,deviceId:stage.evidence.grant.deviceId} as const;
+}
 /** Called only after the local SAS/trust/package checks have succeeded. */
 export async function prepareEnrollmentActivation(secure:SecureStore,store:CloudStore,keys:CloudKeys,activation:Activation){
- const previous=await load(secure);if(previous?.activation&&JSON.stringify(previous.activation)!==JSON.stringify(activation))throw new Error('cloud_enrollment_intent_conflict');
+ const previous=await load(secure);if(previous?.continuation)throw new Error('cloud_enrollment_intent_conflict');if(previous?.activation&&JSON.stringify(previous.activation)!==JSON.stringify(activation))throw new Error('cloud_enrollment_intent_conflict');
  const intent:Intent={version:1,keys:encode(keys),activation};await save(secure,intent);store.put('state','enrollment-intent',intent);
 }
 /** No network input is used to repair a partial activation. */

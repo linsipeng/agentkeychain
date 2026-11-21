@@ -3,6 +3,9 @@ import type {DeviceContext} from './auth.ts';
 import {ApiError,digest,verify} from '../shared/contracts.ts';
 import {canonicalGrant,canonicalPackage,type EnrollmentGrant,type KeyPackage} from '../shared/device-protocol.ts';
 import {canonicalContinuationIntent,canonicalContinuationReceipt} from '../shared/enrollment-continuation.ts';
+import {genesisRoot,type CheckpointKey,type CheckpointSigner} from '../shared/checkpoints.ts';
+import {verifyWitness} from '../shared/roster-witness.ts';
+import {CONTINUATION_HEAD_DOMAIN} from '../shared/continuation-fresh-head.ts';
 
 interface Expectation {
  readonly continuationId:string;
@@ -41,13 +44,7 @@ export function canonicalGenesisCommitExpectation(input:unknown):string{
  return JSON.stringify({continuationId,requestId,intentDigest,approvalDigest,payloadDigest});
 }
 
-/** A read-only view owned by the Main transaction that wrote both immutable
- * records. The device context must come from authenticate() over the exact
- * expected request bytes; this is not HTTP, not a signed receipt, and not an
- * independent current Custody witness. Never relay ciphertext from it. */
-export async function readGenesisPackageCommit(db:D1Database,scope:DeviceContext,input:Expectation){
- try{
-  if(await digest(canonicalGenesisCommitExpectation(input))!==scope.bodyDigest)throw notFound();
+async function lookupGenesisPackageCommit(db:D1Database,scope:DeviceContext,input:Expectation){
   const row=await db.prepare(`SELECT c.old_grant,c.signed_intent,c.signed_approval,c.witness,c.roster_digest,c.key_epoch,
     p.canonical AS package_canonical,p.signature AS package_signature FROM genesis_package_continuations c
    JOIN enrollment_grants g ON g.id=c.request_id AND g.canonical=c.old_grant AND g.tenant_id=c.tenant_id
@@ -92,8 +89,86 @@ export async function readGenesisPackageCommit(db:D1Database,scope:DeviceContext
      g.accountId!==scope.accountId||g.tenantId!==scope.tenantId||g.vaultId!==scope.vaultId||g.deviceId!==scope.deviceId||g.signingKey!==scope.publicKey||
      p.vaultId!==scope.vaultId||p.issuerDeviceId!==scope.deviceId||p.targetDeviceId!==scope.deviceId||p.grantId!==input.requestId||p.keyEpoch!==row.key_epoch||
      !await verify(scope.publicKey,target.signature,target.canonical)||!await verify(scope.publicKey,row.package_signature,row.package_canonical))throw notFound();
-  return {version:1,stage:'put-key-package',committed:true,source:'main-transaction',
+  return {commit:{version:1,stage:'put-key-package',committed:true,source:'main-transaction',
    continuationId:input.continuationId,requestId:input.requestId,keyEpoch:row.key_epoch,
-   intentDigest,approvalDigest,payloadDigest,witnessDigest:await digest(JSON.stringify([witness.canonical,witness.signature]))} as const;
+   intentDigest,approvalDigest,payloadDigest,witnessDigest:await signedDigest(witness)} as const,
+   signedApproval:approval, approval:accepted as {approvedAt:number;expiresAt:number;authorityKeyId:string},
+   rosterDigest:row.roster_digest,grant:g};
+}
+
+/** A read-only view owned by the Main transaction that wrote both immutable
+ * records. This is a local projection, not a signed attestation. */
+export async function readGenesisPackageCommit(db:D1Database,scope:DeviceContext,input:Expectation){
+ try{
+  if(await digest(canonicalGenesisCommitExpectation(input))!==scope.bodyDigest)throw notFound();
+  return (await lookupGenesisPackageCommit(db,scope,input)).commit;
+ }catch{throw notFound();}
+}
+
+const signedDigest=(value:SignedManagedOperation)=>digest(JSON.stringify([value.canonical,value.signature]));
+const nowSeconds=()=>Math.floor(Date.now()/1000);
+export const MAIN_CONTINUATION_COMMIT_DOMAIN='AgentKeychain-enrollment-continuation-main-commit-v1';
+interface ProofExpectation {readonly commit:Expectation;readonly nonce:string;readonly custodyFreshHeadDigest:string}
+interface ProofPins {
+ readonly mainCommitAuthority:CheckpointKey;
+ readonly approvalAuthority:CheckpointKey;
+ readonly witnesses:readonly CheckpointKey[];
+ /** Release role pins supplied by policy; no caller overrides. */
+ readonly otherReleaseKeys:readonly CheckpointKey[];
+}
+
+export function canonicalGenesisCommitProofExpectation(input:unknown):string{
+ exactFields(input,['commit','nonce','custodyFreshHeadDigest']);
+ const {nonce,custodyFreshHeadDigest}=input;
+ if(typeof nonce!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(nonce)||
+    typeof custodyFreshHeadDigest!=='string'||!/^[a-f0-9]{64}$/.test(custodyFreshHeadDigest))throw notFound();
+ return JSON.stringify({commit:JSON.parse(canonicalGenesisCommitExpectation(input.commit)),nonce,custodyFreshHeadDigest});
+}
+
+/** Internal readback over already committed storage, not a generic signer or
+ * public-facing route. Pins and signer must be sourced by Main's local trusted
+ * configuration, while the Custody assertion is generated and signed there.
+ * The returned Main claim does not represent independent durability. */
+export async function proveGenesisPackageCommit(
+ db:D1Database,scope:DeviceContext,input:ProofExpectation,
+ custody:{readonly witness:SignedManagedOperation;readonly freshHead:SignedManagedOperation},
+ pins:ProofPins, localCommitKey:CheckpointSigner,
+):Promise<SignedManagedOperation>{
+ try{
+  const {commit:request,nonce,custodyFreshHeadDigest}=input;
+  if(await digest(canonicalGenesisCommitProofExpectation(input))!==scope.bodyDigest)throw notFound();
+  const record=await lookupGenesisPackageCommit(db,scope,request),actual=record.commit;
+  const witness=envelope(JSON.stringify(custody.witness),8192),fresh=envelope(JSON.stringify(custody.freshHead),4096);
+  if(fresh.canonical.length>2048||await signedDigest(fresh)!==custodyFreshHeadDigest||await signedDigest(witness)!==actual.witnessDigest)throw notFound();
+  const w=await verifyWitness(witness,pins.witnesses,{accountId:scope.accountId,tenantId:scope.tenantId,vaultId:scope.vaultId,revision:1,digest:record.rosterDigest});
+  const witnessPin=pins.witnesses.find(k=>k.keyId===w.keyId);
+  if(!witnessPin||w.event!==1||w.sequence!==0||w.root!==await genesisRoot(scope.tenantId,scope.vaultId))throw notFound();
+
+  const a=record.approval,key=await localCommitKey.key(),approvedAt=a.approvedAt,issuedAt=nowSeconds();
+  const reserved=[...pins.witnesses,...pins.otherReleaseKeys,pins.approvalAuthority];
+  if(key.keyId!==pins.mainCommitAuthority.keyId||key.publicKey!==pins.mainCommitAuthority.publicKey||
+     key.publicKey===record.grant.signingKey||key.publicKey===record.grant.wrappingKey||
+     reserved.some(p=>p.publicKey===key.publicKey||p.keyId===key.keyId)||
+     witnessPin.publicKey===pins.approvalAuthority.publicKey||witnessPin.publicKey===record.grant.signingKey||witnessPin.publicKey===record.grant.wrappingKey||
+     a.authorityKeyId!==pins.approvalAuthority.keyId||a.approvedAt<record.grant.expiresAt||a.expiresAt<=issuedAt||
+     !await verify(pins.approvalAuthority.publicKey,record.signedApproval.signature,record.signedApproval.canonical))throw notFound();
+  identifier(key.keyId);base64(key.publicKey,32,32);
+  const f:unknown=JSON.parse(fresh.canonical);
+  exactFields(f,['domain','keyId','nonce','requestId','witnessDigest','approvalDigest','payloadDigest','issuedAt','expiresAt']);
+  if(typeof f.issuedAt!=='number'||typeof f.expiresAt!=='number'||!Number.isSafeInteger(f.issuedAt)||!Number.isSafeInteger(f.expiresAt)||
+     f.issuedAt<approvedAt||f.issuedAt>issuedAt||f.expiresAt<=issuedAt||f.expiresAt>a.expiresAt||f.expiresAt-f.issuedAt>60||
+     fresh.canonical!==JSON.stringify({domain:CONTINUATION_HEAD_DOMAIN,keyId:w.keyId,nonce,requestId:actual.requestId,witnessDigest:actual.witnessDigest,
+      approvalDigest:actual.approvalDigest,payloadDigest:actual.payloadDigest,issuedAt:f.issuedAt,expiresAt:f.expiresAt})||
+     !await verify(witnessPin.publicKey,fresh.signature,fresh.canonical))throw notFound();
+  const expiresAt=Math.min(issuedAt+60,f.expiresAt,a.expiresAt);
+  const canonical=JSON.stringify({version:1,domain:MAIN_CONTINUATION_COMMIT_DOMAIN,keyId:key.keyId,nonce,continuationId:actual.continuationId,
+   requestId:actual.requestId,accountId:scope.accountId,tenantId:scope.tenantId,vaultId:scope.vaultId,deviceId:scope.deviceId,keyEpoch:actual.keyEpoch,
+   stage:actual.stage,intentDigest:actual.intentDigest,approvalDigest:actual.approvalDigest,payloadDigest:actual.payloadDigest,witnessDigest:actual.witnessDigest,
+   custodyFreshHeadDigest,issuedAt,expiresAt});
+  const signature=await localCommitKey.sign(canonical);
+  if(!await verify(key.publicKey,signature,canonical))throw notFound();
+  const after=await lookupGenesisPackageCommit(db,scope,request);
+  if(JSON.stringify(after.commit)!==JSON.stringify(actual)||nowSeconds()>=expiresAt)throw notFound();
+  return {canonical,signature};
  }catch{throw notFound();}
 }

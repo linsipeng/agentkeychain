@@ -537,13 +537,15 @@ test.each(['expiry','revoke'])('concurrent readiness %s and last-device removal 
 });
 
 import {consumeGenesisPackageContinuation} from '../api-worker/genesis-package-continuation.ts';
-import {canonicalGenesisCommitExpectation,readGenesisPackageCommit} from '../api-worker/genesis-package-continuation-readback.ts';
+import {canonicalGenesisCommitExpectation,readGenesisPackageCommit,canonicalGenesisCommitProofExpectation,MAIN_CONTINUATION_COMMIT_DOMAIN,proveGenesisPackageCommit} from '../api-worker/genesis-package-continuation-readback.ts';
 import {canonicalContinuationIntent,canonicalContinuationReceipt} from '../shared/enrollment-continuation.ts';
-import {WITNESS_DOMAIN} from '../shared/roster-witness.ts';
+import {rosterWitness} from '../shared/roster-witness.ts';
+import {checkpoint,genesisRoot} from '../shared/checkpoints.ts';
+import {proveFreshContinuationHead} from '../shared/continuation-fresh-head.ts';
 async function expiredGenesisPackageFixture(){
  const schema=(env as unknown as {GENESIS_PACKAGE_SCHEMA:Parameters<typeof applyD1Migrations>[1]}).GENESIS_PACKAGE_SCHEMA;
  await applyD1Migrations(db(),schema);
- const s=await account(), device=await identity(), authority=await identity(), custody=await identity();
+ const s=await account(), device=await identity(), authority=await identity(), custody=await identity(), checkpointIdentity=await identity();
  const now=Math.floor(Date.now()/1000),requestId='original-request',deviceId='original-device',expiresAt=now-10;
  const grant={version:1,requestId,deviceId,accountId:s.account_id,tenantId:s.tenant_id,vaultId:'v',keyEpoch:1,issuerDeviceId:null,
   signingKey:device.signingKey,wrappingKey:device.wrappingKey,expiresAt};
@@ -558,12 +560,16 @@ async function expiredGenesisPackageFixture(){
  ]);
  const roster:TrustedDeviceRoster={version:1,revision:1,previousDigest:null,keyEpoch:1,accountId:s.account_id,tenantId:s.tenant_id,vaultId:'v',
   active:[{deviceId,signingKey:device.signingKey,wrappingKey:device.wrappingKey}],revoked:[],issuer:{kind:'device',id:deviceId},issuedAt:now,expiresAt:now+86400,
-  checkpointKeys:[{keyId:'custody',publicKey:custody.signingKey}],recoveryAuthorities:[],recovery:null};
+  checkpointKeys:[{keyId:'checkpoint',publicKey:checkpointIdentity.signingKey}],recoveryAuthorities:[],recovery:null};
  const canonical=canonicalRoster(roster),signature=await device.sign(ROSTER_DOMAIN+canonical),head=await rosterDigest({canonical,signature});
  await db().prepare('INSERT INTO signed_rosters VALUES(?,?,?,?,?,?,?,?,?)').bind(s.tenant_id,'v',s.account_id,1,head,null,deviceId,canonical,signature).run();
- const witnessBytes=JSON.stringify({version:1,keyId:'custody',accountId:s.account_id,tenantId:s.tenant_id,vaultId:'v',event:1,revision:1,digest:head,
-  sequence:0,root:await digest('synthetic root'),checkpointDigest:await digest('synthetic checkpoint')});
- const witness={canonical:witnessBytes,signature:await custody.sign(WITNESS_DOMAIN+witnessBytes)};
+ const custodyDb=env.CUSTODIAN_TEST;
+ await applyD1Migrations(custodyDb,env.CUSTODIAN_MIGRATIONS);
+ const custodyPin={keyId:'custody',publicKey:custody.signingKey},approvalAuthority={keyId:'auth',publicKey:authority.signingKey};
+ const wSign={key:async()=>custodyPin,sign:custody.sign};
+ const ledger=rosterWitness(custodyDb,wSign,roster.checkpointKeys,async()=>true,[]);
+ const cp=await checkpoint({key:async()=>roster.checkpointKeys[0]!,sign:checkpointIdentity.sign},s.tenant_id,'v',0,await genesisRoot(s.tenant_id,'v'),null,null);
+ const witness=await ledger.accept({rosters:[{canonical,signature}],checkpoints:[cp]});
  await db().prepare("UPDATE roster_witness_sagas SET state='acknowledged',receipt=? WHERE tenant_id=? AND vault_id='v' AND revision=1").bind(JSON.stringify(witness),s.tenant_id).run();
  const create=async(id='a'.repeat(43),cipher='x')=>{
   const bytes=canonicalPackage({version:1,vaultId:'v',targetDeviceId:deviceId,keyEpoch:1,wrappedVDK:btoa(cipher.repeat(80)),issuerDeviceId:deviceId,grantId:requestId});
@@ -585,7 +591,10 @@ async function expiredGenesisPackageFixture(){
   const proof=await device.sign(requestProof('POST',url,await digest(body),timestamp,nonce,sessionDigest));
   return authenticate(db(),new Request(url,{method:'POST',headers:{authorization:'Bearer '+token,'x-device-nonce':nonce,'x-device-proof':proof,'x-device-timestamp':String(timestamp)}}),'v',body);
  };
- return {create,grant,context,pins:{authority:{keyId:'auth',publicKey:authority.signingKey},witnesses:[{keyId:'custody',publicKey:custody.signingKey}]}};
+ const fresh=(input:Awaited<ReturnType<typeof create>>,nonce:string)=>proveFreshContinuationHead(custodyDb,{nonce,grant:input.oldGrantCanonical,
+  target:input.target,approval:input.approval,roster:input.roster,keyPackage:input.keyPackage},
+  {authority:approvalAuthority,witnessKeys:[custodyPin],checkpointKeys:roster.checkpointKeys,recoveryAuthorities:[]},wSign);
+ return {create,grant,context,fresh,checkpointPins:roster.checkpointKeys,pins:{authority:approvalAuthority,witnesses:[custodyPin]}};
 }
 test('unwired genesis continuation commits one exact immutable package despite concurrency and retries',async()=>{
  const f=await expiredGenesisPackageFixture(), input=await f.create();
@@ -648,4 +657,39 @@ test('commit readback rechecks membership and session state in its own query',as
  await db().prepare('UPDATE memberships SET active=1').run();
  await db().prepare('UPDATE device_sessions SET expires_at=unixepoch()-1').run();
  await expect(readGenesisPackageCommit(db(),ctx,expected)).rejects.toThrow('not_found');
+});
+
+async function continuationProofFixture(){
+ const f=await continuationReadbackFixture(),nonce='A'.repeat(43);
+ const owner=await identity(),mainCommitAuthority={keyId:'main-commit',publicKey:owner.signingKey};
+ const custody=await f.f.fresh(f.input,nonce);
+ const expectation={commit:f.expected,nonce,custodyFreshHeadDigest:await digest(JSON.stringify([custody.freshHead.canonical,custody.freshHead.signature]))};
+ const context=async (value=expectation)=>f.f.context(canonicalGenesisCommitProofExpectation(value));
+ const signer={key:async()=>mainCommitAuthority,sign:owner.sign};
+ const pins={mainCommitAuthority,approvalAuthority:f.f.pins.authority,witnesses:f.f.pins.witnesses,otherReleaseKeys:f.f.checkpointPins};
+ return {...f,nonce,custody,expectation,context,signer,pins};
+}
+test('transaction proof requires the durable package and exact independently current Custody assertion',async()=>{
+ const {f,custody,expectation,context,commit,signer,pins}=await continuationProofFixture(),scope=await context();
+ const proof=()=>proveGenesisPackageCommit(db(),scope,expectation,custody,pins,signer);
+ await expect(proof()).rejects.toThrow('not_found');
+ await commit();
+ const evidence=await proof(),{issuedAt,expiresAt}=JSON.parse(evidence.canonical),g=f.grant;
+ expect(evidence.canonical).toBe(JSON.stringify({version:1,domain:MAIN_CONTINUATION_COMMIT_DOMAIN,keyId:pins.mainCommitAuthority.keyId,
+  nonce:expectation.nonce,continuationId:expectation.commit.continuationId,requestId:g.requestId,accountId:g.accountId,tenantId:g.tenantId,vaultId:g.vaultId,deviceId:g.deviceId,
+  keyEpoch:1,stage:'put-key-package',intentDigest:expectation.commit.intentDigest,approvalDigest:expectation.commit.approvalDigest,
+  payloadDigest:expectation.commit.payloadDigest,witnessDigest:await digest(JSON.stringify([custody.witness.canonical,custody.witness.signature])),
+  custodyFreshHeadDigest:expectation.custodyFreshHeadDigest,issuedAt,expiresAt}));
+ expect(expiresAt).toBeLessThanOrEqual(JSON.parse(custody.freshHead.canonical).expiresAt);
+ expect(await verify(pins.mainCommitAuthority.publicKey,evidence.signature,evidence.canonical)).toBe(true);
+});
+test('transaction proof fails closed for mismatched nonce, role pin and revoked state during signing',async()=>{
+ const {custody,expectation,context,commit,signer,pins}=await continuationProofFixture();
+ await commit();
+ const changed={...expectation,nonce:'B'.repeat(43)};
+ await expect(proveGenesisPackageCommit(db(),await context(changed),changed,custody,pins,signer)).rejects.toThrow('not_found');
+ const ctx=await context();
+ await expect(proveGenesisPackageCommit(db(),ctx,expectation,custody,{...pins,otherReleaseKeys:[pins.mainCommitAuthority]},signer)).rejects.toThrow('not_found');
+ const sign=async(canonical:string)=>{await db().prepare('UPDATE memberships SET active=0').run();return signer.sign(canonical);};
+ await expect(proveGenesisPackageCommit(db(),ctx,expectation,custody,pins,{...signer,sign})).rejects.toThrow('not_found');
 });

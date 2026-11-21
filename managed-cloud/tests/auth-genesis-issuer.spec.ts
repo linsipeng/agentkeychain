@@ -78,6 +78,7 @@ test('Auth-owned credentials approve one exact first-device decision, not a Main
  expect(await db.prepare('SELECT count(*) FROM auth_genesis_decisions').first('count(*)')).toBe(1);
 });
 
+import {continuationReadback,continuationReadbackIntent} from '../auth-trust-worker/experimental/continuation-readback.ts';
 import {continuationIssuer} from '../auth-trust-worker/experimental/continuation-issuer.ts';
 import {enrollmentFixture,signingFixture} from './synthetic-genesis-approval.ts';
 import {canonicalPackage} from '../shared/device-protocol.ts';
@@ -129,6 +130,24 @@ test('Auth requires a newly verified ceremony for the exact continuation stage a
  await db.prepare('UPDATE auth_genesis_pins SET active=0').run();
  await expect(issuer.complete(challenge.id,exact.input,assertion)).rejects.toThrow('continuation_approval_unavailable');
  await db.prepare('UPDATE auth_genesis_pins SET active=1').run();
+ // The Auth UI can establish this exact scope before the final POST, so a
+ // committed response loss never depends on a second signer call or grant mint.
+ const cookie=random(),anti=random(),session=await digest(cookie),origin=identity.origin;
+ const read=continuationReadback(db,origin,policy.authority);
+ const base={decisionId:challenge.id,oldGrantCanonical,target:exact.input.target};
+ const ask=(change:Record<string,unknown>={},requestHeaders:Record<string,string>={})=>read(new Request(origin+'/v1/auth/continuation-receipt',{
+  method:'POST',headers:{origin,'content-type':'application/json','x-csrf-token':anti,
+   cookie:'__Host-akc_genesis_session='+cookie+'; __Host-akc_genesis_csrf='+anti,...requestHeaders},
+  body:JSON.stringify({...base,...change}),
+ }));
+ expect((await ask()).status).toBe(401);
+ await db.prepare('INSERT INTO auth_genesis_view_sessions VALUES(?,?,?,?,?,1,0,?)').bind(session,await digest(anti),g.accountId,g.tenantId,g.vaultId,now+80).run();
+ expect((await ask()).status).toBe(401);
+ const action=await continuationReadbackIntent(challenge.id,grantDigest,await digest(exact.input.target.canonical));
+ await db.prepare('INSERT INTO auth_genesis_view_grants VALUES(?,?,?,?)').bind(session,action,now,now+60).run();
+ expect((await ask()).status).toBe(401); // The old purpose cannot be used.
+ await db.prepare('INSERT INTO auth_continuation_view_grants VALUES(?,?,?,?,?)').bind(session,action,cred.id,now,now+60).run();
+ expect((await ask()).status).toBe(401); // Exact grant exists, but Auth has not committed approval.
  const outcomes=await Promise.allSettled([issuer.complete(challenge.id,exact.input,assertion),issuer.complete(challenge.id,exact.input,assertion)]);
  const success=outcomes.filter(r=>r.status==='fulfilled');
  expect(success).toHaveLength(1);
@@ -137,4 +156,20 @@ test('Auth requires a newly verified ceremony for the exact continuation stage a
  await expect(issuer.complete(challenge.id,exact.input,assertion)).rejects.toThrow('continuation_approval_unavailable');
  expect(await db.prepare('SELECT count(*) n FROM auth_continuation_decisions').first('n')).toBe(1);
  expect(await db.prepare('SELECT counter FROM auth_genesis_pins').first('counter')).toBe(1);
+ const receipts=await Promise.all([ask(),ask()]);
+ for(const r of receipts){
+  expect(r.status).toBe(200);expect(r.headers.get('cache-control')).toBe('no-store');expect(await r.json()).toEqual(success[0]!.value);
+ }
+ expect((await ask({decisionId:random()})).status).toBe(401);
+ expect((await ask({target:(await make()).input.target})).status).toBe(401);
+ expect((await ask({target:{...exact.input.target,signature:signed.proof.signature}})).status).toBe(401);
+ expect((await ask({}, {origin:'https://foreign.invalid'})).status).toBe(401);
+ expect((await ask({}, {'x-csrf-token':random()})).status).toBe(401);
+ await db.prepare('UPDATE auth_genesis_view_sessions SET revoked=1').run();
+ expect((await ask()).status).toBe(401);
+ await db.prepare('UPDATE auth_genesis_view_sessions SET revoked=0').run();
+ await db.prepare('UPDATE auth_continuation_view_grants SET issued=?,expires=?').bind(now-60,now-1).run();
+ expect((await ask()).status).toBe(401);
+ expect(await db.prepare('SELECT count(*) n FROM auth_continuation_decisions').first('n')).toBe(1);
+
 });
