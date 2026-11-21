@@ -10,6 +10,9 @@ on:
       - '.github/workflows/darwin-disposable-keychain.yml'
       - 'tests/native/pilot_darwin_keychain.swift'
       - 'tests/native/pilot_darwin_keychain_config_digest.sh'
+      - 'native/continuation-pilot-keychain-check.swift'
+      - 'scripts/build-continuation-pilot-darwin-check.ts'
+      - 'src/cloud/continuation-pilot-darwin-check.ts'
 
 permissions:
   contents: read
@@ -58,6 +61,25 @@ jobs:
           test -x "$DEVELOPER_DIR/usr/bin/xcodebuild"
           /usr/bin/xcrun swiftc tests/native/pilot_darwin_keychain.swift \
             -o "$RUNNER_TEMP/akc-darwin-keychain-fixture"
+
+      - name: Type-check separate read-only companion without executing it
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer
+          test -x "$DEVELOPER_DIR/usr/bin/xcodebuild"
+          dir=$(/usr/bin/mktemp -d "$RUNNER_TEMP/akc-read-only-swift.XXXXXXXX")
+          /bin/cp native/continuation-pilot-keychain-check.swift "$dir/main.swift"
+          cat > "$dir/PilotNativeTrust.swift" <<'SWIFT'
+          enum PilotNativeTrust {
+              static let rolloutPublicKey = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+              static let installationDigest = String(repeating: "0", count: 64)
+              static let expiresAt: Int64 = 0
+          }
+          SWIFT
+          /usr/bin/xcrun swiftc -typecheck "$dir/PilotNativeTrust.swift" "$dir/main.swift"
 
       - name: Exercise two new disposable Keychains
         timeout-minutes: 2

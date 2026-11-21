@@ -16,7 +16,7 @@ async function authority(){
   signature:Buffer.from(await crypto.subtle.sign('Ed25519',key.privateKey,new TextEncoder().encode(canonical))).toString('base64')})};
 }
 
-async function makeArtifact(){
+async function makeArtifact(target=`${process.platform}-${process.arch}`){
  const [root,checkpoint,witness,auth,main,rollout,genesis]=await Promise.all(Array.from({length:7},authority));
  const manifest=await root!.sign(canonicalManifest({version:1,releaseId:'continuation-pilot-local-fixture',
   apiOrigin:'https://api.web-pilot-local.example.com',webOrigin:'https://web-pilot-local.example.com',protocolMin:2,protocolMax:2,
@@ -29,7 +29,7 @@ async function makeArtifact(){
   sign('AgentKeychain-continuation-rollout-release-pin-v1',rollout!.pin),
  ]);
  const signedDigest=(s:{canonical:string;signature:string})=>digest(JSON.stringify([s.canonical,s.signature]));
- const issuedAt=Math.floor(Date.now()/1000),expiresAt=issuedAt+60,target=`${process.platform}-${process.arch}`;
+ const issuedAt=Math.floor(Date.now()/1000),expiresAt=issuedAt+60;
  const installation=await root!.sign(JSON.stringify({version:1,domain:'AgentKeychain-continuation-installed-pilot-build-v1',
   mode:'disposable-only',contract:INSTALLED_PILOT_CONTRACT,target,manifestDigest:await signedDigest(manifest),authOriginDigest:await signedDigest(authOriginAppendix),
   authPinDigest:await signedDigest(authAppendix),mainPinDigest:await signedDigest(commitAppendix),rolloutPinDigest:await signedDigest(rolloutAppendix),genesisPin:genesis!.pin,issuedAt,expiresAt}));
@@ -268,4 +268,33 @@ test('isolated pilot location requires the signed directory identity and refuses
   mkdirSync(path,{mode:0o700});
   await expect(check()).rejects.toThrow(reject);
  }finally{await rm(base,{force:true,recursive:true});}
+});
+
+test('Darwin scoped native candidate accepts only a same-install signed helper hash and exact immutable fixture grant',async()=>{
+ const {DARWIN_NATIVE_LOCATION_DOMAIN,DARWIN_NATIVE_HELPER_DOMAIN,verifyDarwinPilotNativeInputs,darwinPilotNativeTrustSwift}=await import('../src/cloud/continuation-pilot-darwin-check.ts');
+ const {artifact,root,rollout,target,expiresAt}=await makeArtifact('darwin-arm64');
+ const gate=await verifyInstalledContinuationPilot(artifact,root.publicKey,target);
+ const sorted=(v:Record<string,unknown>)=>JSON.stringify(Object.fromEntries(Object.entries(v).sort(([a],[b])=>a<b?-1:a>b?1:0)));
+ const installationDigest=await digest(JSON.stringify([artifact.installation.canonical,artifact.installation.signature]));
+ const common={version:1,installationDigest,keyId:rollout.pin.keyId,issuedAt:expiresAt-60,expiresAt},directory='/private/tmp/akc-pilot-native-'+'f'.repeat(32);
+ const uid=1001,directoryDevice='1',directoryInode='2',fileDevice='1',fileInode='3',sha='a'.repeat(64);
+ const namespace='agentkeychain.pilot.'+await digest(JSON.stringify([DARWIN_NATIVE_LOCATION_DOMAIN,installationDigest,directory,String(uid),directoryDevice,directoryInode]));
+ const locationBody={...common,domain:DARWIN_NATIVE_LOCATION_DOMAIN,directory,directoryDevice,directoryInode,fileDevice,fileInode,uid,namespace};
+ const helperBody={...common,domain:DARWIN_NATIVE_HELPER_DOMAIN,target,helperSha256:sha};
+ const location=await rollout.sign(sorted(locationBody)),helperAppendix=await rollout.sign(sorted(helperBody));
+ const input={location,helperAppendix,examinedHelperSha256:sha,target,uid};
+ const checked=await verifyDarwinPilotNativeInputs(gate,input);
+ expect(JSON.parse(checked.nativeInput)).toEqual(location);
+ expect(checked.expectedStatus).toBe('scoped-native-location-verified-not-active');
+ expect(darwinPilotNativeTrustSwift(gate)).toContain(JSON.stringify(rollout.pin.publicKey));
+ for(const change of [{target:'darwin-x64'},{target:'linux-x64'},{examinedHelperSha256:'b'.repeat(64)},{uid:0},{uid:1002},
+  {now:expiresAt},{helperAppendix:await root.sign(helperAppendix.canonical)},{location:await root.sign(location.canonical)}]){
+  await expect(verifyDarwinPilotNativeInputs(gate,{...input,...change})).rejects.toThrow('darwin_pilot_native_candidate_denied');
+ }
+ for(const change of [{directory:directory.replace('/private','')},{fileInode:'0'},{fileDevice:'9'},
+  {namespace:'agentkeychain.vault'},{installationDigest:'b'.repeat(64)},{file:'login.keychain-db'}]){
+  const wrong=await rollout.sign(sorted({...locationBody,...change}));
+  await expect(verifyDarwinPilotNativeInputs(gate,{...input,location:wrong})).rejects.toThrow('darwin_pilot_native_candidate_denied');
+ }
+ await expect(verifyDarwinPilotNativeInputs({...gate},input)).rejects.toThrow('darwin_pilot_native_candidate_denied');
 });
