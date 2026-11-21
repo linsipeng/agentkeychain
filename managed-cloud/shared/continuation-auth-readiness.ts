@@ -8,6 +8,13 @@ import {verifyWitness} from './roster-witness.ts';
 
 export const CONTINUATION_AUTH_READY_DOMAIN='AgentKeychain-enrollment-continuation-auth-ready-v1';
 export const CONTINUATION_AUTH_READY_SECONDS=30;
+export interface ContinuationAuthReadinessRequest {
+ readonly nonce:string;
+ readonly oldGrantCanonical:string;
+ readonly target:SignedManagedOperation;
+ readonly roster:SignedManagedOperation;
+ readonly keyPackage:SignedManagedOperation;
+}
 const fields=['version','domain','keyId','nonce','grantDigest','intentDigest','witnessDigest','payloadDigest','rosterDigest',
  'requestId','accountId','tenantId','vaultId','deviceId','keyEpoch','issuedAt','expiresAt'];
 const invalid=()=>new Error('invalid_continuation_auth_readiness');

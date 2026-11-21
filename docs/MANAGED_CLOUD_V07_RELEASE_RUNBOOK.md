@@ -38,9 +38,11 @@ staging, local database commit, and secure cleanup: the persisted intent must
 resume one profile, one roster anchor and the same device and vault data key.
 Do not unlock sync from that intent without a valid live head and revocation
 check. Unwired fixtures and unsigned projections do not meet this release gate.
-The experimental Auth issuer's provider returns a raw signed witness; before
-enabling it, require nonce-bound current Custody state and revocation checks at
-approval finalization and again during consumption. The experimental Auth
+The experimental Auth issuer requires a separate nonce-bound readiness proof
+from current Custody state before signing an approval, including a recheck
+after passkey verification and a deadline at the Auth D1 commit. Main and
+Custody still need their own independent checks during consumption; the
+synthetic typed service binding is not a production route. The experimental Auth
 readback can return a byte-identical committed approval to a current session
 with an exact ceremony/credential-bound read grant. Its isolated Auth
 transport grants that scope atomically with a successful passkey ceremony;

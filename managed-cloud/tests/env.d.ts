@@ -10,6 +10,7 @@ declare global {
             CUSTODIAN_TEST:D1Database;
             TRANSPORT_MAIN:import('./continuation-transport.fixture.ts').MainContinuationTransport;
             TRANSPORT_CUSTODY:import('./continuation-transport.fixture.ts').CustodyContinuationTransport;
+            TRANSPORT_CUSTODY_READY:import('./continuation-transport.fixture.ts').CustodyContinuationReadinessTransport;
             TRANSPORT_PINS:string;
             TRANSPORT_APPROVAL_FIXTURE_KEY:string;
             TRANSPORT_CHECKPOINT_FIXTURE_KEY:string;

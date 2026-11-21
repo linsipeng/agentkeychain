@@ -84,6 +84,7 @@ import {continuationIssuer} from '../auth-trust-worker/experimental/continuation
 import {enrollmentFixture,signingFixture} from './synthetic-genesis-approval.ts';
 import {canonicalPackage} from '../shared/device-protocol.ts';
 import {canonicalContinuationIntent,verifyContinuationApproval} from '../shared/enrollment-continuation.ts';
+import {canonicalContinuationAuthReadiness,CONTINUATION_AUTH_READY_DOMAIN} from '../shared/continuation-auth-readiness.ts';
 import {genesisRoot} from '../shared/checkpoints.ts';
 import {WITNESS_DOMAIN} from '../shared/roster-witness.ts';
 
@@ -99,8 +100,20 @@ test('Auth requires a newly verified ceremony for the exact continuation stage a
  const cred=await webauthn.registration(identity,await digest(signup),await authentic.register(signup,identity));
  const pin=({keyId,publicKey}:{keyId:string;publicKey:string})=>({keyId,publicKey});
  let latest:{canonical:string;signature:string}|null=null, headReadsBeforeLoss:number|undefined;
+ let readinessFault:'nonce'|'stale'|'signature'|undefined;
+ const seenNonces=new Set<string>();
  const policy={genesis:f.policy,authority:pin(authority),witnesses:[pin(custody)]};
- const issuer=continuationIssuer(db,identity,policy,{key:async()=>authority,sign:authority.sign},async()=>headReadsBeforeLoss!==undefined&&headReadsBeforeLoss--<=0?null:latest);
+ const issuer=continuationIssuer(db,identity,policy,{key:async()=>authority,sign:authority.sign},async request=>{
+  expect(seenNonces.has(request.nonce)).toBe(false);seenNonces.add(request.nonce);
+  if(!latest||headReadsBeforeLoss!==undefined&&headReadsBeforeLoss--<=0)return null;
+  const now=Math.floor(Date.now()/1000),t=JSON.parse(request.target.canonical);
+  const canonical=canonicalContinuationAuthReadiness({version:1,domain:CONTINUATION_AUTH_READY_DOMAIN,keyId:custody.keyId,
+   nonce:readinessFault==='nonce'?'x'.repeat(43):request.nonce,grantDigest:await digest(request.oldGrantCanonical),
+   intentDigest:await digest(request.target.canonical),witnessDigest:await digest(JSON.stringify([latest.canonical,latest.signature])),
+   payloadDigest:t.payloadDigest,rosterDigest:t.rosterDigest,requestId:g.requestId,accountId:g.accountId,tenantId:g.tenantId,vaultId:g.vaultId,
+   deviceId:g.deviceId,keyEpoch:g.keyEpoch,issuedAt:readinessFault==='stale'?now-30:now,expiresAt:readinessFault==='stale'?now-1:now+20});
+  return {witness:latest,readiness:{canonical,signature:await (readinessFault==='signature'?authority:custody).sign(canonical)}};
+ });
  const make=async (change={})=>{
   const cipher=canonicalPackage({version:1,vaultId:g.vaultId,targetDeviceId:g.deviceId,keyEpoch:g.keyEpoch,wrappedVDK:btoa('x'.repeat(80)),issuerDeviceId:g.deviceId,grantId:g.requestId});
   const keyPackage={canonical:cipher,signature:await f.device.sign(cipher)};
@@ -121,6 +134,11 @@ test('Auth requires a newly verified ceremony for the exact continuation stage a
   db.prepare('INSERT INTO auth_genesis_decisions VALUES(?,?,?,?)').bind(signed.data.decisionId,grantDigest,signed.proof.canonical,signed.proof.signature),
  ]);
  await expect(issuer.begin((await make({stage:'publish-roster'})).input)).rejects.toThrow('continuation_approval_unavailable');
+ for(const fault of ['nonce','stale','signature'] as const){
+  readinessFault=fault;
+  await expect(issuer.begin(exact.input)).rejects.toThrow('continuation_approval_unavailable');
+ }
+ readinessFault=undefined;
  const challenge=await issuer.begin(exact.input);
  expect(challenge.options.userVerification).toBe('required');
  const assertion=await authentic.assert(challenge.options.challenge,{...identity,counter:1,userHandle:handle});

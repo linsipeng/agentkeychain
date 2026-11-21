@@ -761,3 +761,20 @@ test('separate closed Worker roles carry same-device proof requests and recover 
  await f.veto();
  await expect(rpcData(mainTransport.postProof(postHeaders,postBody,postRequest,custody.freshHead,main))).rejects.toThrow('fixture_continuation_unavailable');
 });
+
+import {verifyContinuationAuthReadiness} from '../shared/continuation-auth-readiness.ts';
+test('narrow Custody preapproval RPC signs exact current device intent without an Auth receipt',async()=>{
+ const {f,input}=await continuationReadbackFixture(true),nonce='A'.repeat(43),requestedAt=Math.floor(Date.now()/1000);
+ const {TRANSPORT_CUSTODY_READY:readyBinding}=env;
+ expect((await readyBinding.fetch('https://continuation-transport.fixture.invalid/')).status).toBe(404);
+ const {oldGrantCanonical,target,roster,keyPackage}=input,request={nonce,oldGrantCanonical,target,roster,keyPackage};
+ const {witness,readiness}=await rpcData(readyBinding.readiness(request));
+ const payloadDigest=await digest(JSON.stringify(['AgentKeychain-enrollment-continuation-package-v1',keyPackage.canonical,keyPackage.signature]));
+ await verifyContinuationAuthReadiness(readiness,{nonce,oldGrantCanonical,target,roster,witness,payloadDigest,
+  witnessPins:[f.transportPins.witness],requestedAt,now:Math.floor(Date.now()/1000)});
+ const alternate=await f.create('a'.repeat(43),'z');
+ await expect(rpcData(readyBinding.readiness({...request,keyPackage:alternate.keyPackage}))).rejects.toThrow('continuation_head_rejected');
+ await f.veto();
+ await expect(rpcData(readyBinding.readiness({...request,nonce:'B'.repeat(43)}))).rejects.toThrow('continuation_head_rejected');
+ expect(await db().prepare('SELECT count(*) n FROM genesis_package_continuations').first('n')).toBe(0);
+});

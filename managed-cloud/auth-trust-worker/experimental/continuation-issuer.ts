@@ -1,29 +1,32 @@
 import type {AuthenticationResponseJSON} from '@simplewebauthn/server';
 import type {SignedManagedOperation} from '../../../src/cloud/protocol.ts';
-import {genesisRoot,type CheckpointKey,type CheckpointSigner} from '../../shared/checkpoints.ts';
+import type {CheckpointKey,CheckpointSigner} from '../../shared/checkpoints.ts';
 import {digest,verify} from '../../shared/contracts.ts';
 import {canonicalGrant,canonicalPackage,type EnrollmentGrant,type KeyPackage} from '../../shared/device-protocol.ts';
 import {canonicalContinuationIntent,canonicalContinuationReceipt,CONTINUATION_WINDOW_SECONDS,verifyContinuationApproval} from '../../shared/enrollment-continuation.ts';
 import {verifyGenesisApproval,type GenesisApprovalPolicy} from '../../shared/genesis-approval.ts';
 import {rosterDigest,verifyRoster} from '../../shared/roster.ts';
-import {verifyWitness} from '../../shared/roster-witness.ts';
+import {verifyContinuationAuthReadiness} from '../../shared/continuation-auth-readiness.ts';
 import {continuationReadbackIntent} from './continuation-readback.ts';
 import {decode,random,webauthn,type WebAuthnPolicy} from '../../api-worker/webauthn.ts';
 
 export type StageInput={oldGrantCanonical:string;target:SignedManagedOperation;roster:SignedManagedOperation;keyPackage:SignedManagedOperation};
+export type ContinuationAuthReadinessProvider=(request:StageInput&{nonce:string})=>Promise<{
+ witness:SignedManagedOperation;readiness:SignedManagedOperation;
+}|null>;
 type Pin={credential:string;handle:string;cose_key:string;counter:number};
 type StagedBrowser={sessionDigest:string;csrfDigest:string};
 type Prior={id:string;canonical:string;signature:string};
 const unavailable=()=>new Error('continuation_approval_unavailable');
 /** Unwired Auth-only issuer. The caller must be a separate authenticated UI which
- * displays the exact stage. Signer and latest Custodian readback are operator
+ * displays the exact stage. Signer and independent challenge-bound Custody readiness are operator
  * bindings, never request inputs. This exposes neither signing nor registration. */
 export function continuationIssuer(db:D1Database,identity:WebAuthnPolicy,policy:{
  genesis:GenesisApprovalPolicy;authority:CheckpointKey;witnesses:readonly CheckpointKey[];
-},signer:CheckpointSigner,latestWitness:(tenant:string,vault:string)=>Promise<SignedManagedOperation|null>){
+},signer:CheckpointSigner,proveReadiness:ContinuationAuthReadinessProvider){
  const origin=new URL(identity.origin);
  const {authority,genesis,witnesses}=policy;
- if(origin.protocol!=='https:'||origin.origin!==identity.origin||origin.hostname!==identity.rpId||!witnesses.length||
+ if(origin.protocol!=='https:'||origin.origin!==identity.origin||origin.hostname!==identity.rpId||!witnesses.length||typeof proveReadiness!=='function'||
     [genesis.authority,...genesis.checkpointKeys,...genesis.recoveryAuthorities,...witnesses].some(p=>p.keyId===authority.keyId||p.publicKey===authority.publicKey))throw unavailable();
  async function validate(input:StageInput){
   if(input.oldGrantCanonical.length>4096||input.target.canonical.length>4096||input.keyPackage.canonical.length>4096||input.roster.canonical.length>16384)
@@ -42,10 +45,6 @@ export function continuationIssuer(db:D1Database,identity:WebAuthnPolicy,policy:
   if(priorApproval.decisionId!==prior.id)throw unavailable();
   const r=await verifyRoster(input.roster,null,now,true);
   if(r.active.length!==1||r.revoked.length)throw unavailable();
-  const witness=await latestWitness(g.tenantId,g.vaultId);
-  if(!witness)throw unavailable();
-  const w=await verifyWitness(witness,witnesses,{accountId:g.accountId,tenantId:g.tenantId,vaultId:g.vaultId,revision:1,digest:head});
-  if(w.event!==1||w.sequence!==0||w.root!==await genesisRoot(g.tenantId,g.vaultId))throw unavailable();
   const p=JSON.parse(input.keyPackage.canonical) as KeyPackage;
   if(canonicalPackage(p)!==input.keyPackage.canonical||p.vaultId!==g.vaultId||p.targetDeviceId!==g.deviceId||
      p.issuerDeviceId!==g.deviceId||p.grantId!==g.requestId||p.keyEpoch!==g.keyEpoch||
@@ -57,7 +56,19 @@ export function continuationIssuer(db:D1Database,identity:WebAuthnPolicy,policy:
      target.rosterDigest!==head||target.witnessHead?.revision!==1||target.witnessHead.digest!==head||
      (['requestId','accountId','tenantId','vaultId','deviceId','signingKey','wrappingKey','issuerDeviceId','keyEpoch'] as const)
       .some(k=>target[k]!==g[k])||target.expiresAt<=now||target.expiresAt>now+CONTINUATION_WINDOW_SECONDS)throw unavailable();
-  return {scope,prior,now,head,payloadDigest,expires:Math.min(target.expiresAt,now+120),intentDigest:await digest(input.target.canonical)};
+  // The nonce is generated inside Auth, not by the browser or API. Repeat
+  // independently at begin, authentication lookup and after UV finalization.
+  const nonce=random(),requestedAt=Math.floor(Date.now()/1000);
+  const current=await proveReadiness({nonce,oldGrantCanonical:input.oldGrantCanonical,target:input.target,roster:input.roster,keyPackage:input.keyPackage});
+  if(!current)throw unavailable();
+  const checkedAt=Math.floor(Date.now()/1000);
+  await verifyContinuationAuthReadiness(current.readiness,{
+   nonce,oldGrantCanonical:input.oldGrantCanonical,target:input.target,roster:input.roster,witness:current.witness,
+   payloadDigest,witnessPins:witnesses,now:checkedAt,requestedAt,
+  });
+  const {expiresAt:readyUntil}=JSON.parse(current.readiness.canonical) as {expiresAt:number};
+  if(Math.floor(Date.now()/1000)>=readyUntil)throw unavailable();
+  return {scope,prior,now:checkedAt,head,payloadDigest,readyUntil,expires:Math.min(target.expiresAt,checkedAt+120),intentDigest:await digest(input.target.canonical)};
  }
  return {
   async begin(input:StageInput,browser?:StagedBrowser){
@@ -104,10 +115,10 @@ export function continuationIssuer(db:D1Database,identity:WebAuthnPolicy,policy:
       SELECT c.id,c.intent_digest,?,? FROM auth_continuation_challenges c JOIN auth_genesis_pins p USING(account,tenant,vault,credential)
       JOIN auth_genesis_decisions old ON old.id=c.prior_decision_id
       LEFT JOIN auth_continuation_browser_stages b ON b.challenge_id=c.id
-      WHERE c.id=? AND c.intent_digest=? AND old.canonical=? AND old.signature=? AND c.expires>unixepoch() AND ?>unixepoch()
+      WHERE c.id=? AND c.intent_digest=? AND old.canonical=? AND old.signature=? AND c.expires>unixepoch() AND ?>unixepoch() AND ?>unixepoch()
        AND p.active=1 AND p.counter=? AND p.cose_key=? AND p.handle=?
        AND b.session_digest IS ? AND b.csrf_digest IS ? RETURNING id`)
-      .bind(canonical,signature,id,intentDigest,prior.canonical,prior.signature,expiresAt,row.counter,row.cose_key,row.handle,browser?.sessionDigest??null,browser?.csrfDigest??null),
+      .bind(canonical,signature,id,intentDigest,prior.canonical,prior.signature,expiresAt,final.readyUntil,row.counter,row.cose_key,row.handle,browser?.sessionDigest??null,browser?.csrfDigest??null),
      db.prepare(`UPDATE auth_genesis_pins SET counter=? WHERE account=? AND tenant=? AND vault=? AND credential=?
       AND EXISTS(SELECT 1 FROM auth_continuation_decisions WHERE id=? AND canonical=? AND signature=?)`)
       .bind(counter,...scope,row.credential,id,canonical,signature),
