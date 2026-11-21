@@ -108,7 +108,7 @@ try{
  const gate=await verifyInstalledContinuationPilot(${JSON.stringify({...m.artifact,nativeReaderAppendix:nativeClaim})},${JSON.stringify(m.root.publicKey)},'linux-'+process.arch);
  const scope=installedContinuationPilotNativeReaderScope(gate);
  const ticket=beginNativeInspectVerification(gate,${JSON.stringify(profileDigest)});
- const result=Bun.spawnSync([${JSON.stringify(driver)},'read',${JSON.stringify(dir)},scope.nativeImageSha256],{stdin:ticket.request,env:{},timeout:4800});
+ const result=Bun.spawnSync([${JSON.stringify(driver)},'read',${JSON.stringify(dir)},scope.nativeImageSha256],{stdin:Buffer.from(ticket.request,'utf8'),env:{},timeout:4800});
  if(result.exitCode!==0){process.exitCode=result.exitCode===79?79:77;}
  else{
   const observation=await verifyNativeInspectObservation(ticket,new Uint8Array(result.stdout));
