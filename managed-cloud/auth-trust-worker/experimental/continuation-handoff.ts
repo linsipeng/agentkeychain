@@ -1,9 +1,10 @@
-import type {SignedManagedOperation} from '../../../src/cloud/protocol.ts';
 import {exactFields} from '../../../src/cloud/protocol.ts';
 import {boundedBody,digest,verify} from '../../shared/contracts.ts';
 import {canonicalGrant,type EnrollmentGrant} from '../../shared/device-protocol.ts';
 import {canonicalContinuationIntent} from '../../shared/enrollment-continuation.ts';
 import {random} from '../../api-worker/webauthn.ts';
+import {canonicalHandoffStage,handoffCodeDigest,handoffPrepareProof,handoffStageDigest} from '../../shared/continuation-handoff-wire.ts';
+export {handoffCodeDigest,handoffPrepareProof,handoffStageDigest} from '../../shared/continuation-handoff-wire.ts';
 import type {StageInput} from './continuation-issuer.ts';
 
 const prefix='/v1/auth/continuation-handoff/';
@@ -17,20 +18,6 @@ function cookie(headers:Headers,name:string){
  if(tokens.length!==1||!opaque(value))throw new Error('not_available');
  return value;
 }
-export const handoffCodeDigest=(locator:string,code:string)=>digest(JSON.stringify(['AgentKeychain-continuation-handoff-code-v1',locator,code]));
-export const handoffPrepareProof=(locator:string,codeDigest:string,stageDigest:string,expiresAt:number)=>
- JSON.stringify(['AgentKeychain-continuation-handoff-prepare-v1',locator,codeDigest,stageDigest,expiresAt]);
-function signed(value:unknown,cap:number):SignedManagedOperation{
- exactFields(value,['canonical','signature']);
- if(typeof value.canonical!=='string'||value.canonical.length>cap||typeof value.signature!=='string'||value.signature.length>100)throw new Error('not_available');
- return {canonical:value.canonical,signature:value.signature};
-}
-function stage(value:unknown):StageInput{
- exactFields(value,['oldGrantCanonical','target','roster','keyPackage']);
- if(typeof value.oldGrantCanonical!=='string'||value.oldGrantCanonical.length>4096)throw new Error('not_available');
- return {oldGrantCanonical:value.oldGrantCanonical,target:signed(value.target,4096),roster:signed(value.roster,16384),keyPackage:signed(value.keyPackage,4096)};
-}
-export const handoffStageDigest=(value:unknown)=>digest(JSON.stringify(stage(value)));
 /** Isolated Auth handler only. The operator supplies Auth-owned scope/readiness
  * validation and a purpose-specific HMAC key. The public routing ID grants no
  * access. Browser pairing claims only an exact staged artifact, not Auth login. */
@@ -54,7 +41,7 @@ export function continuationHandoff(db:D1Database,authOrigin:string,macKey:Crypt
     const now=Math.floor(Date.now()/1000);
     if(!opaque(locator)||!hash(codeDigest)||typeof expiresAt!=='number'||!Number.isSafeInteger(expiresAt)||expiresAt<=now||expiresAt>now+120||
        typeof signature!=='string'||signature.length>100)return unavailable();
-    const view=stage(input.stage),g=JSON.parse(view.oldGrantCanonical) as EnrollmentGrant,t=JSON.parse(view.target.canonical);
+    const view=canonicalHandoffStage(input.stage),g=JSON.parse(view.oldGrantCanonical) as EnrollmentGrant,t=JSON.parse(view.target.canonical);
     const grantDigest=await digest(view.oldGrantCanonical),intent=await digest(view.target.canonical),exact=await handoffStageDigest(view);
     if(canonicalGrant(g)!==view.oldGrantCanonical||canonicalContinuationIntent(t)!==view.target.canonical||g.issuerDeviceId!==null||g.expiresAt>now||
        t.stage!=='put-key-package'||t.originalGrantDigest!==grantDigest||expiresAt>t.expiresAt||

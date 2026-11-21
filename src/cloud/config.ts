@@ -1,3 +1,4 @@
+import {URL} from 'node:url';
 import {validateReleaseOrigins} from '../../managed-cloud/shared/release-origins.mjs';
 import sodium from 'libsodium-wrappers-sumo';
 import { base64, exactFields, identifier, type SignedManagedOperation } from './protocol.ts';
@@ -84,6 +85,25 @@ export const verifyContinuationAuthority=(policy:ManagedEndpointPolicy,appendix:
   verifyContinuationPin(policy,appendix,'AgentKeychain-continuation-release-pin-v1');
 export const verifyContinuationCommitAuthority=(policy:ManagedEndpointPolicy,appendix:SignedManagedOperation)=>
   verifyContinuationPin(policy,appendix,'AgentKeychain-continuation-main-commit-release-pin-v1');
+export const verifyContinuationRolloutAuthority=(policy:ManagedEndpointPolicy,appendix:SignedManagedOperation)=>
+  verifyContinuationPin(policy,appendix,'AgentKeychain-continuation-rollout-release-pin-v1');
+/** Separate signed pilot appendix; existing release format is unchanged. */
+export async function verifyContinuationHandoffOrigin(policy:ManagedEndpointPolicy,appendix:SignedManagedOperation):Promise<string>{
+  assertVerifiedPolicy(policy);
+  const provenance=verified.get(policy)!;
+  exactFields(appendix,['canonical','signature']);
+  if(typeof appendix.canonical!=='string'||appendix.canonical.length>1024||!policy.witnessKeys?.length)throw new Error('cloud_continuation_not_provisioned');
+  base64(appendix.signature,64,64);
+  const value:unknown=JSON.parse(appendix.canonical);
+  exactFields(value,['version','domain','manifestDigest','authOrigin']);
+  if(typeof value.authOrigin!=='string')throw new Error('invalid_continuation_auth_origin');
+  const auth=new URL(value.authOrigin);
+  const expected={version:1,domain:'AgentKeychain-continuation-auth-origin-pilot-v1',manifestDigest:await digest(provenance.canonical),authOrigin:auth.origin};
+  if(auth.protocol!=='https:'||auth.origin!==value.authOrigin||auth.hostname===new URL(policy.apiOrigin).hostname||auth.hostname===new URL(policy.webOrigin).hostname||
+     appendix.canonical!==JSON.stringify(expected)||!sodium.crypto_sign_verify_detached(Buffer.from(appendix.signature,'base64'),appendix.canonical,provenance.root))
+    throw new Error('invalid_continuation_auth_origin');
+  return auth.origin;
+}
 export function productionPolicy(): ManagedEndpointPolicy {
   const artifact = releaseArtifact();
   if (!artifact) throw new Error('cloud_unavailable_not_provisioned');

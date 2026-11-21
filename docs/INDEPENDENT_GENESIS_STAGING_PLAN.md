@@ -144,3 +144,27 @@ or staging B (independent account acceptance)? Recommend staging A first while
 implementing and reviewing the production Auth ingress and cross-account
 transport; both are prerequisites before claiming staging B or production
 independence.
+
+## Continuation configuration preview
+
+`managed-cloud/provisioning/continuation-preview.ts` accepts a signed synthetic
+release and separately signed, purpose-bound appendices for Auth approval,
+Main commit evidence and the rollout role. It takes the trusted *public* root
+separately. It rejects non-fixture origins, wrong/missing signatures, wrong
+appendix purposes and signer reuse. Output is a review matrix only: no
+Wrangler config, account/resource identifiers, open route, private key, or
+signed runtime rollout permit. It does not activate an installed client.
+
+```sh
+node --experimental-transform-types --test managed-cloud/tests/continuation-preview.test.mjs
+```
+
+Hosting a disposable HTTPS rehearsal in an existing account is an option only
+if Sam explicitly names the owned account/zone, confirms isolated fresh
+staging resources, and approves the exact role owners and changes. That
+rehearsal demonstrates functional routing, not independent control if the
+account shares a super-admin. The current synthetic client gate deliberately
+rejects hosted origins; real Auth ingress, trusted transport and a separately
+reviewed installed-client staging policy are prerequisites. Cross-account
+acceptance additionally needs a reviewed authenticated transport across the
+account boundary. Do not change hostnames to evade a synthetic guard.

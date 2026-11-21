@@ -47,7 +47,7 @@ test('compiled synthetic continuation survives real process death before commit 
  await sodium.ready;
  const home=mkdtempSync(join(tmpdir(),'akc-continuation-process-')),bin=join(home,'fixture-client');
  const main=new Database(':memory:'),custody=new Database(':memory:'),keys=await createCloudKeys(),secure=new MemorySecureStore();
- const root=makeSigner('release-root'),auth=makeSigner('auth'),owner=makeSigner('main-owner'),w=makeSigner('witness'),cp=makeSigner('checkpoint');
+ const root=makeSigner('release-root'),auth=makeSigner('auth'),owner=makeSigner('main-owner'),w=makeSigner('witness'),cp=makeSigner('checkpoint'),rollout=makeSigner('rollout');
  let service:ReturnType<typeof Bun.serve>|undefined;
  try{
   const compiled=await Bun.build({entrypoints:['scripts/phase45/continuation-client.ts'],compile:{outfile:bin}});
@@ -96,7 +96,16 @@ test('compiled synthetic continuation survives real process death before commit 
   await consumeGenesisPackageContinuation(m,consume,{authority:auth.pin,witnesses:[w.pin]});
   const commit=await proveGenesisPackageCommit(m,scope,expectation,prepared,pins,owner);
   const evidence={grant,target,approval,authorityAppendix,witness,roster,keyPackage,freshHead:prepared.freshHead,commitAppendix,commit};
-  const token=random(),seen=new Set<string>();let unavailable=false;
+  const rolloutAppendix=await pinAppendix('AgentKeychain-continuation-rollout-release-pin-v1',rollout.pin);
+  const permit=async (scope:string,signer=rollout)=>{
+   const value=JSON.stringify({version:1,domain:'AgentKeychain-continuation-rollout-capability-v1',mode:'synthetic-only',manifestDigest:await digest(canonical),
+    keyId:rollout.pin.keyId,intentDigest:scope,authAppendixDigest:await signedDigest(authorityAppendix),commitAppendixDigest:await signedDigest(commitAppendix),
+    witnessKeyId:w.pin.keyId,issuedAt:now,expiresAt:now+60});
+   return {canonical:value,signature:await signer.sign(value)};
+  };
+  const signed={capability:await permit(await digest(targetBytes)),rolloutAppendix,authAppendix:authorityAppendix,commitAppendix};
+  const token=random(),seen=new Set<string>();let unavailable=false,secureRequests=0;
+
   const accounts=new Set(['enrollment-intent','csk','signing-private','wrapping-private','roster-anchor','checkpoint-anchor','recovery-intent','recovery-anchor','refresh-credential']);
   service=Bun.serve({hostname:'127.0.0.1',port:0,async fetch(req){
    if(req.method!=='POST'||req.headers.get('authorization')!=='Bearer '+token)return new Response(null,{status:404});
@@ -109,6 +118,7 @@ test('compiled synthetic continuation survives real process death before commit 
      return Response.json(await provePostCommitContinuationHead(c,{...request,nonce:body.nonce},prepared.freshHead,commit,
       {...custodyPolicy,mainCommitAuthority:owner.pin,otherReleaseKeys:[]},w));
     }
+    secureRequests++;
     const account=typeof body==='string'?body:body.account;
     if(!account||!accounts.has(account))throw new Error();
     if(path==='/secure/get'){const value=await secure.get(account);try{return Response.json({value:value?b64(value):null});}finally{value?.fill(0);}}
@@ -119,7 +129,7 @@ test('compiled synthetic continuation survives real process death before commit 
   }});
   const run=async(mode:string,extra={})=>{
    const child=Bun.spawn([bin],{cwd:home,env:{PATH:'/usr/bin:/bin',HOME:home,AGENTKEYCHAIN_HOME:home,AKC_KEYCHAIN_TEST_MODE:'1'},
-    stdin:new globalThis.Blob([JSON.stringify({home,endpoint:service!.url.href,token,mode,manifest,root:root.pin.publicKey,...extra})]),stdout:'pipe',stderr:'pipe'});
+    stdin:new globalThis.Blob([JSON.stringify({home,endpoint:service!.url.href,token,mode,manifest,root:root.pin.publicKey,signed,...extra})]),stdout:'pipe',stderr:'pipe'});
    const [status,output,error]=await Promise.all([child.exited,new Response(child.stdout).text(),new Response(child.stderr).text()]);
    return {status,output:output.trim(),error:error.trim()};
   };
@@ -133,6 +143,12 @@ test('compiled synthetic continuation survives real process death before commit 
    }finally{db.close();}
   };
   expect(await run('stage',{initialization:{keys:Object.fromEntries(Object.entries(keys).map(([k,v])=>[k,b64(v)])),nonce,evidence}})).toEqual({status:0,output:'ok',error:''});
+  const beforeGate=secureRequests;
+  expect(await run('unconfigured')).toMatchObject({status:1,error:'cloud_continuation_not_provisioned'});
+  expect(await run('finalize',{signed:{...signed,capability:await permit(await digest(targetBytes),auth)}})).toMatchObject({status:1,error:'cloud_continuation_not_provisioned'});
+  expect(secureRequests).toBe(beforeGate);
+  expect(await run('finalize',{signed:{...signed,capability:await permit(await digest('foreign continuation'))}})).toMatchObject({status:1,error:'cloud_continuation_not_provisioned'});
+  expect(seen.size).toBe(0);
   expect(await run('finalize',{fault:'after-checkpoint'})).toMatchObject({status:77});
   expect(await run('ready')).toMatchObject({status:1,error:'cloud_not_enrolled'});
   expect(await run('finalize')).toMatchObject({status:1,error:'cloud_enrollment_busy'});
@@ -158,7 +174,7 @@ test('compiled synthetic continuation survives real process death before commit 
   }finally{store.destroy();sqlite.close();}
  }finally{
   service?.stop(true);main.close();custody.close();destroyCloudKeys(keys);
-  for(const s of [root,auth,owner,w,cp])s.clear();
+  for(const s of [root,auth,owner,w,cp,rollout])s.clear();
   rmSync(home,{recursive:true,force:true});
  }
 },30_000);

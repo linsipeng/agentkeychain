@@ -44,5 +44,6 @@ jobs:
           npm test --prefix managed-cloud/web
           npm run test:bundle --prefix managed-cloud
           npm run test:support-bundle --prefix managed-cloud
+          node --test --experimental-transform-types managed-cloud/tests/continuation-preview.test.mjs
           npm run test:recovery-resources --prefix managed-cloud
           npm run test:recovery-process --prefix managed-cloud

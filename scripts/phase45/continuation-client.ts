@@ -3,17 +3,18 @@ import {Database} from 'bun:sqlite';
 import {realpathSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,sep} from 'node:path';
+import {runCloud} from '../../src/cli/cloud.ts';
 import {CloudStore} from '../../src/cloud/persistence.ts';
 import {verifyReleaseManifest} from '../../src/cloud/config.ts';
-import {protectEnrollmentKeys,stageGenesisContinuation,finalizeGenesisContinuation} from '../../src/cloud/enrollment-intent.ts';
+import {protectEnrollmentKeys,stageGenesisContinuation} from '../../src/cloud/enrollment-intent.ts';
 import {openCloudRuntime} from '../../src/cloud/runtime.ts';
 import type {SecureAccount,SecureStore} from '../../src/platform/secure-store.ts';
 import type {SignedManagedOperation} from '../../src/cloud/protocol.ts';
 import type {CloudKeys} from '../../src/cloud/crypto.ts';
 
 const bootstrap=await Bun.stdin.json() as {
- home:string;endpoint:string;token:string;mode:'stage'|'finalize'|'ready';
- fault?:string; manifest:SignedManagedOperation; root:string;
+ home:string;endpoint:string;token:string;mode:'stage'|'finalize'|'ready'|'unconfigured';
+ fault?:string; manifest:SignedManagedOperation; root:string; signed:NonNullable<Parameters<typeof runCloud>[2]>['signed'];
  initialization?:{keys:Record<keyof CloudKeys,string>;nonce:string;evidence:Parameters<typeof stageGenesisContinuation>[4]};
 };
 const endpoint=new URL(bootstrap.endpoint),home=realpathSync(bootstrap.home);
@@ -39,13 +40,14 @@ const secure:SecureStore={
  },
 };
 const policy=verifyReleaseManifest(bootstrap.manifest,Buffer.from(bootstrap.root,'base64'));
-const db=new Database(join(home,'fixture.sqlite'));
+const open=()=>new Database(join(home,'fixture.sqlite'));
+const db=bootstrap.mode==='stage'||bootstrap.mode==='ready'?open():null;
 try{
  if(bootstrap.mode==='stage'){
   const {keys:encoding,evidence,nonce}=bootstrap.initialization!;
   const keys=Object.fromEntries(Object.entries(encoding).map(([id,bytes])=>[id,Buffer.from(bytes,'base64')])) as unknown as CloudKeys;
   await protectEnrollmentKeys(secure,keys);
-  const store=new CloudStore(db,keys.csk),{grant}=evidence;
+  const store=new CloudStore(db!,keys.csk),{grant}=evidence;
   try{
    store.put('state','pending',{requestId:grant.requestId,deviceId:grant.deviceId});
    store.put('state','pending-approved',{requestId:grant.requestId,deviceId:grant.deviceId,vaultId:grant.vaultId});
@@ -53,13 +55,13 @@ try{
    await stageGenesisContinuation(secure,store,policy,nonce,evidence);
   }finally{store.destroy();for(const key of Object.values(keys))key.fill(0);}
  }else if(bootstrap.mode==='ready'){
-  const runtime=await openCloudRuntime(db,new Uint8Array(32),{policy,secure});runtime.close();
+  const runtime=await openCloudRuntime(db!,new Uint8Array(32),{policy,secure});runtime.close();
+ }else if(bootstrap.mode==='unconfigured'){
+  await runCloud(['continue-enrollment']);
  }else{
-  const csk=await secure.get('csk');if(!csk)throw new Error('synthetic_no_keys');
-  const store=new CloudStore(db,csk);
-  try{if(!await finalizeGenesisContinuation(secure,store,policy,async nonce=>await control('/custody/post',{nonce}) as SignedManagedOperation))throw new Error('synthetic_not_finalized');}
-  finally{store.destroy();csk.fill(0);}
+  await runCloud(['continue-enrollment'],process.platform,{policy,secure,signed:bootstrap.signed,open,
+   obtain:async nonce=>await control('/custody/post',{nonce}) as SignedManagedOperation});
  }
  process.stdout.write('ok\n');
 }catch(error){process.stderr.write(error instanceof Error?error.message:'synthetic_error');process.exitCode=1;}
-finally{db.close();}
+finally{db?.close();}

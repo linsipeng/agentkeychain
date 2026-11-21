@@ -123,3 +123,16 @@ profile commit and that an unavailable Custody proof leaves sync locked. This
 is not a production route, native OS keychain, deployment or cross-operator
 staging check. Auth credential enrollment and the Cloudflare Worker routing
 remain covered or gated separately.
+
+The CLI dispatcher has an isolated `continue-enrollment` call site exercised by
+the compiled localhost fixture. The release root delegates a separate rollout
+signer whose short permit binds the exact intent, manifest, Auth/Main
+appendices and Custody witness pin. Incomplete or invalid provisioning fails
+before secure-store or database access; the existing lease still requires a
+new live Custody proof. An environment variable alone cannot enable it.
+
+This is not a public pilot. The shipping entrypoint supplies no fixture
+capability or continuation transport and fails closed before opening a Vault.
+Normal login is unchanged. Independently administered Auth UX, receipt/commit/
+post-proof transport, a common exclusive guard followed by all onboarding
+writers and native secure-store validation remain release gates.

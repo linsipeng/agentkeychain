@@ -1,3 +1,4 @@
+import {assertSyntheticContinuationScope,type VerifiedContinuationRollout} from './continuation-rollout.ts';
 import {randomBytes} from 'node:crypto';
 import {digest,verify} from '../../managed-cloud/shared/contracts.ts';
 import {verifyContinuationApproval} from '../../managed-cloud/shared/enrollment-continuation.ts';
@@ -204,7 +205,7 @@ async function validatePostCommit(policy:ManagedEndpointPolicy,e:ContinuationEvi
  * must obtain a new post-commit Custody response for the generated challenge.
  * Before any wider integration all enrollment writers must honor this lease. */
 // eslint-disable-next-line no-unused-vars -- callback argument is a typed transport contract
-export async function finalizeGenesisContinuation(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,obtain:(nonce:string)=>Promise<SignedManagedOperation>):Promise<boolean>{
+export async function finalizeGenesisContinuation(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,obtain:(nonce:string)=>Promise<SignedManagedOperation>,rollout?:VerifiedContinuationRollout):Promise<boolean>{
  const owner=newContinuationReadbackNonce(),leaseMs=30_000;
  store.db.exec('CREATE TABLE IF NOT EXISTS cloud_enrollment_lock(id INTEGER PRIMARY KEY CHECK(id=1),owner TEXT NOT NULL,expires INTEGER NOT NULL)');
  store.transaction(()=>{
@@ -220,6 +221,7 @@ export async function finalizeGenesisContinuation(secure:SecureStore,store:Cloud
   const validated=await validatedStage(secure,store,policy);if(!validated)return false;
   const {intent,stage,stageDigest,marker,profile}=validated;
   const {evidence:e}=stage,g=e.grant,s=e.roster,roster=rosterPins(parseRoster(s));
+  if(rollout)await assertSyntheticContinuationScope(policy,rollout,e);
   const expected:CloudEnrollment={accountId:g.accountId,tenantId:g.tenantId,vaultId:g.vaultId,deviceId:g.deviceId,keyEpoch:g.keyEpoch,
    signingPublic:g.signingKey,wrappingPublic:g.wrappingKey,vdk:intent.keys.vdk,roster,checkpointKeys:policy.checkpointKeys,releaseId:policy.releaseId,apiOrigin:policy.apiOrigin};
   const anchor={sequence:0,root:await genesisRoot(g.tenantId,g.vaultId)};
@@ -229,7 +231,7 @@ export async function finalizeGenesisContinuation(secure:SecureStore,store:Cloud
   const nonce=newContinuationReadbackNonce();
   if(nonce===stage.nonce)throw denied();
   const deadline=await validatePostCommit(policy,e,nonce,await obtain(nonce));
-  const stillLive=()=>{fence();if(Date.now()+6000>=deadline)throw denied();};
+  const stillLive=()=>{fence();if(Date.now()+6000>=Math.min(deadline,(rollout?.expiresAt??Number.POSITIVE_INFINITY)*1000))throw denied();};
   stillLive();
   await new RosterStore(store,secure).initialize(s);
   stillLive();
