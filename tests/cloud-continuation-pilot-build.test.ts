@@ -1,6 +1,6 @@
 import {URL} from 'node:url';
 import {TextEncoder} from 'node:util';
-import {webcrypto as crypto} from 'node:crypto';
+import {createPrivateKey,createPublicKey,randomBytes,webcrypto as crypto} from 'node:crypto';
 import {expect,test} from 'bun:test';
 import {mkdtemp,readFile,rm,symlink,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
@@ -108,6 +108,46 @@ test('native inspect authenticates only a one-use correlated metadata response',
  expect(await verifyNativeInspectObservation(journal,await response(journal,{status:'rollback-journal-present'})))
   .toEqual({status:'rollback-journal-present'});
 });
+
+test('native C inspect wire interoperates with the signed installed pilot verifier',async()=>{
+ if(process.platform!=='linux'||process.env.AKC_HOSTED_NATIVE_INTEROP!=='1')return;
+ const seed=randomBytes(32);
+ const dir=await mkdtemp('/tmp/akc-inspect-wire-');
+ try{
+  const bin=join(dir,'wire-fixture');
+  const build=Bun.spawnSync(['cc','-std=c11','-Wall','-Wextra','-Werror','-pedantic','native/pilot-linux-inspect-wire.c',
+   'tests/native/pilot_linux_inspect_wire_fixture.c','-lcrypto','-o',bin],{timeout:20000});
+  expect(build.stderr.toString()).toBe('');
+  expect(build.exitCode).toBe(0);
+  const der=Buffer.concat([Buffer.from('302e020100300506032b657004220420','hex'),seed]);
+  let publicKey:string;
+  try{
+   publicKey=createPublicKey(createPrivateKey({key:der,format:'der',type:'pkcs8'}))
+    .export({format:'der',type:'spki'}).subarray(-32).toString('base64');
+  }finally{der.fill(0);}
+  const {artifact,root,target,expiresAt}=await makeArtifact();
+  const claim=await makeNativeClaim(artifact,target,{keyId:await digest(publicKey),publicKey},expiresAt);
+  const gate=await verifyInstalledContinuationPilot({...artifact,nativeReaderAppendix:await root.sign(JSON.stringify(claim))},root.publicKey,target);
+  const profile='c'.repeat(64),begin=()=>beginNativeInspectVerification(gate,profile);
+  const run=(request:string)=>{
+   const input=Buffer.concat([seed,Buffer.from(request)]);
+   try{
+    return Bun.spawnSync([bin,claim.installationDigest,profile,String(expiresAt)],{stdin:input,env:{},timeout:3500});
+   }finally{input.fill(0);}
+  };
+  const ticket=begin(),native=run(ticket.request);
+  expect(native.exitCode).toBe(0);
+  expect(native.stderr.length).toBe(0);
+  expect(await verifyNativeInspectObservation(ticket,new Uint8Array(native.stdout))).toEqual({status:'snapshot-present'});
+  for(const edit of [(x:string)=>x+' ',(x:string)=>x.replace('"op":"inspect"','"op":"otherxx"'),
+   (x:string)=>x.replace(profile,'d'.repeat(64)),(x:string)=>x.replace('"issuedAt":','"issuedAt":0'),(x:string)=>x.slice(0,-1)]){
+   const wrong=run(edit(begin().request));
+   expect(wrong.exitCode).toBe(13);
+   expect(wrong.stdout.length).toBe(0);
+   expect(wrong.stderr.length).toBe(0);
+  }
+ }finally{seed.fill(0);await rm(dir,{recursive:true,force:true});}
+},30000);
 
 test('only the isolated, signed pilot artifact can compile an inert pilot installation',async()=>{
  if(!/^(linux|darwin)-(arm64|x64)$/.test(`${process.platform}-${process.arch}`))return;

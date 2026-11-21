@@ -12,6 +12,8 @@ on:
       - 'tests/native/pilot_offline_package.ts'
       - 'native/pilot-linux-descriptor-launch.*'
       - 'native/pilot-linux-peer-frame.*'
+      - 'native/pilot-linux-inspect-wire.*'
+      - 'tests/native/pilot_linux_inspect_wire_fixture.c'
       - 'tests/native/pilot_linux_descriptor_*.c'
 
 permissions:
@@ -68,3 +70,8 @@ jobs:
           digest=$(sha256sum "$fixture/reader" | cut -d ' ' -f 1)
           cc -std=c11 -Wall -Wextra -Werror -pedantic native/pilot-linux-descriptor-launch.c native/pilot-linux-peer-frame.c tests/native/pilot_linux_descriptor_launch.c -lcrypto -o "$fixture/smoke"
           "$fixture/smoke" "$fixture" "$digest"
+
+      - name: Authenticate compiled native C replies with the TypeScript verifier
+        env:
+          AKC_HOSTED_NATIVE_INTEROP: '1'
+        run: bun test tests/cloud-continuation-pilot-build.test.ts --test-name-pattern 'native C inspect wire interoperates'
