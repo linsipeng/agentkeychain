@@ -169,6 +169,19 @@ def wait_owner(conn, name, process, image, snapshot, *, startup_timeout=6):
     raise RuntimeError("fixture role owner unavailable")
 
 
+def unchanged_named_file(held, marker, expected, stage):
+    def mark(label):
+        global phase
+        phase = stage + "-" + label
+
+    seen = held.read_exact(marker, mark)
+    for label, actual, original in zip(("device", "inode", "size", "mtime", "digest"), seen, expected, strict=True):
+        mark("changed-" + label)
+        need(actual == original)
+    mark("verified")
+    return seen
+
+
 def show_then_cancel(bus, owner, offer, prompter_pid, windows, liveness, named=None, fixture=None, unlock=False):
     global phase
     need(offer == (FIRST_UNLOCK if unlock else FIRST_PROMPT))
@@ -544,7 +557,9 @@ PROMPT_METHODS = {
     b"BeginPrompting": "begin", b"PerformPrompt": "perform", b"StopPrompting": "stop",
     b"PromptReady": "ready", b"PromptDone": "done", b"Prompt": "public-prompt",
     b"Dismiss": "dismiss", b"Completed": "completed", b"Ping": "expected-ping",
-    b"RequestName": "name-request",
+    b"RequestName": "name-request", b"PropertiesChanged": "properties-changed",
+    b"CollectionChanged": "collection-changed", b"ItemChanged": "item-changed",
+    b"Get": "get-property", b"GetAll": "get-all-properties", b"GetSecret": "get-secret", b"Unlock": "unlock",
 }
 
 
@@ -666,8 +681,8 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                     held = named["HeldKeyrings"](env["XDG_DATA_HOME"])
                 if reopen:
                     phase = "named-reopen-existing-held-file"
-                    need(fixture.stopped_broker is not None and fixture.stopped_roles is not None and
-                         fixture.snapshot == held.read_exact(fixture.marker))
+                    need(fixture.stopped_broker is not None and fixture.stopped_roles is not None and fixture.snapshot is not None)
+                    unchanged_named_file(held, fixture.marker, fixture.snapshot, "named-reopen-before-provider-file")
                     policy += scoped_reopen_policy(named, fixture)
                 else:
                     policy += scoped_write_policy(named)
@@ -785,6 +800,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                         require_collection_locked(conn, owner, named, True)
                         phase = "named-reopen-read-denied-while-locked"
                         require_locked_item_denial(conn, owner, encrypted_session, named, fixture)
+                        unchanged_named_file(held, fixture.marker, fixture.snapshot, "named-reopen-while-locked-file")
                         phase = "named-reopen-exact-unlock-offer"
                         offer = offer_collection_unlock(conn, owner, named)
                     else:
@@ -818,10 +834,9 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                     elif reopen:
                         phase = "named-reopen-unlocked-only-after-prompt"
                         require_collection_locked(conn, owner, named, False)
+                        unchanged_named_file(held, fixture.marker, fixture.snapshot, "named-reopen-after-unlock-file")
                         read_fixture_item(conn, owner, encrypted_session, named, fixture)
-                        phase = "named-reopen-file-unchanged"
-                        final_file = held.read_exact(fixture.marker)
-                        need(final_file == fixture.snapshot)
+                        final_file = unchanged_named_file(held, fixture.marker, fixture.snapshot, "named-reopen-after-read-file")
                     else:
                         phase = "named-created-file-no-alias"
                         before = held.read_exact()
@@ -862,8 +877,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                     try:
                         need(not cleanup_failed)
                         if final_file is not None and not prompt_failed:
-                            phase = "named-file-after-owned-shutdown"
-                            need(held.read_exact() == final_file)
+                            unchanged_named_file(held, None, final_file, "named-file-after-owned-shutdown")
                             if fixture:
                                 need(conn.is_closed() and all(child.poll() is not None for child in children) and
                                      broker_identity is not None and not os.path.lexists(broker_identity[0]))

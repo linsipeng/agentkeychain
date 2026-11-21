@@ -97,22 +97,47 @@ class HeldKeyrings:
                 stat.S_ISDIR(visible.st_mode) and (row.st_dev, row.st_ino) == (visible.st_dev, visible.st_ino))
         return row.st_dev, row.st_ino
 
-    def read_exact(self, absent_marker=None):
-        require(self._row() == self.identity and os.listdir(self.dirfd) == [LEAF])
+    def read_exact(self, absent_marker=None, mark=lambda _: None):
+        mark("directory-identity")
+        require(self._row() == self.identity)
+        mark("leaf-inventory")
+        leaves = os.listdir(self.dirfd)
+        if leaves != [LEAF]:
+            if "default" in leaves:
+                mark("unexpected-default-alias")
+            elif "login.keyring" in leaves:
+                mark("unexpected-login-leaf")
+            elif LEAF not in leaves:
+                mark("expected-leaf-missing")
+            else:
+                mark("unexpected-extra-leaf")
+            require(False)
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        mark("exact-leaf-open")
         fd = os.open(LEAF, flags, dir_fd=self.dirfd)
         try:
             row = os.fstat(fd)
-            require(stat.S_ISREG(row.st_mode) and row.st_uid == os.getuid() and stat.S_IMODE(row.st_mode) == 0o600 and
-                    row.st_nlink == 1 and len(GNOME_BINARY) < row.st_size <= 1024 * 1024)
+            mark("leaf-metadata-type-owner")
+            require(stat.S_ISREG(row.st_mode) and row.st_uid == os.getuid())
+            mark("leaf-metadata-mode")
+            require(stat.S_IMODE(row.st_mode) == 0o600)
+            mark("leaf-metadata-link")
+            require(row.st_nlink == 1)
+            mark("leaf-size-bound")
+            require(len(GNOME_BINARY) < row.st_size <= 1024 * 1024)
+            mark("leaf-read-bound")
             chunks = bytearray()
             while len(chunks) < row.st_size:
                 block = os.read(fd, row.st_size - len(chunks))
                 require(block)
                 chunks.extend(block)
-            require(not os.read(fd, 1) and chunks.startswith(GNOME_BINARY))
+            require(not os.read(fd, 1))
+            mark("leaf-binary-header")
+            require(chunks.startswith(GNOME_BINARY))
             if absent_marker is not None:
+                mark("leaf-plaintext-marker-denied")
                 require(absent_marker not in chunks)
+            mark("leaf-identity-stable")
             visible = os.stat(LEAF, dir_fd=self.dirfd, follow_symlinks=False)
             require(self._row() == self.identity and
                     (row.st_dev, row.st_ino, row.st_size, row.st_mtime_ns) ==
