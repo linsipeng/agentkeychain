@@ -121,3 +121,35 @@ cc -std=c11 -Wall -Wextra -Werror -pedantic -O2 \
 This is only a prerequisite for the rollback writer. It does not exercise
 any SQLite write, journal, or recovery. The POSIX lock coordinates
 cooperating brokers, not arbitrary writers using the same UID.
+
+## Phase 2: pinned one-connection rollback writer, synthetic only
+
+With the same independently checked phase-1 amalgamation and flags, replace
+the fixture source in the phase-1 build commands with
+`tests/native/pilot_sqlite_rollback_writer.c`. This is a fresh synthetic
+profile only, using a separate never-replaced 0600 lock inode and real
+exclusive flock before any database/journal operation. Parent, owner and
+recovery children do not inherit a live lease. Only one SQLite connection can
+open the fixed main DB under each held lease; the file-lock levels are the
+private pager state within that exclusivity, not an interoperability protocol
+with other SQLite clients. Only fixed SQL statements and the disposition
+approved by this fixture are implemented.
+
+Linux acceptance at the first actual main page write, after journal contents
+and its directory were synced: parent observes that callback, verifies an
+independently opened contender still gets busy, and SIGKILLs the writer before
+SQLite can sync and delete the journal. A fresh child reopens the same profile,
+requires SQLite to restore the exact original three rows and remove the
+existing journal, then retries one transaction. A third, freshly leased
+process reads the complete committed rows and matching database inode, checks
+integrity and requires no leftover journal. The commit requires DELETE journal
+mode, synchronous EXTRA, memory temp, and no mmap/WAL/SHM/extensions or stock
+VFS fallback. Directory sync is required when flushing a journal and when
+deleting it for this fixture.
+
+One process-crash fence is not power-cut recovery, multiple-writer support,
+an installed pilot helper, or a general VFS. macOS full file sync plus
+directory behavior still requires runtime testing on each supported
+architecture/filesystem. Additional independent review, other callback crash
+fences, injected I/O/sync failure and races, and production ownership/security
+gates are all still open. Do not ship or enable storage from this test.

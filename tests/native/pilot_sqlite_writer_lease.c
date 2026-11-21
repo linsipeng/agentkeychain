@@ -41,6 +41,7 @@ static enum lease_state acquire(const struct scope *s, int parent, ino_t inode, 
     return lease_held;
 }
 
+#ifndef AKC_LEASE_PRIMITIVES_ONLY
 static int waited(pid_t child) {
     int status;
     pid_t got;
@@ -145,3 +146,5 @@ int main(void) {
     puts("PASS POSIX independent lease deny, crash release, and exact-inode reacquisition");
     return 0;
 }
+
+#endif
