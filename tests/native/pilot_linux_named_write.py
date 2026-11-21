@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import os
 from pathlib import Path
+import re
 import secrets
 import stat
 
@@ -110,7 +111,23 @@ class HeldKeyrings:
             elif LEAF not in leaves:
                 mark("expected-leaf-missing")
             else:
-                mark("unexpected-extra-leaf")
+                extras = set(leaves) - {LEAF}
+                if extras == {"user.keystore"}:
+                    mark("unexpected-pkcs11-store")
+                elif extras == {"user.keystore.lock"}:
+                    mark("unexpected-pkcs11-store-lock")
+                elif len(extras) == 1:
+                    # The pinned provider names transaction staging files with
+                    # these two shapes. Classify only; every extra is denied.
+                    extra = next(iter(extras))
+                    if re.fullmatch(r"\.temp-[A-Za-z0-9]{6}", extra):
+                        mark("unexpected-provider-temp-leaf")
+                    elif re.fullmatch(re.escape(LEAF) + r"\.temp-[0-9]{1,10}", extra):
+                        mark("unexpected-collection-temp-leaf")
+                    else:
+                        mark("unexpected-extra-leaf")
+                else:
+                    mark("unexpected-multiple-extra-leaves")
             require(False)
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
         mark("exact-leaf-open")
