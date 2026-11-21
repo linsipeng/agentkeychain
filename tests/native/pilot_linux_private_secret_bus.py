@@ -175,9 +175,12 @@ def unchanged_named_file(held, marker, expected, stage):
         phase = stage + "-" + label
 
     seen = held.read_exact(marker, mark)
-    for label, actual, original in zip(("device", "inode", "size", "mtime", "digest"), seen, expected, strict=True):
-        mark("changed-" + label)
-        need(actual == original)
+    changes = tuple(label for label, actual, original in
+                    zip(("device", "inode", "size", "mtime", "digest"), seen, expected, strict=True)
+                    if actual != original)
+    if changes:
+        mark("changed-" + "-".join(changes))
+        need(False)
     mark("verified")
     return seen
 
