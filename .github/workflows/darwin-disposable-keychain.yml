@@ -110,13 +110,20 @@ jobs:
           echo 'PASS independent user Keychain configuration unchanged'
 
       - name: Set up pinned Bun for the synthetic signed-wire fixture
+        id: signed_wire_bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: '1.4.5'
+          no-cache: true
 
       - name: Prepare locked dependencies without lifecycle hooks
         timeout-minutes: 2
-        run: bun install --frozen-lockfile --ignore-scripts
+        env:
+          AKC_SIGNED_WIRE_BUN: ${{ steps.signed_wire_bun.outputs.bun-path }}
+        run: |
+          set -euo pipefail
+          [[ "$AKC_SIGNED_WIRE_BUN" == /* ]] && test -x "$AKC_SIGNED_WIRE_BUN"
+          "$AKC_SIGNED_WIRE_BUN" install --frozen-lockfile --ignore-scripts
 
       - name: Verify signed disposable native wire end to end
         timeout-minutes: 4
@@ -124,15 +131,12 @@ jobs:
         env:
           AKC_EXPECTED_DARWIN_ARCH: ${{ matrix.arch }}
           AKC_SIGNED_WIRE_REHEARSAL: private-fixture-only-v1
+          AKC_SIGNED_WIRE_BUN: ${{ steps.signed_wire_bun.outputs.bun-path }}
         run: |
           set -euo pipefail
           umask 077
-          bun_entry="$(command -v bun)"
-          case "$bun_entry" in
-            /*) ;;
-            *) echo 'Pinned Bun entry is not absolute' >&2; exit 1 ;;
-          esac
-          AKC_SIGNED_WIRE_BUN="$bun_entry" "$bun_entry" tests/native/pilot_darwin_signed_wire.ts
+          [[ "$AKC_SIGNED_WIRE_BUN" == /* ]] && test -x "$AKC_SIGNED_WIRE_BUN"
+          "$AKC_SIGNED_WIRE_BUN" tests/native/pilot_darwin_signed_wire.ts
 
       - name: Independently recheck configuration after signed-wire attempt
         if: ${{ always() }}
