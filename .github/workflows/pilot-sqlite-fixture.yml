@@ -149,4 +149,4 @@ jobs:
           test "$(id -u)" != 0
           pkg-config --atleast-version=3.0.0 libcrypto
           bun install --frozen-lockfile --ignore-scripts
-          bun test tests/native/pilot_linux_installed_inspect_rehearsal.ts
+          bun test ./tests/native/pilot_linux_installed_inspect_rehearsal.ts
