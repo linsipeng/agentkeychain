@@ -2,8 +2,7 @@
  * Run with Node 24: node --experimental-transform-types managed-cloud/tests/continuation-https-rehearsal.mjs [--browser]
  * --browser requires a sandbox-capable Chromium and certutil. An ephemeral virtual authenticator is used in browser mode. */
 import assert from 'node:assert/strict';
-import {execFileSync,execFile,spawn} from 'node:child_process';
-import {promisify} from 'node:util';
+import {execFileSync,spawn} from 'node:child_process';
 import {mkdtempSync,readFileSync,rmSync,writeFileSync,mkdirSync} from 'node:fs';
 import {request,createServer} from 'node:https';
 import {tmpdir} from 'node:os';
@@ -201,16 +200,41 @@ try{
   run('certutil',['-A','-d','sql:'+db,'-n','akc-disposable-root','-t','C,,','-i',file('ca.pem')],env);
   const flags=['--headless','--no-first-run','--disable-background-networking','--no-proxy-server',
    '--host-resolver-rules='+[...names.map(host=>'MAP '+host+' 127.0.0.1'),'MAP '+pilotBrowserHost+':443 127.0.0.1:'+port].join(', ')];
-  const render=async (path, profile)=>promisify(execFile)(process.env.CHROMIUM??'chromium',[...flags,'--dump-dom','--timeout=10000','--user-data-dir='+file(profile),origins[0]+path],{env,timeout:20_000,maxBuffer:1024*1024});
-  const doc=await render('/continuation/approve#handoff='+'a'.repeat(43),'continuation-profile');
-  assert.match(doc.stdout,/<div id="manual" hidden="">/);
-  assert.doesNotMatch(doc.stdout,/<div id="handoff" hidden/);
-  // Unlike --dump-dom, retain the real browser until its async network/CSP
-  // assertions report back to this isolated HTTPS server, or time out.
+  // Retain a sandboxed browser for the actual DOM and asynchronous HTTPS
+  // checks. One-shot --dump-dom can exit successfully with empty output.
   const child=spawn(process.env.CHROMIUM??'chromium',[...flags,'--remote-debugging-pipe','--user-data-dir='+file('probe-profile'),'about:blank'],
    {env,stdio:['ignore','ignore','pipe','pipe','pipe']});
   const cdp=chromiumTestPipe(child);
+  const verifyHandoffDOM=async()=>{
+   const expected=origins[0]+'/continuation/approve#handoff='+'a'.repeat(43);
+   const {browserContextId}=await cdp('Target.createBrowserContext',{disposeOnDetach:true});
+   try{
+    const {targetId}=await cdp('Target.createTarget',{url:'about:blank',browserContextId});
+    const {sessionId}=await cdp('Target.attachToTarget',{targetId,flatten:true});
+    const navigation=await cdp('Page.navigate',{url:expected},sessionId);
+    assert.ok(!navigation.errorText,'handoff page HTTPS navigation failed');
+    let state;
+    for(let i=0;i<60;i++){
+     const {result,exceptionDetails}=await cdp('Runtime.evaluate',{expression:`({
+      expectedURL:location.href===${JSON.stringify(expected)},
+      secure:isSecureContext,
+      loaded:document.readyState==='complete',
+      manualHidden:document.getElementById('manual')?.hidden===true,
+      handoffVisible:document.getElementById('handoff')?.hidden===false,
+     })`,returnByValue:true},sessionId);
+     assert.ok(!exceptionDetails,'handoff page state evaluation failed');
+     state=result.value;
+     if(state?.expectedURL&&state.secure&&state.loaded&&state.manualHidden&&state.handoffVisible)return;
+     if(i<59)await delay(100,undefined,{signal:timer.signal});
+    }
+    assert.deepEqual(state,{expectedURL:true,secure:true,loaded:true,manualHidden:true,handoffVisible:true},
+      'handoff fragment must hide manual input and show handoff on the expected secure page');
+   }finally{
+    if(child.exitCode===null&&child.signalCode===null)await cdp('Target.disposeBrowserContext',{browserContextId});
+   }
+  };
   const start=async()=>{
+   await verifyHandoffDOM();
    let page;
    for(let i=0;i<30&&!page;i++){
     const {targetInfos}=await cdp('Target.getTargets');
