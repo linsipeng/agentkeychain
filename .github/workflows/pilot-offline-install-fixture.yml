@@ -10,6 +10,8 @@ on:
       - 'src/cloud/continuation-pilot*.ts'
       - 'tests/cloud-continuation-pilot-build.test.ts'
       - 'tests/native/pilot_offline_package.ts'
+      - 'native/pilot-linux-descriptor-launch.*'
+      - 'tests/native/pilot_linux_descriptor_*.c'
 
 permissions:
   contents: read
@@ -49,3 +51,19 @@ jobs:
           test "$(uname -m)" = "$EXPECTED_MACHINE"
           bun -e 'if (process.arch !== process.env.EXPECTED_BUN_ARCH) process.exit(1)'
           bun test tests/cloud-continuation-pilot-build.test.ts --test-name-pattern 'offline pilot smoke installs'
+
+      - name: Verify sealed descriptor execution in the disposable install
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(id -u)" != 0
+          pkg-config --atleast-version=3.0.0 libcrypto
+          fixture=$(mktemp -d "$RUNNER_TEMP/akc-fd-launch.XXXXXXXX")
+          trap 'rm -rf -- "$fixture"' EXIT
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -static tests/native/pilot_linux_descriptor_target.c -o "$fixture/reader"
+          chmod 0500 "$fixture/reader"
+          digest=$(sha256sum "$fixture/reader" | cut -d ' ' -f 1)
+          cc -std=c11 -Wall -Wextra -Werror -pedantic native/pilot-linux-descriptor-launch.c tests/native/pilot_linux_descriptor_launch.c -lcrypto -o "$fixture/smoke"
+          "$fixture/smoke" "$fixture" "$digest"
