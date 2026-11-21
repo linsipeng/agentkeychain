@@ -50,25 +50,68 @@ SUBGROUP = (MODP - 1) // 2
 
 
 def validate_session_reply(reply):
+    global phase
+    phase = "encrypted-session-reply-signature"
+    need(reply is not None and reply.get_type_string() == "(vo)")
     result = reply.get_child_value(0).get_variant()
+    phase = "encrypted-session-peer-type"
     need(result.get_type_string() == "ay")
+    phase = "encrypted-session-peer-length"
     size = result.n_children()
     need(0 < size <= 128)
     peer = int.from_bytes(bytes(result.unpack()), "big")
-    need(2 <= peer <= MODP - 2 and pow(peer, SUBGROUP, MODP) == 1)
+    phase = "encrypted-session-peer-range"
+    need(2 <= peer <= MODP - 2)
+    phase = "encrypted-session-peer-subgroup"
+    need(pow(peer, SUBGROUP, MODP) == 1)
+    phase = "encrypted-session-object"
     path = reply.get_child_value(1).get_string()
+    # GNOME 46.1 gkd_secret_session_constructor: SECRET_SESSION_PREFIX "/s%d".
     need(re.fullmatch(r"/org/freedesktop/secrets/session/s[1-9][0-9]{0,9}", path))
     return peer
 
 
+def session_rpc_failure(error):
+    remote = Gio.DBusError.get_remote_error(error)
+    known = {
+        DBUS + ".Error.AccessDenied": "access-denied",
+        DBUS + ".Error.AuthFailed": "auth-failed",
+        DBUS + ".Error.NoReply": "no-reply",
+        DBUS + ".Error.Timeout": "no-reply",
+        DBUS + ".Error.NameHasNoOwner": "owner-lost",
+        DBUS + ".Error.ServiceUnknown": "owner-lost",
+        DBUS + ".Error.Disconnected": "disconnected",
+        DBUS + ".Error.NotSupported": "unsupported",
+        DBUS + ".Error.InvalidArgs": "invalid-input",
+        DBUS + ".Error.UnknownMethod": "unknown-method",
+        DBUS + ".Error.Failed": "provider-failed",
+    }
+    if remote:
+        return known.get(remote, "other-remote-error")
+    if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.TIMED_OUT):
+        return "no-reply"
+    if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CLOSED):
+        return "disconnected"
+    return "other-local-error"
+
+
 def verify_encrypted_negotiation(bus, unique_owner):
+    global phase
+    phase = "encrypted-session-input"
     private = 2 + secrets.randbelow(SUBGROUP - 2)
     public = pow(2, private, MODP)
     wire = public.to_bytes((public.bit_length() + 7) // 8, "big")
-    reply = bus.call_sync(unique_owner, "/org/freedesktop/secrets", "org.freedesktop.Secret.Service",
-                         "OpenSession", GLib.Variant("(sv)", (ALGORITHM, GLib.Variant("ay", wire))),
-                         GLib.VariantType.new("(vo)"), Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+    parameters = GLib.Variant("(sv)", (ALGORITHM, GLib.Variant("ay", wire)))
+    phase = "encrypted-session-rpc"
+    try:
+        # Check the exact reply signature ourselves to separate wrong shape from transport denial.
+        reply = bus.call_sync(unique_owner, "/org/freedesktop/secrets", "org.freedesktop.Secret.Service",
+                             "OpenSession", parameters, None, Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+    except GLib.Error as error:
+        phase = "encrypted-session-rpc-" + session_rpc_failure(error)
+        raise
     peer = validate_session_reply(reply)
+    phase = "encrypted-session-derived-range"
     need(2 <= pow(peer, private, MODP) <= MODP - 2)
     # Only negotiation is tested. No key is serialized, no secret is
     # transferred, and disconnect cleans up this connection-bound session.
