@@ -64,14 +64,22 @@ PROMPT_IFACE = "org.freedesktop.Secret.Prompt"
 # dbus-daemon omits message paths from rejection diagnostics but reports
 # the number of matched rules. Add DENY-only diagnostic rules *before* the
 # existing allow rules. Last-match semantics keep every decision unchanged.
-# Encode only exact p0/p1, expected destination and zero FD matches.
+# The previous hosted run already established the pinned destination, exact
+# interface and zero FDs. Gate every marker on all three; classify only a
+# fixed path candidate on the same route, without logging the actual path.
+CALLBACK_PATH_CANDIDATES = tuple(f"callback-p{value}" for value in range(9))
+
+
 def prompt_ready_deny_markers():
     base = ('send_interface="org.gnome.keyring.internal.Prompter.Callback" '
-            'send_member="PromptReady" send_type="method_call"')
-    known = (("", 1), ('send_path="/org/gnome/keyring/Prompt/p0"', 1),
-             ('send_path="/org/gnome/keyring/Prompt/p1"', 2),
-             (f'send_destination="{SERVICE}"', 4), ('max_fds="0"', 8))
-    return [f"<deny {base} {attributes}/>" for attributes, count in known for _ in range(count)]
+            'send_member="PromptReady" send_type="method_call" '
+            f'send_destination="{SERVICE}" max_fds="0"')
+    markers = [f"<deny {base}/>"]
+    # Distinct paths are mutually exclusive, so one plus the number of
+    # identical matches identifies the exact allowlisted diagnostic label.
+    for value in range(len(CALLBACK_PATH_CANDIDATES)):
+        markers.extend([f'<deny {base} send_path="/org/gnome/keyring/Prompt/p{value}"/>'] * (value + 1))
+    return markers
 
 
 def prompt_ready_denial_shape(raw):
@@ -82,13 +90,14 @@ def prompt_ready_denial_shape(raw):
     shape = re.search(rb"Rejected send message, ([0-9]{1,2}) matched rules;", raw)
     if shape is None:
         return "unclassified"
-    score = int(shape[1]) - 1
-    if not 0 <= score <= 14 or score & 3 == 3:
-        return "unclassified"
-    path = {0: "other-path", 1: "callback-p0", 2: "callback-p1"}[score & 3]
-    role = "expected-destination" if score & 4 else "other-destination"
-    fds = "zero-fds" if score & 8 else "has-fds"
-    return "-".join((path, role, fds, "expected-interface"))
+    count = int(shape[1])
+    if count == 0:
+        return "destination-or-fd-mismatch"
+    if count == 1:
+        return "other-path"
+    if 2 <= count <= len(CALLBACK_PATH_CANDIDATES) + 1:
+        return CALLBACK_PATH_CANDIDATES[count - 2]
+    return "unclassified"
 
 
 def prompt_cancel_policy():
