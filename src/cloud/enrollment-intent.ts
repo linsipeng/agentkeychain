@@ -1,3 +1,7 @@
+import {randomBytes} from 'node:crypto';
+import {digest,verify} from '../../managed-cloud/shared/contracts.ts';
+import {verifyContinuationApproval} from '../../managed-cloud/shared/enrollment-continuation.ts';
+import {exactFields} from './protocol.ts';
 import {rosterDigest} from '../../managed-cloud/shared/roster.ts';
 import {verifyWitness} from '../../managed-cloud/shared/roster-witness.ts';
 import sodium from 'libsodium-wrappers-sumo';
@@ -7,7 +11,7 @@ import {canonicalGrant,type EnrollmentGrant} from '../../managed-cloud/shared/de
 import {openTrustedEnrollment} from './enrollment.ts';
 import type {CloudEnrollment} from './runtime.ts';
 import type {CloudStore} from './persistence.ts';
-import type {ManagedEndpointPolicy} from './config.ts';
+import {assertVerifiedPolicy,verifyContinuationAuthority,type ManagedEndpointPolicy} from './config.ts';
 import type {SignedManagedOperation} from './protocol.ts';
 import {RosterStore,rosterPins} from './roster.ts';
 import {parseRoster,verifyRoster} from '../../managed-cloud/shared/roster.ts';
@@ -38,6 +42,61 @@ export async function restoreEnrollmentKeys(secure:SecureStore):Promise<CloudKey
  for(const [slot,name] of slots){const value=await secure.get(slot);try{if(value&&!Buffer.from(value).equals(Buffer.from(keys[name])))throw new Error('cloud_enrollment_intent_conflict');}finally{value?.fill(0);}}
  for(const [slot,name] of slots){const value=await secure.get(slot);try{if(!value)await secure.put(slot,keys[name]);}finally{value?.fill(0);}}
  return keys;
+}
+type GenesisContinuationPreflight = {
+  grant:EnrollmentGrant; target:SignedManagedOperation; approval:SignedManagedOperation; authorityAppendix:SignedManagedOperation;
+  witness:SignedManagedOperation; freshHead:SignedManagedOperation;
+  roster:SignedManagedOperation; keyPackage:SignedManagedOperation;
+};
+export const newContinuationReadbackNonce=()=>randomBytes(32).toString('base64url');
+export const CONTINUATION_HEAD_DOMAIN='AgentKeychain-enrollment-continuation-current-head-v1';
+/** Local read-only preflight. It proves independently authorized bytes for the
+ * original protected intent, not that a package was committed or this device
+ * may become active. There is intentionally no production issuer or caller. */
+export async function verifyGenesisContinuationPreflight(secure:SecureStore,store:CloudStore,policy:ManagedEndpointPolicy,nonce:string,input:GenesisContinuationPreflight):Promise<void>{
+ assertVerifiedPolicy(policy);
+ const now=Math.floor(Date.now()/1000),g=input.grant,pins=policy.witnessKeys;
+ if(!pins?.length||g.issuerDeviceId!==null||!/^[A-Za-z0-9_-]{43}$/.test(nonce))throw new Error('cloud_continuation_not_provisioned');
+ const authority=await verifyContinuationAuthority(policy,input.authorityAppendix);
+ const previous=await load(secure),pending=store.get<{requestId:string;deviceId:string}>('state','pending'),approved=store.get<{requestId:string;deviceId:string;vaultId:string}>('state','pending-approved');
+ if(!previous||previous.activation||!pending||!approved||store.get('state','enrollment')||
+    pending.requestId!==g.requestId||pending.deviceId!==g.deviceId||approved.requestId!==g.requestId||approved.deviceId!==g.deviceId||approved.vaultId!==g.vaultId||
+    previous.keys.signingPublic!==g.signingKey||previous.keys.wrappingPublic!==g.wrappingKey||
+    JSON.stringify(store.get('state','pending-self-roster'))!==JSON.stringify(input.roster)||
+    JSON.stringify(store.get('state','pending-package'))!==JSON.stringify(input.keyPackage))throw new Error('cloud_enrollment_intent_conflict');
+ const r=parseRoster(input.roster),head=await rosterDigest(input.roster);
+ if(r.revision!==1||r.accountId!==g.accountId||r.tenantId!==g.tenantId||r.vaultId!==g.vaultId||r.keyEpoch!==g.keyEpoch||
+    r.issuer.kind!=='device'||r.issuer.id!==g.deviceId||r.active.length!==1||r.revoked.length||
+    r.active[0]?.deviceId!==g.deviceId||r.active[0].signingKey!==g.signingKey||r.active[0].wrappingKey!==g.wrappingKey||
+    JSON.stringify(r.checkpointKeys)!==JSON.stringify(policy.checkpointKeys)||JSON.stringify(r.recoveryAuthorities)!==JSON.stringify(policy.recoveryAuthorities??[]))
+  throw new Error('cloud_enrollment_intent_conflict');
+ await verifyRoster(input.roster,null,now,true);
+ const w=await verifyWitness(input.witness,pins,{accountId:g.accountId,tenantId:g.tenantId,vaultId:g.vaultId,revision:1,digest:head});
+ const pin=pins.find(k=>k.keyId===w.keyId)!;
+ if(pin.publicKey===g.signingKey||pin.publicKey===g.wrappingKey)throw new Error('cloud_continuation_not_provisioned');
+ const payloadDigest=await digest(JSON.stringify(['AgentKeychain-enrollment-continuation-package-v1',input.keyPackage.canonical,input.keyPackage.signature]));
+ await verifyContinuationApproval(input.target,input.approval,{oldGrantCanonical:canonicalGrant(g),stage:'put-key-package',payloadDigest,
+  rosterDigest:head,witnessHead:{revision:w.revision,digest:w.digest},authority,issuer:null,now});
+ exactFields(input.freshHead,['canonical','signature']);
+ if(input.freshHead.canonical.length>2048)throw new Error('cloud_invalid_continuation_readback');
+ const fresh:unknown=JSON.parse(input.freshHead.canonical);
+ exactFields(fresh,['domain','keyId','nonce','requestId','witnessDigest','approvalDigest','payloadDigest','issuedAt','expiresAt']);
+ const approvalWindow=JSON.parse(input.approval.canonical) as {approvedAt:number;expiresAt:number};
+ const expected={domain:CONTINUATION_HEAD_DOMAIN,keyId:w.keyId,nonce,requestId:g.requestId,
+  witnessDigest:await digest(JSON.stringify([input.witness.canonical,input.witness.signature])),
+  approvalDigest:await digest(JSON.stringify([input.approval.canonical,input.approval.signature])),payloadDigest,
+  issuedAt:fresh.issuedAt,expiresAt:fresh.expiresAt};
+ if(input.freshHead.canonical!==JSON.stringify(expected)||typeof fresh.issuedAt!=='number'||typeof fresh.expiresAt!=='number'||
+    !Number.isSafeInteger(fresh.issuedAt)||!Number.isSafeInteger(fresh.expiresAt)||fresh.issuedAt<approvalWindow.approvedAt||fresh.issuedAt>now||now>=fresh.expiresAt||fresh.expiresAt>approvalWindow.expiresAt||
+    fresh.expiresAt-fresh.issuedAt>60||!await verify(pin.publicKey,input.freshHead.signature,input.freshHead.canonical))
+  throw new Error('cloud_invalid_continuation_readback');
+ const wrappingPrivate=Buffer.from(previous.keys.wrappingPrivate,'base64'),wrappingPublic=Buffer.from(previous.keys.wrappingPublic,'base64'),savedVDK=Buffer.from(previous.keys.vdk,'base64');
+ try{
+  if(wrappingPrivate.length!==32||wrappingPublic.length!==32||savedVDK.length!==32||
+     !Buffer.from(sodium.crypto_scalarmult_base(wrappingPrivate)).equals(wrappingPublic))throw new Error('cloud_enrollment_intent_conflict');
+  const vdk=openKeyPackage(input.keyPackage,{vaultId:g.vaultId,targetDeviceId:g.deviceId,keyEpoch:g.keyEpoch,issuerDeviceId:g.deviceId,grantId:g.requestId},Buffer.from(g.signingKey,'base64'),wrappingPublic,wrappingPrivate);
+  try{if(!Buffer.from(vdk).equals(savedVDK))throw new Error('cloud_enrollment_intent_conflict');}finally{vdk.fill(0);}
+ }finally{wrappingPrivate.fill(0);wrappingPublic.fill(0);savedVDK.fill(0);}
 }
 /** Called only after the local SAS/trust/package checks have succeeded. */
 export async function prepareEnrollmentActivation(secure:SecureStore,store:CloudStore,keys:CloudKeys,activation:Activation){

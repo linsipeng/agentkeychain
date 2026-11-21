@@ -139,3 +139,66 @@ test('first device keeps the same request, keys and roster when publish fails an
   expect(store.get('state','pending-keys')).toEqual(savedKeys);
  }finally{store.destroy();db.close();}
 });
+
+test('read-only first-device continuation preflight keeps the protected intent and cannot activate an expired grant',async()=>{
+ const sodium=(await import('libsodium-wrappers-sumo')).default;
+ const {canonicalManifest,verifyReleaseManifest}=await import('../src/cloud/config.ts');
+ const {canonicalGrant}=await import('../managed-cloud/shared/device-protocol.ts');
+ const {digest}=await import('../managed-cloud/shared/contracts.ts');
+ const {canonicalContinuationIntent,canonicalContinuationReceipt}=await import('../managed-cloud/shared/enrollment-continuation.ts');
+ const {rosterDigest}=await import('../managed-cloud/shared/roster.ts');
+ const {WITNESS_DOMAIN}=await import('../managed-cloud/shared/roster-witness.ts');
+ const {verifyGenesisContinuationPreflight,newContinuationReadbackNonce,CONTINUATION_HEAD_DOMAIN,prepareEnrollmentActivation,resumeEnrollmentActivation}=await import('../src/cloud/enrollment-intent.ts');
+ const {selfAnchor}=await import('../src/cloud/enrollment.ts');
+ const {sealKeyPackage,destroyCloudKeys}=await import('../src/cloud/crypto.ts');
+ const keys=await createCloudKeys(),secure=new MemorySecureStore(), b64=(v:Uint8Array)=>Buffer.from(v).toString('base64');
+ const now=Math.floor(Date.now()/1000),root=sodium.crypto_sign_keypair(),auth=sodium.crypto_sign_keypair(),witnessKey=sodium.crypto_sign_keypair(),checkpoint=sodium.crypto_sign_keypair();
+ const sign=(bytes:string,key:Uint8Array)=>b64(sodium.crypto_sign_detached(bytes,key));
+ const manifest=canonicalManifest({version:1,releaseId:'test',apiOrigin:'https://api.local.invalid',webOrigin:'https://local.invalid',protocolMin:2,protocolMax:2,
+  checkpointKeys:[{keyId:'checkpoint',publicKey:b64(checkpoint.publicKey)}],witnessKeys:[{keyId:'witness',publicKey:b64(witnessKey.publicKey)}]});
+ const policy=verifyReleaseManifest({canonical:manifest,signature:sign(manifest,root.privateKey)},root.publicKey);
+ const appendix=JSON.stringify({version:1,domain:'AgentKeychain-continuation-release-pin-v1',manifestDigest:await digest(manifest),keyId:'approval',publicKey:b64(auth.publicKey)});
+ const authorityAppendix={canonical:appendix,signature:sign(appendix,root.privateKey)};
+ const fresh={version:1 as const,requestId:'original',accountId:'a',tenantId:'t',vaultId:'v',deviceId:'d',keyEpoch:1,issuerDeviceId:null,
+  signingKey:b64(keys.signingPublic),wrappingKey:b64(keys.wrappingPublic),expiresAt:now+300};
+ const grant={...fresh,expiresAt:now-5},trust=selfAnchor(fresh,keys,policy,true),roster=trust.signedRoster,head=await rosterDigest(roster);
+ const keyPackage=sealKeyPackage(keys.vdk,{vaultId:grant.vaultId,targetDeviceId:grant.deviceId,keyEpoch:grant.keyEpoch,issuerDeviceId:grant.deviceId,grantId:grant.requestId},keys.wrappingPublic,keys.signingPrivate);
+ const payloadDigest=await digest(JSON.stringify(['AgentKeychain-enrollment-continuation-package-v1',keyPackage.canonical,keyPackage.signature]));
+ const exact=canonicalContinuationIntent({version:1,domain:'AgentKeychain-enrollment-continuation-intent-v1',id:'a'.repeat(43),
+  originalGrantDigest:await digest(canonicalGrant(grant)),requestId:grant.requestId,accountId:grant.accountId,tenantId:grant.tenantId,vaultId:grant.vaultId,
+  deviceId:grant.deviceId,signingKey:grant.signingKey,wrappingKey:grant.wrappingKey,issuerDeviceId:null,keyEpoch:1,stage:'put-key-package',
+  payloadDigest,rosterDigest:head,witnessHead:{revision:1,digest:head},expiresAt:now+60});
+ const target={canonical:exact,signature:sign(exact,keys.signingPrivate)};
+ const receipt=canonicalContinuationReceipt({version:1,domain:'AgentKeychain-enrollment-continuation-approval-v1',intentDigest:await digest(exact),authorityKeyId:'approval',approvedAt:now,expiresAt:now+60});
+ const approval={canonical:receipt,signature:sign(receipt,auth.privateKey)};
+ const w=JSON.stringify({version:1,keyId:'witness',accountId:'a',tenantId:'t',vaultId:'v',event:1,revision:1,digest:head,sequence:0,root:await digest('root'),checkpointDigest:await digest('cp')});
+ const witness={canonical:w,signature:sign(WITNESS_DOMAIN+w,witnessKey.privateKey)};
+ const nonce=newContinuationReadbackNonce();
+ const f=JSON.stringify({domain:CONTINUATION_HEAD_DOMAIN,keyId:'witness',nonce,requestId:grant.requestId,
+  witnessDigest:await digest(JSON.stringify([w,witness.signature])),approvalDigest:await digest(JSON.stringify([receipt,approval.signature])),
+  payloadDigest,issuedAt:now,expiresAt:now+30});
+ const freshHead={canonical:f,signature:sign(f,witnessKey.privateKey)};
+ const input={grant,target,approval,authorityAppendix,witness,freshHead,roster,keyPackage};
+ const db=new Database(':memory:'),store=new CloudStore(db,keys.csk);
+ try{
+  await protectEnrollmentKeys(secure,keys);
+  store.put('state','pending',{requestId:grant.requestId,deviceId:grant.deviceId});
+  store.put('state','pending-approved',{requestId:grant.requestId,deviceId:grant.deviceId,vaultId:grant.vaultId});
+  store.put('state','pending-self-roster',roster);store.put('state','pending-package',keyPackage);
+  const before=await secure.get('enrollment-intent');
+  await verifyGenesisContinuationPreflight(secure,store,policy,nonce,input);
+  expect(store.get('state','enrollment')).toBeNull();
+  expect(Buffer.from((await secure.get('enrollment-intent'))!).equals(Buffer.from(before!))).toBe(true);
+  await expect(verifyGenesisContinuationPreflight(secure,store,policy,newContinuationReadbackNonce(),input)).rejects.toThrow('cloud_invalid_continuation_readback');
+  await expect(verifyGenesisContinuationPreflight(secure,store,policy,nonce,{...input,authorityAppendix:{canonical:appendix,signature:sign(appendix,auth.privateKey)}})).rejects.toThrow('invalid_continuation_authority_pin');
+  await expect(verifyGenesisContinuationPreflight(secure,store,policy,nonce,{...input,grant:{...grant,keyEpoch:2}})).rejects.toThrow('cloud_enrollment_intent_conflict');
+  // An out-of-band preflight never exempts the old activation contract.
+  const enrollment={accountId:grant.accountId,tenantId:grant.tenantId,vaultId:grant.vaultId,deviceId:grant.deviceId,keyEpoch:grant.keyEpoch,
+   signingPublic:grant.signingKey,wrappingPublic:grant.wrappingKey,vdk:b64(keys.vdk),roster:trust.roster,
+   checkpointKeys:policy.checkpointKeys,releaseId:policy.releaseId,apiOrigin:policy.apiOrigin};
+  await prepareEnrollmentActivation(secure,store,keys,{enrollment,signedRoster:roster,evidence:{grant,keyPackage,witness,acceptedAt:now}});
+  await expect(resumeEnrollmentActivation(secure,store,policy)).rejects.toThrow('cloud_enrollment_intent_conflict');
+  expect(store.get('state','enrollment')).toBeNull();
+  before?.fill(0);
+ }finally{destroyCloudKeys(keys);store.destroy();db.close();}
+});

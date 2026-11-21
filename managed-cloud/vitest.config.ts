@@ -29,7 +29,7 @@ export default defineConfig({
                     })],
             },
             {
-                test: { name: 'custodian', include: ['tests/custodian.spec.ts','tests/genesis-admission.spec.ts'] },
+                test: { name: 'custodian', include: ['tests/custodian.spec.ts','tests/genesis-admission.spec.ts','tests/continuation-fresh-head.spec.ts'] },
                 plugins: [cloudflareTest({
                         main: 'recovery-worker/index.ts', remoteBindings: false,
                         miniflare: {
