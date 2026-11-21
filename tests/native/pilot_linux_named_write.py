@@ -86,6 +86,8 @@ class HeldKeyrings:
         self.path.mkdir(mode=0o700)
         self.dirfd = os.open(self.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         self._sidecar = None
+        self._before_unlock = None
+        self._after_unlock = None
         try:
             self.identity = self._row()
             require(not os.listdir(self.dirfd))
@@ -177,46 +179,116 @@ class HeldKeyrings:
                 else:
                     mark("unexpected-multiple-extra-leaves")
             require(False)
-        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
         mark("exact-leaf-open")
-        fd = os.open(LEAF, flags, dir_fd=self.dirfd)
+        fd = self._open_named()
         try:
-            row = os.fstat(fd)
-            mark("leaf-metadata-type-owner")
-            require(stat.S_ISREG(row.st_mode) and row.st_uid == os.getuid())
-            mark("leaf-metadata-mode")
-            require(stat.S_IMODE(row.st_mode) == 0o600)
-            mark("leaf-metadata-link")
-            require(row.st_nlink == 1)
-            mark("leaf-size-bound")
-            require(len(GNOME_BINARY) < row.st_size <= 1024 * 1024)
-            mark("leaf-read-bound")
-            chunks = bytearray()
-            while len(chunks) < row.st_size:
-                block = os.read(fd, row.st_size - len(chunks))
-                require(block)
-                chunks.extend(block)
-            require(not os.read(fd, 1))
-            mark("leaf-binary-header")
-            require(chunks.startswith(GNOME_BINARY))
-            if absent_marker is not None:
-                mark("leaf-plaintext-marker-denied")
-                require(absent_marker not in chunks)
-            mark("leaf-identity-stable")
-            visible = os.stat(LEAF, dir_fd=self.dirfd, follow_symlinks=False)
-            require(self._row() == self.identity and
-                    (row.st_dev, row.st_ino, row.st_size, row.st_mtime_ns) ==
-                    (visible.st_dev, visible.st_ino, visible.st_size, visible.st_mtime_ns))
+            seen = self._snapshot_named(fd, absent_marker, mark, 1)
+            self._assert_named_visible(fd, mark)
             if self._sidecar is not None:
                 self._check_pinned_sidecar(mark)
-            return row.st_dev, row.st_ino, row.st_size, row.st_mtime_ns, hashlib.sha256(chunks).digest()
+            if self._after_unlock is not None:
+                self._verify_unlock_files(seen, absent_marker, mark)
+            return seen
         finally:
             os.close(fd)
 
-    def close(self):
+    def _open_named(self):
+        return os.open(LEAF, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=self.dirfd)
+
+    def _snapshot_named(self, fd, absent_marker, mark, links):
+        row = os.fstat(fd)
+        mark("leaf-metadata-type-owner")
+        require(stat.S_ISREG(row.st_mode) and row.st_uid == os.getuid())
+        mark("leaf-metadata-mode")
+        require(stat.S_IMODE(row.st_mode) == 0o600)
+        mark("leaf-metadata-link")
+        require(row.st_nlink == links)
+        mark("leaf-size-bound")
+        require(len(GNOME_BINARY) < row.st_size <= 1024 * 1024)
+        mark("leaf-read-bound")
+        chunks = bytearray()
+        while len(chunks) < row.st_size:
+            block = os.pread(fd, row.st_size - len(chunks), len(chunks))
+            require(block)
+            chunks.extend(block)
+        require(not os.pread(fd, 1, len(chunks)))
+        mark("leaf-binary-header")
+        require(chunks.startswith(GNOME_BINARY))
+        if absent_marker is not None:
+            mark("leaf-plaintext-marker-denied")
+            require(absent_marker not in chunks)
+        mark("leaf-stable-read")
+        require(self._sidecar_identity(row) == self._sidecar_identity(os.fstat(fd)))
+        return row.st_dev, row.st_ino, row.st_size, row.st_mtime_ns, hashlib.sha256(chunks).digest()
+
+    def _assert_named_visible(self, fd, mark):
+        mark("leaf-identity-stable")
+        row = os.fstat(fd)
+        visible = os.stat(LEAF, dir_fd=self.dirfd, follow_symlinks=False)
+        require(self._row() == self.identity and self._sidecar_identity(row) == self._sidecar_identity(visible))
+
+    def pin_locked_original(self, expected, marker, mark):
+        mark("one-original-before-unlock")
+        require(self._sidecar is None and self._before_unlock is None and
+                self._after_unlock is None and os.listdir(self.dirfd) == [LEAF])
+        fd = self._open_named()
         try:
-            if self._sidecar is not None:
-                os.close(self._sidecar[0])
-                self._sidecar = None
+            require(self._snapshot_named(fd, marker, mark, 1) == expected)
+            self._assert_named_visible(fd, mark)
+        except BaseException:
+            os.close(fd)
+            raise
+        self._before_unlock = fd, expected
+
+    def pin_authenticated_unlock_replacement(self, marker, mark):
+        mark("one-replacement-after-unlock")
+        require(self._before_unlock is not None and self._after_unlock is None and self._sidecar is not None)
+        old_fd, original = self._before_unlock
+        # GNOME 46.1 explicitly persists the collection credential options
+        # after the public unlock. Its transaction atomically replaces the
+        # file and the binary serializer chooses fresh encryption parameters.
+        mark("original-detached")
+        require(os.fstat(old_fd).st_nlink == 0 and self._snapshot_named(old_fd, marker, mark, 0) == original)
+        fd = self._open_named()
+        try:
+            new = self._snapshot_named(fd, marker, mark, 1)
+            self._assert_named_visible(fd, mark)
+            self._check_pinned_sidecar(mark)
+            mark("single-same-size-encrypted-replacement")
+            require(new[0] == original[0] and new[1] != original[1] and
+                    new[2] == original[2] and new[4] != original[4])
+            recorded = new, self._sidecar_identity(os.fstat(fd))
+        except BaseException:
+            os.close(fd)
+            raise
+        self._after_unlock = fd, recorded
+        return new
+
+    def _verify_unlock_files(self, observed, marker, mark):
+        old_fd, original = self._before_unlock
+        new_fd, (expected, metadata) = self._after_unlock
+        mark("original-still-detached")
+        require(self._snapshot_named(old_fd, marker, mark, 0) == original)
+        current = self._snapshot_named(new_fd, marker, mark, 1)
+        self._assert_named_visible(new_fd, mark)
+        mark("replacement-still-pinned")
+        require(current == observed == expected and self._sidecar_identity(os.fstat(new_fd)) == metadata)
+
+    def close(self):
+        def drop(field):
+            value = getattr(self, field)
+            if value is not None:
+                try:
+                    os.close(value[0])
+                finally:
+                    setattr(self, field, None)
+        try:
+            drop("_after_unlock")
         finally:
-            os.close(self.dirfd)
+            try:
+                drop("_before_unlock")
+            finally:
+                try:
+                    drop("_sidecar")
+                finally:
+                    os.close(self.dirfd)

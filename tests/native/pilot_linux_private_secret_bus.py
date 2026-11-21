@@ -804,6 +804,11 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                         phase = "named-reopen-read-denied-while-locked"
                         require_locked_item_denial(conn, owner, encrypted_session, named, fixture)
                         unchanged_named_file(held, fixture.marker, fixture.snapshot, "named-reopen-while-locked-file")
+                        def mark_before_unlock(label):
+                            global phase
+                            phase = "named-reopen-before-unlock-" + label
+
+                        held.pin_locked_original(fixture.snapshot, fixture.marker, mark_before_unlock)
                         phase = "named-reopen-exact-unlock-offer"
                         offer = offer_collection_unlock(conn, owner, named)
                     else:
@@ -842,9 +847,12 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                             phase = "named-reopen-after-unlock-" + label
 
                         held.pin_empty_unlocked_sidecar(mark_sidecar)
-                        unchanged_named_file(held, fixture.marker, fixture.snapshot, "named-reopen-after-unlock-file")
+                        observed = held.pin_authenticated_unlock_replacement(fixture.marker, mark_sidecar)
+                        # After the authorized replacement no further file
+                        # replacement is allowed during read or shutdown.
+                        unchanged_named_file(held, fixture.marker, observed, "named-reopen-after-unlock-file")
                         read_fixture_item(conn, owner, encrypted_session, named, fixture)
-                        final_file = unchanged_named_file(held, fixture.marker, fixture.snapshot, "named-reopen-after-read-file")
+                        final_file = unchanged_named_file(held, fixture.marker, observed, "named-reopen-after-read-file")
                     else:
                         phase = "named-created-file-no-alias"
                         before = held.read_exact()
