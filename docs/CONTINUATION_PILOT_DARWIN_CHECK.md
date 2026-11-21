@@ -102,3 +102,51 @@ or state writes. On success it returns only
    protocol, privacy review of exact allowed secret slots, Linux/Darwin
    native persistence review, and separate SQLite and hosted transport
    gates. Until then this companion cannot unlock activation/sync.
+
+### Proposed two-architecture signed-wire rehearsal
+
+After independent review, use a fresh same-repo disposable runner job on
+`macos-15` and `macos-15-intel`, exact signed source checkout and pinned Bun,
+contents-read-only, no saved or imported credentials, no fixture cache,
+no uploads and a fixed job deadline. Invoke the standalone orchestrator
+only, not the regular CLI. Pass the fixed reviewed matrix architecture
+(`arm64` on macos-15 or `x86_64` on macos-15-intel), never infer it from
+the running interpreter:
+
+```sh
+AKC_EXPECTED_DARWIN_ARCH=arm64 AKC_SIGNED_WIRE_REHEARSAL=private-fixture-only-v1 \
+  bun tests/native/pilot_darwin_signed_wire.ts
+```
+
+The driver requires Darwin host uname, native Bun target and exact
+single-arch lipo results; the native provisioner independently denies
+Rosetta as determined by the process-local Apple sysctl before creation.
+It generates ephemeral installation and operator authority keypairs in
+process memory; uses an internal mode of the already reviewed synthetic
+provisioner and consumes only its captured private metadata pipe; builds the
+companion with its existing Xcode-pinned build tool. Never run the fixture
+metadata mode in a command that logs stdout. An empty isolated install tree
+is scoped to the trusted disposable fixture creator, not a threat boundary
+against another process with its UID.
+
+The driver ad-hoc signs the newly built fixture listener-free executable,
+checks its complete bytes against a separately signed helper hash and
+checks `codesign --verify --strict` before each same-path invocation. This
+proves local artifact and tool integrity on the clean runner, not publisher
+identity, a race-free exec primitive or production provenance. The
+appendix is verified separately by the driver against the installed
+contract; the native companion itself verifies the location wire grant.
+The driver validates the still-current separately signed helper appendix
+before every launch and again after a successful result. Synthetic cases
+cover exact sorted wire success, mismatched actual fixture bytes hashed
+through a no-follow descriptor (rejected by the TS hash contract without
+executing those bytes), wrong signing authority, stale native grant, wrong
+namespace, absent fixed file in a separately created empty private
+directory, wrong signed inode from a different genuine sibling, and a
+repeat success with the unchanged original identity. The two identity
+negatives do not move, restore, overwrite, or unlink any Keychain file;
+they do not claim testing a physical replacement sequence. The independent
+configuration digests are compared in a finally block even if an ordinary
+fixture/test operation fails. If a provisioned fixture does not remain
+unlocked in the separate process, report failure; do not add an unlock or
+reopen fallback. No automatic workflow or user invocation is added here.

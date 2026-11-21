@@ -8,7 +8,7 @@ import Darwin
 
 // Closed enumeration only: do not reflect Error descriptions or arguments.
 enum GatePhase: String {
- case argumentShape, runnerUID, runnerGitHub, runnerHosted, fixtureMode, rootCanonical, rootIdentity, scratchCanonical
+ case argumentShape, runnerUID, runnerGitHub, runnerHosted, runnerArchitecture, fixtureMode, rootCanonical, rootIdentity, scratchCanonical
  case canonicalLookup, ancestorStat, ancestorIdentity, ancestorSticky, ancestorModes, rootCreate, randomSource, randomShape
  case directoryOpen, directoryStat, childStat
  case snapshotSearch, snapshotSearchDecode, snapshotDefault, snapshotDefaultDecode
@@ -367,9 +367,26 @@ func run() throws {
  try require(env["GITHUB_ACTIONS"] == "true", .runnerGitHub)
  try require(env["RUNNER_ENVIRONMENT"] == "github-hosted", .runnerHosted)
  let argument = CommandLine.arguments[1]
- let provision = argument == "--provision-disposable"
- let marker = provision ? "create-two-private-keychains-v1" : "explicit-two-keychains-v1"
+ let wireFixture = argument == "--provision-readonly-wire-fixture"
+ let provision = argument == "--provision-disposable" || wireFixture
+ let marker = wireFixture ? "private-readonly-wire-fixture-v1" :
+   (provision ? "create-two-private-keychains-v1" : "explicit-two-keychains-v1")
  try require(env["AKC_DISPOSABLE_DARWIN_FIXTURE"] == marker, .fixtureMode)
+ if wireFixture {
+  // Apple's documented process-local Rosetta check. ENOENT is only accepted
+  // for the Intel fixture path where the feature key can be absent.
+  var translated: Int32 = 0
+  var translatedSize = MemoryLayout<Int32>.size
+  let translationStatus = sysctlbyname("sysctl.proc_translated", &translated, &translatedSize, nil, 0)
+  let translationErrno = errno
+  #if arch(x86_64)
+  let nativelyRunning = (translationStatus == 0 && translated == 0) ||
+    (translationStatus == -1 && translationErrno == ENOENT)
+  #else
+  let nativelyRunning = translationStatus == 0 && translated == 0
+  #endif
+  try require(nativelyRunning, .runnerArchitecture)
+ }
  let before = try snapshot()
  func requireCanonicalRoot(_ path: String) throws {
   let leaf = path.split(separator: "/").last.map { String($0) } ?? ""
@@ -388,6 +405,21 @@ func run() throws {
  try requireCanonicalRoot(root)
  let named = try privateMetadata(root, directory: true, phase: .rootIdentity)
  try require(sameIdentity(named, try statDirectory(location.fd)), .rootIdentity)
+ if wireFixture {
+  // The parent test driver captures this private pipe. Never call this mode
+  // in a log-producing shell pipeline; it is not a human-facing status.
+  let leaf = "pilot-primary.keychain-db"
+  let file = try fixtureMetadata(directory: location.fd, name: leaf, path: root + "/" + leaf)
+  let alternateLeaf = "pilot-sibling.keychain-db"
+  let alternate = try fixtureMetadata(directory: location.fd, name: alternateLeaf, path: root + "/" + alternateLeaf)
+  try require(file.st_dev == alternate.st_dev && file.st_ino != alternate.st_ino, .fixturePairDistinct)
+  try require(try snapshot() == before, .finalSnapshot)
+  let output: [String: String] = ["directory": root, "directoryDevice": String(named.st_dev),
+   "directoryInode": String(named.st_ino), "fileDevice": String(file.st_dev), "fileInode": String(file.st_ino),
+   "siblingInode": String(alternate.st_ino)]
+  FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: output, options: [.sortedKeys, .withoutEscapingSlashes]))
+  return
+ }
  var aliases = Set<String>()
  for configured in before where !configured.isEmpty {
   aliases.insert(configured)
