@@ -298,3 +298,35 @@ test('Darwin scoped native candidate accepts only a same-install signed helper h
  }
  await expect(verifyDarwinPilotNativeInputs({...gate},input)).rejects.toThrow('darwin_pilot_native_candidate_denied');
 });
+
+test('Darwin package index binds exact staged bytes to this pilot, not Apple publisher provenance',async()=>{
+ const {createHash}=await import('node:crypto');
+ const {DARWIN_PILOT_PACKAGE_DOMAIN,DARWIN_PILOT_NATIVE_BINARY,DARWIN_PILOT_CLI_IDENTIFIER,
+  DARWIN_PILOT_NATIVE_IDENTIFIER,verifyDarwinPilotPackageStaging}=await import('../src/cloud/continuation-pilot-darwin-package.ts');
+ const target='darwin-arm64' as const,publisherTeamId='SYNTHETIC1',policy={target,publisherTeamId};
+ const {artifact,root,expiresAt}=await makeArtifact(target);
+ const cli=Buffer.from('synthetic CLI image'),native=Buffer.from('synthetic native image');
+ const payloads={[INSTALLED_PILOT_BINARY]:cli,[DARWIN_PILOT_NATIVE_BINARY]:native};
+ const sha=(b:Buffer)=>createHash('sha256').update(b).digest('hex');
+ const issuedAt=Math.floor(Date.now()/1000);
+ const claim={version:1,domain:DARWIN_PILOT_PACKAGE_DOMAIN,mode:'disposable-only',
+  installationDigest:await digest(JSON.stringify([artifact.installation.canonical,artifact.installation.signature])),
+  target,publisherTeamId,cliIdentifier:DARWIN_PILOT_CLI_IDENTIFIER,cliSha256:sha(cli),
+  nativeIdentifier:DARWIN_PILOT_NATIVE_IDENTIFIER,nativeSha256:sha(native),issuedAt,expiresAt};
+ const index=await root.sign(JSON.stringify(claim));
+ const check=(next=index,files:unknown=payloads,expected=policy)=>
+  verifyDarwinPilotPackageStaging(artifact,root.publicKey,next,expected,files);
+ const verified=await check();
+ expect(verified.state).toBe('staged-bytes-match-signed-index-not-authorized');
+ expect(Object.isFrozen(verified)).toBe(true);
+ const denied='darwin_pilot_package_denied';
+ await expect(check(index,{...payloads,agentkeychain:cli})).rejects.toThrow(denied);
+ await expect(check(index,{...payloads,[DARWIN_PILOT_NATIVE_BINARY]:Buffer.from('changed')})).rejects.toThrow(denied);
+ await expect(check(index,payloads,{...policy,publisherTeamId:'DIFFERENT1'})).rejects.toThrow(denied);
+ await expect(check(await root.sign(JSON.stringify({...claim,expiresAt:issuedAt-1})))).rejects.toThrow(denied);
+ await expect(check(await root.sign(JSON.stringify({...claim,expiresAt:expiresAt+1})))).rejects.toThrow(denied);
+ await expect(check(await root.sign(JSON.stringify({...claim,installationDigest:'0'.repeat(64)})))).rejects.toThrow(denied);
+ await expect(check(await root.sign(JSON.stringify({...claim,nativeIdentifier:DARWIN_PILOT_CLI_IDENTIFIER})))).rejects.toThrow(denied);
+ await expect(check(await (await authority()).sign(JSON.stringify(claim)))).rejects.toThrow(denied);
+ await expect(check(await root.sign(JSON.stringify(claim,null,2)))).rejects.toThrow(denied);
+});
