@@ -62,7 +62,7 @@ Sam will not cooperate with repeated login/Passkey attempts. First complete synt
 ### P0 — security review of new fixes
 
 - Review Web step-up reuse: action digest, account/tenant/session binding, membership recheck, attempts, CSRF, rate limits, session rotation and atomic consumption; compare to normal step-up route.
-- Review `GENESIS_AUTH`: TypeScript `Pick<>` is not runtime RPC isolation. Current binding targets full `RecoveryAuthority`; consider purpose-specific entrypoint. No widening of recovery authority based solely on Main DB claims. Establish exactly what independent genesis evidence is required.
+- Review `GENESIS_AUTH`: the local repair replaces access to full `RecoveryAuthority` with a dedicated `RosterGenesisAuthority` entrypoint. This only narrows the RPC surface; it still relies on Main D1 enrollment. Independent genesis evidence is an unresolved release gate. Do not widen recovery authority based on Main DB claims.
 - Review dual-origin canonical/signature verification, retained pins/operator ownership, manifest/root pairing, actual release policy and local compiled binary/helper coherence.
 - Replace error-message regex logging with a fixed safe allowlist if arbitrary error names/messages could reveal metadata. Do not output request bodies, signatures or identifiers.
 

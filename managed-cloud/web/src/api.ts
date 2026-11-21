@@ -5,6 +5,9 @@ const routes = new Set(['email/request', 'bootstrap', 'session', 'authentication
 export class ApiError extends Error {
     constructor(public status: number) { super('Request failed'); }
 }
+export class PasskeyIncompleteError extends Error {
+    constructor() { super('Passkey confirmation did not finish'); }
+}
 let activityReceipt: string | 0 = 0;
 export async function api<T = Record<string, unknown>>(route: string, body?: unknown): Promise<T> {
     if (!routes.has(route))
@@ -54,7 +57,7 @@ export async function passkey(options: Record<string, unknown>, registration = f
                 }[]).map(c => ({ ...c, id: decode(c.id) })) } as PublicKeyCredentialRequestOptions }) as PublicKeyCredential | null;
     }
     if (!credential)
-        throw new Error('Cancelled');
+        throw new PasskeyIncompleteError();
     const r = credential.response;
     return { id: credential.id, rawId: encode(credential.rawId), type: 'public-key', clientExtensionResults: credential.getClientExtensionResults(), authenticatorAttachment: credential.authenticatorAttachment ?? undefined, response: registration ? { clientDataJSON: encode(r.clientDataJSON), attestationObject: encode((r as AuthenticatorAttestationResponse).attestationObject), transports: (r as AuthenticatorAttestationResponse).getTransports?.() ?? [] } : { clientDataJSON: encode(r.clientDataJSON), authenticatorData: encode((r as AuthenticatorAssertionResponse).authenticatorData), signature: encode((r as AuthenticatorAssertionResponse).signature), userHandle: (r as AuthenticatorAssertionResponse).userHandle ? encode((r as AuthenticatorAssertionResponse).userHandle!) : null } };
 }

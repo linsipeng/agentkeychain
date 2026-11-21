@@ -19,6 +19,7 @@ let requestComplete = true;
 let session = true;
 let authAccepted = true;
 let recoveryState = 'prepared';
+let actionFailure: { route: string; status: number } | undefined;
 const device = () => ({ id: 'device-one', active: deviceActive, status: deviceActive ? deviceStatus : 'removed', lastDevice,recoveryReady,revocationComplete:!deviceActive&&removalComplete,removeRef: deviceActive&&(!lastDevice||recoveryReady) ? 'remove-reference' : null });
 const request = () => ({ id: 'request-one', action: 'delete', state: requestState, deviceId: 'device-one', itemRef: 'item-one', createdAt: 1700000000, expiresAt: 1999999999, canAllow: requestComplete && requestState === 'pending', allowRef: requestComplete ? 'allow-reference' : null, denyRef: 'deny-reference' });
 const event = { id: 'event-one', category: 'device', action: 'approved', createdAt: 1700000000, deviceId: 'device-one' };
@@ -33,10 +34,13 @@ beforeEach(() => {
     session = true;
     authAccepted = true;
     recoveryState = 'prepared';
+    actionFailure = undefined;
     document.cookie = '__Host-akc_csrf=synthetic; Secure; Path=/';
     vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
         const route = url.replace('/v1/auth/', ''), body = init.body ? JSON.parse(init.body as string) : {};
         calls.push({ route, body });
+        if (actionFailure?.route === route)
+            return Response.json({ error: { message: 'synthetic internal diagnostic' } }, { status: actionFailure.status });
         if (fail && route === 'web/query')
             return Response.json({ error: {} }, { status: 503 });
         if (route === 'session')
@@ -101,6 +105,44 @@ test.each(paths)('route %s has one heading and zero serious/critical axe finding
 });
 test('missing request details disable allow; no batch approval exists', async () => { requestComplete = false; mount('/app/requests/request-one'); await screen.findByText('Some details are missing. You cannot allow this request. Review it on your device.'); expect((screen.getByRole('button', { name: 'Allow once' }) as HTMLButtonElement).disabled).toBe(true); expect(screen.queryByRole('checkbox')).toBeNull(); });
 test.each(['Allow once', 'Don’t allow'])('%s performs exact step-up then mutation and authoritative readback', async (name) => { mount('/app/requests/request-one'); const user = userEvent.setup(); await user.click(await screen.findByRole('button', { name })); const dialog = screen.getByRole('dialog'); await user.click(within(dialog).getByRole('button', { name: 'Confirm' })); await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull()); const relevant = calls.filter(c => ['web/options', 'web/verify', 'web/execute'].includes(c.route)); expect(relevant.map(c => c.route)).toEqual(['web/options', 'web/verify', 'web/execute']); expect(new Set(relevant.map(c => c.body.ref)).size).toBe(1); expect(calls.filter(c => c.route === 'web/query' && c.body.view === 'request').length).toBeGreaterThan(1); });
+test.each([
+    ['web/options', 503, 'Confirmation is temporarily unavailable. Close this dialog and check the request later.', 0],
+    ['web/options', 404, 'The request changed or is no longer available. Review it again.', 0],
+    ['web/execute', 503, 'The result could not be confirmed. Close this dialog and check the latest status before trying again.', 1],
+] as const)('separates %s status %s from other failures without replay', async (route, status, message, executes) => {
+    actionFailure = { route, status };
+    mount('/app/requests/request-one');
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Allow once' }));
+    const dialog = within(screen.getByRole('dialog'));
+    const confirm = dialog.getByRole('button', { name: 'Confirm' }) as HTMLButtonElement;
+    await user.click(confirm);
+    expect((await dialog.findByRole('alert')).textContent).toBe(message);
+    expect(confirm.disabled).toBe(true);
+    await user.click(confirm);
+    expect(calls.filter(c => c.route === 'web/execute')).toHaveLength(executes);
+    expect(screen.queryByText('synthetic internal diagnostic')).toBeNull();
+});
+test('leaves a sign-in notice after the approval session is rejected', async () => {
+    actionFailure = { route: 'web/options', status: 401 };
+    mount('/app/requests/request-one');
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Allow once' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Confirm' }));
+    await screen.findByText('Sign in again before continuing.');
+    expect(calls.filter(c => c.route === 'web/execute')).toHaveLength(0);
+});
+test('an interrupted passkey prompt does not verify or execute the action', async () => {
+    vi.mocked(navigator.credentials.get).mockRejectedValueOnce(new DOMException('synthetic browser detail', 'NotAllowedError'));
+    mount('/app/requests/request-one');
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Allow once' }));
+    const dialog = within(screen.getByRole('dialog'));
+    await user.click(dialog.getByRole('button', { name: 'Confirm' }));
+    await dialog.findByText('Passkey confirmation did not finish. No action was submitted. Close this dialog to try again when ready.');
+    expect(calls.filter(c => ['web/verify', 'web/execute'].includes(c.route))).toHaveLength(0);
+    expect(screen.queryByText('synthetic browser detail')).toBeNull();
+});
 test('device removal requires confirmation and server readback before removed state', async () => { mount('/app/devices/device-one'); const user = userEvent.setup(); await user.click(await screen.findByRole('button', { name: 'Remove device' })); expect(deviceActive).toBe(true); await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Confirm' })); await screen.findByText('Device removal confirmed.'); expect(calls.filter(c => c.body.view === 'device').length).toBeGreaterThan(1); });
 test('pair phrase mismatch disables confirmation', async () => { mount('/app/devices/add'); const user = userEvent.setup(); await user.type(await screen.findByLabelText('Code from your device'), 'abc123abc123'); await user.click(screen.getByRole('button', { name: 'Open' })); await screen.findByText('amber birch cloud'); expect((screen.getByRole('button', { name: 'Confirm' }) as HTMLButtonElement).disabled).toBe(true); await user.click(screen.getByRole('checkbox')); expect((screen.getByRole('button', { name: 'Confirm' }) as HTMLButtonElement).disabled).toBe(false); });
 test('activity verification failure persists on home and requests', async () => { verification = 'failed'; mount('/app'); await screen.findByText('Activity could not be verified. Do not rely on these records until verification succeeds.'); const user = userEvent.setup(); await user.click(screen.getAllByRole('link', { name: 'Requests' })[0]); await screen.findByText('Activity could not be verified. Do not rely on these records until verification succeeds.'); });

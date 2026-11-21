@@ -16,7 +16,7 @@ export function manifests(input){
  return Object.fromEntries(Object.entries(plan.workers).map(([folder,name])=>{
   const config={name,main:`../../${folder}/index.ts`,compatibility_date:plan.compatibilityDate,compatibility_flags:plan.compatibilityFlags,workers_dev:false,preview_urls:false,observability:{enabled:false}};
   if(folder==='api-worker')Object.assign(config,{routes:[webDomain,apiDomain].map(pattern=>({pattern,custom_domain:true})),d1_databases:[db('MAIN','main',main,'api-worker')],services:[service('RECOVERY','recovery-worker','Custodian'),service('EMAIL_VERIFIER','auth-trust-worker','EmailVerifier'),service('TRUSTED_AUTH_SOURCE','auth-trust-worker','TrustedAuthSource'),service('CHECKPOINT_SIGNER','api-trust-worker','CheckpointSigner'),a('api-trust-worker'),k('api-trust-worker'),r('api-trust-worker'),service('RECOVERY_ACCOUNT_ATTESTER','api-trust-worker','AccountAttester')],vars:{AUTH_ORIGIN:'https://'+webDomain,DEVICE_API_ORIGIN:'https://'+apiDomain,AUTH_RP_ID:webDomain},assets:{directory:'../../web/dist',binding:'ASSETS',run_worker_first:true,not_found_handling:'single-page-application'}});
-  if(folder==='recovery-worker')Object.assign(config,{d1_databases:[db('CUSTODIAN','custodian',custodian,'recovery-worker')],services:[a('custody-trust-worker'),service('GENESIS_AUTH','api-trust-worker','RecoveryAuthority'),k('custody-trust-worker'),r('custody-trust-worker'),service('ROSTER_WITNESS_SIGNER','custody-trust-worker','RosterWitnessSigner'),service('RECOVERY_TRUST_SIGNER','custody-trust-worker','RecoveryTrustSigner'),service('RECOVERY_TRUST_POLICY','custody-trust-worker','RecoveryTrustPolicy')]});
+  if(folder==='recovery-worker')Object.assign(config,{d1_databases:[db('CUSTODIAN','custodian',custodian,'recovery-worker')],services:[a('custody-trust-worker'),service('GENESIS_AUTH','api-trust-worker','RosterGenesisAuthority'),k('custody-trust-worker'),r('custody-trust-worker'),service('ROSTER_WITNESS_SIGNER','custody-trust-worker','RosterWitnessSigner'),service('RECOVERY_TRUST_SIGNER','custody-trust-worker','RecoveryTrustSigner'),service('RECOVERY_TRUST_POLICY','custody-trust-worker','RecoveryTrustPolicy')]});
   if(folder==='auth-trust-worker')Object.assign(config,{d1_databases:[db('AUTH','auth',auth,'auth-trust-worker')],send_email:[{name:'EMAIL'}],triggers:{crons:['17 * * * *']},vars:{EMAIL_FROM:emailFrom}});
   if(folder==='api-trust-worker')Object.assign(config,{d1_databases:[db('TRUST_DB','main',main,'api-worker')]});
   if(folder==='custody-trust-worker')Object.assign(config,{d1_databases:[db('TRUST_DB','custodian',custodian,'recovery-worker')]});
@@ -27,6 +27,10 @@ export function validate(config){
  if(!Object.values(plan.workers).includes(config.name)||config.workers_dev!==false||config.preview_urls!==false||config.compatibility_date!==plan.compatibilityDate||JSON.stringify(config.compatibility_flags)!==JSON.stringify(['nodejs_compat']))throw new Error('invalid_worker_plan');
  if(config.name!==plan.workers['api-worker']&&config.routes?.length)throw new Error('private_worker_route');
  for(const s of config.services??[])if(!Object.values(plan.workers).includes(s.service)||!s.entrypoint)throw new Error('invalid_service');
+ const genesis=(config.services??[]).filter(s=>s.binding==='GENESIS_AUTH');
+ if(config.name===plan.workers['recovery-worker']?
+    genesis.length!==1||genesis[0].service!==plan.workers['api-trust-worker']||genesis[0].entrypoint!=='RosterGenesisAuthority':
+    genesis.length!==0)throw new Error('invalid_genesis_binding');
  if(/PLACEHOLDER|REPLACE_ME|\$\{|00000000-0000/.test(JSON.stringify(config)))throw new Error('unresolved_placeholder');
 }
 export function validateReleaseOwnership(release,peer){

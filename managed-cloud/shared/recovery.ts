@@ -50,11 +50,14 @@ export interface RecoveryEvidence {
  * inferred from the other service's result. Providers must bind the exact bytes. */
 export interface RecoveryAuthority {
     rosterRevocation?(canonical:string):Promise<boolean>;
-    rosterGenesis?(roster:import('../../src/cloud/protocol.ts').SignedManagedOperation):Promise<boolean>;
     cancel(canonical: string, authorization: CancelAuthorization): Promise<boolean>;
     complete(canonical: string, proof: string, signature: string): Promise<boolean>;
     enrollment(canonical: string, signature: string): Promise<boolean>;
     authorize(canonical: string, evidence: RecoveryEvidence): Promise<boolean>;
+}
+/** Validates initial roster enrollment against API Main; not independent evidence. */
+export interface RosterGenesisAuthority {
+    rosterGenesis(roster:import('../../src/cloud/protocol.ts').SignedManagedOperation):Promise<boolean>;
 }
 export interface RecoveryKeys {
     key(): Promise<{

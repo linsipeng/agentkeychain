@@ -34,13 +34,28 @@ test('human-authenticated bundle binds request, keys, issuer, roster, release pi
   expect(()=>selfAnchor(request,b,policy,false)).toThrow();
   expect(selfAnchor({...request,issuerDeviceId:null},b,policy,true).roster[0]?.publicKey).toBe(b64(b.signingPublic));
 });
-test('replacement authorization discards request-specific packages and self trust',async()=>{
+test('replacement authorization can replace an unapproved request while retaining protected keys',async()=>{
  const {Database}=await import('bun:sqlite'),{CloudStore}=await import('../src/cloud/persistence.ts'),{replaceEnrollmentRequest}=await import('../src/cloud/login.ts');
  const db=new Database(':memory:'),keys=await createCloudKeys(),store=new CloudStore(db,keys.csk);
- for(const id of ['pending','pending-package','pending-self-roster'])store.put('state',id,{old:true});
- store.put('state','pending-keys',{retained:true});
- replaceEnrollmentRequest(store,{requestId:'new'});
- expect(store.get('state','pending')).toEqual({requestId:'new'});expect(store.get('state','pending-package')).toBeNull();expect(store.get('state','pending-self-roster')).toBeNull();expect(store.get('state','pending-keys')).toEqual({retained:true});
- store.put('state','roster-current',{anchored:true});expect(()=>replaceEnrollmentRequest(store,{requestId:'another'})).toThrow('cloud_partial_activation_requires_resume');
- expect(store.get('state','pending')).toEqual({requestId:'new'});db.close();
+ try{
+  store.put('state','pending',{requestId:'old'});
+  store.put('state','pending-keys',{retained:true});
+  replaceEnrollmentRequest(store,{requestId:'new'});
+  expect(store.get('state','pending')).toEqual({requestId:'new'});
+  expect(store.get('state','pending-keys')).toEqual({retained:true});
+ }finally{store.destroy();db.close();}
+});
+test.each(['pending-approved','pending-self-roster','pending-package','roster-current','enrollment'])('preserves the same enrollment on an attempted replacement with %s',async id=>{
+ const {Database}=await import('bun:sqlite'),{CloudStore}=await import('../src/cloud/persistence.ts'),{replaceEnrollmentRequest}=await import('../src/cloud/login.ts');
+ const db=new Database(':memory:'),keys=await createCloudKeys(),store=new CloudStore(db,keys.csk);
+ try{
+  const old={requestId:'first',deviceId:'same-device',deadline:0};
+  store.put('state','pending',old);
+  store.put('state','pending-keys',{retained:true});
+  store.put('state',id,{retained:true});
+  expect(()=>replaceEnrollmentRequest(store,{requestId:'another'})).toThrow('cloud_partial_activation_requires_resume');
+  expect(store.get('state','pending')).toEqual(old);
+  expect(store.get('state',id)).toEqual({retained:true});
+  expect(store.get('state','pending-keys')).toEqual({retained:true});
+ }finally{store.destroy();db.close();}
 });

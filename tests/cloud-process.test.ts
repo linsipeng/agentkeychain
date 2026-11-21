@@ -208,13 +208,15 @@ test('compiled CLI clients enroll via HTTP, compare SAS, capture, sync, retry an
    const pending=cli(c,['cloud','login'],'enrollment-interrupt');expect(await pending.done,pending.err()).toBe(92);const expiredRequest=secondRequest!;
    const revokedIssuer=cli(b,['cloud','approve-device',expiredRequest]);expect(await revokedIssuer.done).toBe(1);
    const prepared=cli(a,['cloud','approve-device',expiredRequest],'before:/v1/devices/pairing-confirm');expect(await prepared.done,prepared.err()).toBe(94);await pause(600);
-   const {CloudStore}=await import('../src/cloud/persistence.ts');const issuerDb=new Database(join(a,'vault.db')),issuerStore=new CloudStore(issuerDb,Buffer.from(secrets.get(a+':csk')!,'base64'));const original=issuerStore.get<{sealed:string;phrase:string}>('state','issuer:'+expiredRequest)!;
+   const {CloudStore}=await import('../src/cloud/persistence.ts');const issuerDb=new Database(join(a,'vault.db')),issuerStore=new CloudStore(issuerDb,Buffer.from(secrets.get(a+':csk')!,'base64'));expect(issuerStore.get('state','issuer:'+expiredRequest)).not.toBeNull();
    const expired=cli(a,['cloud','approve-device',expiredRequest],'issuer-expired');expect(await expired.done,expired.err()).toBe(1);expect(expired.err()).toContain('cloud_authorization_expired');expect(issuerStore.get('state','issuer:'+expiredRequest)).toBeNull();
    const rejected=cli(a,['cloud','approve-device',expiredRequest]);expect(await rejected.done).toBe(1);expect(rejected.err()).toContain('cloud_issuer_request_conflict');
    const targetDb=new Database(join(c,'vault.db')),targetStore=new CloudStore(targetDb,Buffer.from(secrets.get(c+':csk')!,'base64'));const authorization=targetStore.get<Record<string,unknown>>('state','pending')!;targetStore.put('state','pending',{...authorization,deadline:0});targetStore.destroy();targetDb.close();
-   const replacement=cli(c,['cloud','login'],'enrollment-interrupt');expect(await replacement.done,replacement.err()).toBe(92);const replacementRequest=secondRequest!;expect(replacementRequest).not.toBe(expiredRequest);
-   const replacementIssuer=cli(a,['cloud','approve-device',replacementRequest],'before:/v1/devices/pairing-confirm');expect(await replacementIssuer.done,replacementIssuer.err()).toBe(94);await pause(600);const fresh=issuerStore.get<{sealed:string;phrase:string}>('state','issuer:'+replacementRequest)!;expect(fresh.sealed).not.toBe(original.sealed);expect(fresh.phrase).not.toBe(original.phrase);
-   await control('deny-device',{requestId:replacementRequest});const cleanup=cli(c,['cloud','login']);expect(await cleanup.done).toBe(1);expect(cleanup.err()).toContain('cloud_authorization_denied');issuerStore.destroy();issuerDb.close();
+   const retry=cli(c,['cloud','login'],'enrollment-interrupt');expect(await retry.done,retry.err()).toBe(1);expect(retry.err()).toContain('cloud_enrollment_expired_requires_reconcile');
+   expect(secondRequest as string|null).toBe(expiredRequest);
+   const retainedDb=new Database(join(c,'vault.db')),retained=new CloudStore(retainedDb,Buffer.from(secrets.get(c+':csk')!,'base64'));
+   expect(retained.get('state','pending')).toEqual({...authorization,deadline:0});
+   retained.destroy();retainedDb.close();issuerStore.destroy();issuerDb.close();
   }
   const scan=(directory:string)=>{for(const entry of readdirSync(directory,{withFileTypes:true})){const path=join(directory,entry.name);if(entry.isDirectory())scan(path);else if(entry.isFile()){const bytes=readFileSync(path);for(const forbidden of [legacyValue,value,automaticValue])expect(bytes.includes(Buffer.from(forbidden))).toBe(false);}}};scan(root);
   const intact=new Database(join(a,'vault.db'),{readonly:true});const beforeMissingKey=JSON.stringify(intact.query('SELECT * FROM cloud_state ORDER BY id').all());intact.close();

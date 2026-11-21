@@ -75,7 +75,7 @@ export async function resumeEnrollmentActivation(secure:SecureStore,store:CloudS
  await store.checkAnchor(secure,anchor,[anchor],true);
  store.transaction(()=>{
   store.put('state','enrollment',e);store.put('state','cursor',{...anchor,requiredThrough:0});
-  for(const id of ['pending','pending-keys','pending-package','pending-self-roster','enrollment-intent'])store.remove('state',id);
+  for(const id of ['pending','pending-keys','pending-approved','pending-package','pending-self-roster','enrollment-intent'])store.remove('state',id);
   store.put('state','health',{state:'idle'});for(const device of e.roster)store.put('pins',device.deviceId,device);
  });
  await secure.remove('enrollment-intent');return true;

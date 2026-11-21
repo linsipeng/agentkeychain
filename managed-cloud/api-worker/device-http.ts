@@ -64,9 +64,6 @@ export async function deviceFetch(request: Request, env: BrowserBindings) {
         if (((route.startsWith('recovery-target')||route==='recovery-refresh') && (request.headers.has('origin') || request.headers.has('sec-fetch-mode') || request.headers.has('sec-fetch-site'))) || request.headers.has('cookie'))
             throw new ApiError('unauthorized');
         const bodyLimit = ['roster-put','trust-bundle'].includes(route) ? 600 * 1024 : route === 'approvals' ? 384 * 1024 : 8192;
-        const raw = await boundedBody(request, bodyLimit);
-        if (new TextEncoder().encode(raw).length > bodyLimit)
-            throw new ApiError('payload_too_large');
         if (request.method === 'POST' && !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(request.headers.get('content-type') ?? ''))
             throw new ApiError('unsupported_media_type');
         if (!env.AUTH_ORIGIN || !env.DEVICE_API_ORIGIN || !env.TRUSTED_AUTH_SOURCE)
@@ -76,11 +73,16 @@ export async function deviceFetch(request: Request, env: BrowserBindings) {
         catch { return unavailable(); }
         if (configuredOrigin.origin !== env.DEVICE_API_ORIGIN || configuredOrigin.protocol !== 'https:' || url.origin !== configuredOrigin.origin)
             return unavailable();
+        // Clone the actual ingress request while its body is still unused. A
+        // consumed Request cannot be cloned on standard Fetch implementations.
         let sources: string[];
         try { sources = await Promise.all([env.TRUSTED_AUTH_SOURCE.resolve(request.clone() as Request), env.TRUSTED_AUTH_SOURCE.resolve(request.clone() as Request)]); }
         catch { return unavailable(); }
         if (!sources[0] || sources[0] !== sources[1] || !/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(sources[0]))
             return unavailable();
+        const raw = await boundedBody(request, bodyLimit);
+        if (new TextEncoder().encode(raw).length > bodyLimit)
+            throw new ApiError('payload_too_large');
         if (!await browserRepository(env.MAIN).rate('source', await digest('device-source\0' + sources[0]), 120))
             return Response.json({ error: { code: 'rate_limited' } }, { status: 429, headers: { 'cache-control': 'no-store' } });
         auditFailure = true;

@@ -33,6 +33,21 @@ async function identity() {
     return { signingKey: bytes(await crypto.subtle.exportKey('raw', sign.publicKey)), wrappingKey: bytes(await crypto.subtle.exportKey('raw', wrap.publicKey)), sign: async (v: string) => bytes(await crypto.subtle.sign('Ed25519', sign.privateKey, new TextEncoder().encode(v))) };
 }
 const api = (path: string, body: unknown, headers: Record<string, string> = {}) => deviceFetch(new Request(origin + '/v1/devices/' + path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) }), { MAIN: db(), AUTH_ORIGIN: origin, DEVICE_API_ORIGIN: origin, TRUSTED_AUTH_SOURCE: { resolve: async () => 'synthetic-device-source' } });
+test('device authorization resolves the original ingress before consuming the body', async () => {
+    const keys = await identity();
+    const body = { signingKey: keys.signingKey, wrappingKey: keys.wrappingKey, platform: 'linux', proof: await keys.sign(enrollmentProof(keys.signingKey, keys.wrappingKey, 'linux')) };
+    const request = new Request(origin + '/v1/devices/authorize', {method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify(body)});
+    const clone = request.clone.bind(request);
+    let calls = 0;
+    Object.defineProperty(request, 'clone', {value: () => {
+        if (request.bodyUsed) throw new TypeError('body already used');
+        return clone();
+    }});
+    const response = await deviceFetch(request, {MAIN: db(), AUTH_ORIGIN: origin, DEVICE_API_ORIGIN: origin, TRUSTED_AUTH_SOURCE: {resolve: async () => {calls++; return 'synthetic-ingress-before-body';}}});
+    expect(response.status).toBe(200);
+    expect(calls).toBe(2);
+    expect(request.bodyUsed).toBe(true);
+});
 async function account(account = 'a', tenant = 't') {
     const token = crypto.randomUUID(), csrf = crypto.randomUUID();
     const s: SessionRow = { digest: await digest(token), csrf_digest: await digest(csrf), account_id: account, tenant_id: tenant, absolute_expires: Math.floor(Date.now() / 1000) + 3600, step_up_digest: null, step_up_expires: null };

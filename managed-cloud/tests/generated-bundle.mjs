@@ -46,6 +46,7 @@ Object.assign(api.serviceBindings,{
  RECOVERY_RELEASE_SIGNER:{name:'agentkeychain-api-recovery',entrypoint:'RecoveryReleaseSigner'},RECOVERY_ACCOUNT_ATTESTER:{name:'agentkeychain-api-recovery',entrypoint:'RecoveryTestService'}
 });
 Object.assign(recovery.serviceBindings,{
+ GENESIS_AUTH:{name:'agentkeychain-api-recovery',entrypoint:'RosterGenesisAuthority'},
  RECOVERY_AUTH:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryAuthority'},RECOVERY_KEYS:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryKeys'},RECOVERY_RELEASE_SIGNER:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryReleaseSigner'},
  ROSTER_WITNESS_SIGNER:{name:'agentkeychain-custody-recovery',entrypoint:'RosterWitnessSigner'},RECOVERY_TRUST_SIGNER:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryTrustSigner'},RECOVERY_TRUST_POLICY:{name:'agentkeychain-custody-recovery',entrypoint:'RecoveryTrustSigner'}
 });

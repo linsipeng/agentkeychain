@@ -31,10 +31,15 @@ export function authorizationBrowser(policy:ManagedEndpointPolicy,authorization:
   return browser;
  }catch{throw new Error('cloud_invalid_authorization');}
 }
-/** New requests must never inherit a previous request's randomized trust/package. */
+/** Once approval was observed, do not create another remote device or discard the pending trust state. */
+function assertCanReplaceEnrollmentRequest(store:CloudStore){
+ if(['enrollment','roster-current','pending-approved','pending-self-roster','pending-package'].some(id=>store.get('state',id)))
+  throw new Error('cloud_partial_activation_requires_resume');
+}
+/** New, unapproved requests must never inherit a previous request's state. */
 export function replaceEnrollmentRequest(store:CloudStore,authorization:unknown){
  store.transaction(()=>{
-  if(store.get('state','enrollment')||store.get('state','roster-current'))throw new Error('cloud_partial_activation_requires_resume');
+  assertCanReplaceEnrollmentRequest(store);
   store.remove('state','pending-package');store.remove('state','pending-self-roster');
   store.put('state','pending',authorization);
  });
@@ -69,8 +74,14 @@ export async function loginCloud(db:Database,ui:LoginUI,composition:CloudComposi
   const http=new ManagedHttpClient(policy,identity,composition.network),platform=process.platform==='darwin'?'macos':process.platform==='linux'?'linux':'other';
   type PendingAuthorization={deviceCode:string;deviceId:string;requestId:string;browserUri:string;verificationUri:string;phrase:string;interval:number;expiresIn:number;deadline:number};
   let authorization=store.get<PendingAuthorization>('state','pending');
-  if(!authorization||authorization.deadline<=Date.now()){
-  if(store.get('state','roster-current'))throw new Error('cloud_partial_activation_requires_resume');
+  if(authorization&&authorization.deadline<=Date.now()){
+   assertCanReplaceEnrollmentRequest(store);
+   // An expired request cannot prove it was never approved: the current
+   // signed resume endpoint no longer returns its state after expiry.
+   throw new Error('cloud_enrollment_expired_requires_reconcile');
+  }
+  if(!authorization){
+  assertCanReplaceEnrollmentRequest(store);
   const result=await http.publicCall('/v1/devices/authorize',{signingKey:b64(keys.signingPublic),wrappingKey:b64(keys.wrappingPublic),platform,proof:b64(sodium.crypto_sign_detached(enrollmentProof(b64(keys.signingPublic),b64(keys.wrappingPublic),platform),keys.signingPrivate))}) as Omit<PendingAuthorization,'deadline'>;
   authorization={...result,deadline:Date.now()+result.expiresIn*1000};
   replaceEnrollmentRequest(store,authorization);
@@ -80,20 +91,27 @@ export async function loginCloud(db:Database,ui:LoginUI,composition:CloudComposi
   store.put('state','pending',authorization);
   const timestamp=Math.floor(Date.now()/1000);
   const initial=await http.publicCall('/v1/devices/resume',{requestId:authorization.requestId,deviceId:authorization.deviceId,timestamp,signature:b64(sodium.crypto_sign_detached(JSON.stringify(['AgentKeychain-enrollment-resume-v1',authorization.requestId,authorization.deviceId,timestamp]),keys.signingPrivate))}) as {state:string;deviceId?:string;requestId?:string;vaultId?:string};
-  if(initial.state==='denied'){store.transaction(()=>{for(const id of ['pending','pending-package','pending-self-roster'])store!.remove('state',id);});throw new Error('cloud_authorization_denied');}
-  if(initial.state!=='approved')await ui.open(browser.href);
+  if(initial.state==='denied'){assertCanReplaceEnrollmentRequest(store);store.transaction(()=>{for(const id of ['pending','pending-package','pending-self-roster'])store!.remove('state',id);});throw new Error('cloud_authorization_denied');}
+  if(initial.state!=='approved'){
+   assertCanReplaceEnrollmentRequest(store);
+   await ui.open(browser.href);
+  }
   ui.showPhrase?.(authorization.phrase);
   const deadline=authorization.deadline;let approved=false;
-  while(Date.now()<deadline){
+  while(initial.state==='approved'||Date.now()<deadline){
    if(initial.state!=='approved')await ui.wait(authorization.interval*1000);
    let status:{state:string;deviceId?:string;vaultId?:string;requestId?:string};
    try{status=initial.state==='approved'?initial:await http.publicCall('/v1/devices/status',{deviceCode:authorization.deviceCode}) as typeof status;}catch(error){if(error instanceof CloudHttpError&&error.code==='rate_limited'){await ui.wait(Math.max(error.retryAfter,5000));continue;}throw error;}
-   if(status.state==='denied'){store.transaction(()=>{for(const id of ['pending','pending-package','pending-self-roster'])store!.remove('state',id);});throw new Error('cloud_authorization_denied');}
+   if(status.state==='denied'){assertCanReplaceEnrollmentRequest(store);store.transaction(()=>{for(const id of ['pending','pending-package','pending-self-roster'])store!.remove('state',id);});throw new Error('cloud_authorization_denied');}
    if(status.state!=='approved')continue;
    if(status.deviceId!==authorization.deviceId||status.requestId!==authorization.requestId||!status.vaultId)throw new Error('cloud_invalid_authorization');
+   const receipt={requestId:status.requestId,deviceId:status.deviceId,vaultId:status.vaultId};
+   const previous=store.get<typeof receipt>('state','pending-approved');
+   if(previous&&(previous.requestId!==receipt.requestId||previous.deviceId!==receipt.deviceId||previous.vaultId!==receipt.vaultId))throw new Error('cloud_invalid_authorization');
+   store.put('state','pending-approved',receipt);
    identity.record.deviceId=status.deviceId;identity.record.vaultId=status.vaultId;approved=true;break;
   }
-  if(!approved)throw new Error('cloud_authorization_expired');
+  if(!approved||Date.now()>=deadline)throw new Error('cloud_authorization_expired');
   const result=await http.call('/v1/devices/enrollment-grant') as {canonical:string};
   const grant=JSON.parse(result.canonical) as EnrollmentGrant;
   if(canonicalGrant(grant)!==result.canonical||grant.requestId!==authorization.requestId||grant.deviceId!==authorization.deviceId||grant.vaultId!==identity.record.vaultId||grant.signingKey!==b64(keys.signingPublic)||grant.wrappingKey!==b64(keys.wrappingPublic))throw new Error('cloud_invalid_grant');
