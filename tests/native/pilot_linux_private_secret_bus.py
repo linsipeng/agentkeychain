@@ -10,6 +10,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 from gi.repository import Gio, GLib
@@ -370,6 +371,76 @@ def stop(child):
             child.wait(timeout=2)
 
 
+# Capture only these fixed private child roles in the prompt test. Never enable
+# GLib debug (GCR could log exchange payload), expose original stderr, or write
+# diagnostics to disk. Classification is bounded and content-free.
+PROMPT_METHODS = {
+    b"BeginPrompting": "begin", b"PerformPrompt": "perform", b"StopPrompting": "stop",
+    b"PromptReady": "ready", b"PromptDone": "done", b"Prompt": "public-prompt",
+    b"Dismiss": "dismiss", b"Completed": "completed", b"Ping": "expected-ping",
+    b"RequestName": "name-request",
+}
+
+
+def prompt_child_label(role, raw):
+    line = raw.lower()
+    if role == "bus":
+        direction = next((label for prefix, label in ((b"Rejected send message", "send"),
+                            (b"Rejected receive message", "receive")) if prefix in raw), None)
+        if direction is not None:
+            member = re.search(rb' member="([A-Za-z]{1,32})"', raw)
+            method = PROMPT_METHODS.get(member[1], "other") if member else "other"
+            return "bus-rejected-" + direction + "-" + method
+        return "bus-stderr-other"
+    if b"cannot open display" in line or b"failed to open display" in line:
+        return role + "-gtk-display-unavailable"
+    if b"couldn't initialize prompt" in line or b"could not initialize prompt" in line:
+        if b"accessdenied" in line or b"access denied" in line:
+            return role + "-prompt-init-access-denied"
+        if b"unknownmethod" in line or b"unknown method" in line:
+            return role + "-prompt-init-unknown-method"
+        return role + "-prompt-init-failed"
+    if b"couldn't connect to session bus" in line:
+        return role + "-session-bus-unavailable"
+    if b"error while loading shared libraries" in line:
+        return role + "-missing-library"
+    if b"gtk-critical" in line or b"gtk-warning" in line or b"gdk-critical" in line:
+        return role + "-gtk-warning"
+    return role + "-stderr-other"
+
+
+class PromptChildDiagnostics:
+    def __init__(self, role, stream):
+        self.role = role
+        self.stream = stream
+        self.labels = set()
+        self.reader = threading.Thread(target=self._drain, daemon=True)
+        self.reader.start()
+
+    def _drain(self):
+        limit = 2048
+        try:
+            with self.stream:
+                while True:
+                    raw = self.stream.readline(limit + 1)
+                    if not raw:
+                        break
+                    if len(raw) > limit:
+                        self.labels.add(self.role + "-stderr-line-omitted")
+                        while raw and not raw.endswith(b"\n"):
+                            raw = self.stream.readline(limit + 1)
+                    elif raw.strip():
+                        self.labels.add(prompt_child_label(self.role, raw))
+        except OSError:
+            self.labels.add(self.role + "-stderr-pipe-error")
+
+    def summary_after_exit(self):
+        self.reader.join(0.25)
+        if self.reader.is_alive():
+            return (self.role + "-stderr-incomplete",)
+        return tuple(sorted(self.labels)) or (self.role + "-stderr-empty",)
+
+
 phase = "environment"
 
 
@@ -386,6 +457,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
     signal.signal(signal.SIGTERM, interrupted)
     signal.alarm(20)
     children = []
+    diagnostics = []
     conn = None
     try:
         phase = "unix-capability"
@@ -413,13 +485,16 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                 need(collection_offer)
                 policy += prompt_cancel_policy()
             conf.write_text(BUS_CONFIG.format(endpoint, os.getuid(), policy), encoding="ascii")
-            def start(argv, environment):
+            def start(argv, environment, role):
                 child = subprocess.Popen(argv, env=environment, cwd=root, stdin=subprocess.DEVNULL,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE if prompt else subprocess.DEVNULL)
                 children.append(child)
+                if prompt:
+                    diagnostics.append(PromptChildDiagnostics(role, child.stderr))
                 return child
+            prompt_failed = False
             try:
-                broker = start([BROKER, "--nofork", "--nopidfile", "--config-file=" + str(conf)], env)
+                broker = start([BROKER, "--nofork", "--nopidfile", "--nosyslog", "--config-file=" + str(conf)], env, "bus")
                 for _ in range(60):
                     if endpoint.exists() or broker.poll() is not None:
                         break
@@ -448,7 +523,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                 phase = "provider-owner"
                 provider = start([str(provider_path), "--foreground", "--components=secrets", "--control-directory=" + str(control)],
                                  {**env, "DBUS_SESSION_BUS_ADDRESS": "unix:path=" + str(endpoint),
-                                  "LD_LIBRARY_PATH": str(library_dir)})
+                                  "LD_LIBRARY_PATH": str(library_dir)}, "provider")
                 owner = None
                 for _ in range(80):
                     owned_image(provider, provider_path, staged_provider)
@@ -501,7 +576,7 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                         phase = "prompter-start"
                         image, snapshot, display_env, windows = prompt
                         prompter = start([str(image)], {**env, **display_env, "DBUS_SESSION_BUS_ADDRESS": "unix:path=" + str(endpoint),
-                                                         "LD_LIBRARY_PATH": str(library_dir)})
+                                                         "LD_LIBRARY_PATH": str(library_dir)}, "gcr")
                         prompt_owner = wait_owner(conn, PROMPTER, prompter, image, snapshot)
                         phase = "prompter-role-collision"
                         need(prompt_owner not in (owner, conn.get_unique_name()))
@@ -533,6 +608,11 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                     need(credentials.get("UnixUserID") == os.getuid() and credentials.get("ProcessID") == provider.pid)
                     phase = "collection-offer-no-fixture-files"
                     require_no_fixture_keyring_files(env["XDG_DATA_HOME"])
+            except Exception:
+                # Cleanup below stops only our children; classify buffered output
+                # afterwards. Preserve the original phase and raise again.
+                prompt_failed = True
+                raise
             finally:
                 signal.alarm(0)
                 try:
@@ -545,6 +625,10 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                             stop(child)
                         except (OSError, subprocess.SubprocessError):
                             cleanup_failed = True
+                    if prompt and (prompt_failed or cleanup_failed):
+                        for record in diagnostics:
+                            for label in record.summary_after_exit():
+                                print("linux_private_prompt_child=" + label, file=sys.stderr)
                     need(not cleanup_failed)
     finally:
         signal.alarm(0)
