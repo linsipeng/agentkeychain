@@ -13,7 +13,7 @@ enum GatePhase: String {
  case directoryOpen, directoryStat, childStat
  case snapshotSearch, snapshotSearchDecode, snapshotDefault, snapshotDefaultDecode
  case fixtureBasename, fixtureAbsent, fixtureAlreadyExists, fixtureMetadata
- case filesystemType, filesystemOwner, filesystemPermissions, filesystemLinkCount
+ case filesystemType, filesystemOwner, fixtureFilePermissions, fixtureDirectoryPermissions, filesystemLinkCount
  case fixtureAlias, fixtureOpen, fixtureOpenRef, fixtureIdentity, fixturePairDistinct
  case securityPath, securityPathBuffer, securityPathEncoding, securityStatus, securityFlags
  case createBeforeSnapshot, createAfterSnapshot, createAPI, createRefPath
@@ -24,12 +24,13 @@ enum GatePhase: String {
  case itemsIndependent, siblingAfterPrimaryDeletion, siblingDeleted, finalSnapshot
 }
 enum GateFailure: Error {
- case denied(GatePhase), osStatus(GatePhase, OSStatus), posix(GatePhase, Int32)
+ case denied(GatePhase), osStatus(GatePhase, OSStatus), posix(GatePhase, Int32), mode(GatePhase, UInt32)
  var message: String {
   switch self {
   case .denied(let phase): return "phase=" + phase.rawValue
   case .osStatus(let phase, let value): return "phase=" + phase.rawValue + " osstatus=" + String(value)
   case .posix(let phase, let value): return "phase=" + phase.rawValue + " errno=" + String(value)
+  case .mode(let phase, let value): return "phase=" + phase.rawValue + " mode=" + String(value, radix: 8)
   }
  }
 }
@@ -111,7 +112,10 @@ func checkPrivateMetadata(_ row: stat, directory: Bool) throws {
  let type = directory ? S_IFDIR : S_IFREG
  try require((row.st_mode & mode_t(S_IFMT)) == mode_t(type), .filesystemType)
  try require(row.st_uid == geteuid(), .filesystemOwner)
- try require((row.st_mode & 0o7777) == (directory ? 0o700 : 0o600), .filesystemPermissions)
+ let mode = row.st_mode & 0o7777
+ if mode != (directory ? 0o700 : 0o600) {
+  throw GateFailure.mode(directory ? .fixtureDirectoryPermissions : .fixtureFilePermissions, UInt32(mode))
+ }
  try require(directory || row.st_nlink == 1, .filesystemLinkCount)
 }
 func fixtureMetadata(directory: Int32, name: String, path: String) throws -> stat {

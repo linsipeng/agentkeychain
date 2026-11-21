@@ -66,6 +66,7 @@ jobs:
           AKC_DISPOSABLE_DARWIN_FIXTURE: create-two-private-keychains-v1
         run: |
           set -euo pipefail
+          umask 077
           "$RUNNER_TEMP/akc-darwin-keychain-fixture" --provision-disposable
 
       - name: Independently check user Keychain configuration after attempt
