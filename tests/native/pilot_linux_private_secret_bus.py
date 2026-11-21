@@ -28,14 +28,24 @@ BUS_CONFIG = """<busconfig>
 {}
 </policy></busconfig>"""
 
-# The admin policy may match the well-known name owned by the unique recipient;
-# the actual call never resolves by well-known name or uses activation.
+# Both sides of delivery need policy. send_destination matches the owner of
+# the well-known name even though the client addresses its checked unique name.
+# The admission rule still blocks all other client->provider method calls.
+# Reply sends are limited by the broker's pending-call record, which only
+# the addressed recipient can complete; receive rules pin that provider.
 SESSION_POLICY = """
 <allow send_destination="org.freedesktop.secrets" send_interface="org.freedesktop.Secret.Service"
-       send_member="OpenSession" send_path="/org/freedesktop/secrets" send_type="method_call"/>
-<allow receive_sender="org.freedesktop.secrets" receive_type="method_return" receive_requested_reply="true"/>
-<allow receive_sender="org.freedesktop.secrets" receive_type="error" receive_requested_reply="true"/>
+       send_member="OpenSession" send_path="/org/freedesktop/secrets" send_type="method_call" max_fds="0"/>
+<allow receive_interface="org.freedesktop.Secret.Service" receive_member="OpenSession"
+       receive_path="/org/freedesktop/secrets" receive_type="method_call" max_fds="0"/>
+<allow send_type="method_return" send_requested_reply="true" max_fds="0"/>
+<allow send_type="error" send_requested_reply="true" max_fds="0"/>
+<allow receive_sender="org.freedesktop.secrets" receive_type="method_return"
+       receive_requested_reply="true" max_fds="0"/>
+<allow receive_sender="org.freedesktop.secrets" receive_type="error"
+       receive_requested_reply="true" max_fds="0"/>
 """
+
 ALGORITHM = "dh-ietf1024-sha256-aes128-cbc-pkcs7"
 # RFC 2409 Section 6.2, 1024-bit MODP group. Protocol compatibility test only;
 # not a general encryption recommendation.
@@ -86,6 +96,13 @@ def session_rpc_failure(error):
         DBUS + ".Error.UnknownMethod": "unknown-method",
         DBUS + ".Error.Failed": "provider-failed",
     }
+    if remote == DBUS + ".Error.AccessDenied":
+        # dbus-daemon prefixes its English diagnostic with these fixed labels
+        # under LC_ALL=C. Never expose any other content from the remote body.
+        if error.message.startswith("GDBus.Error:" + remote + ": Rejected send message"):
+            return "access-denied-send"
+        if error.message.startswith("GDBus.Error:" + remote + ": Rejected receive message"):
+            return "access-denied-receive"
     if remote:
         return known.get(remote, "other-remote-error")
     if error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.TIMED_OUT):
