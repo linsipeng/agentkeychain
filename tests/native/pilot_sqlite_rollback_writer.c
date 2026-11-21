@@ -5,6 +5,7 @@
 #define AKC_LEASE_PRIMITIVES_ONLY 1
 #include "pilot_sqlite_writer_lease.c"
 #include <sqlite3.h>
+#include <sys/random.h>
 #include <time.h>
 #include <stdint.h>
 
