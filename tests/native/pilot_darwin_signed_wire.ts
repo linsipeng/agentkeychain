@@ -4,6 +4,7 @@
 import {constants,closeSync,fstatSync,lstatSync,mkdirSync,mkdtempSync,openSync,readFileSync,realpathSync,rmSync,writeFileSync} from 'node:fs';
 import {createHash,generateKeyPairSync,randomBytes,sign} from 'node:crypto';
 import {join} from 'node:path';
+import {userInfo} from 'node:os';
 import {canonicalManifest} from '../../src/cloud/config.ts';
 import {INSTALLED_PILOT_CONTRACT,verifyInstalledContinuationPilot} from '../../src/cloud/continuation-pilot-build.ts';
 import {DARWIN_NATIVE_CHECK,DARWIN_NATIVE_HELPER_DOMAIN,DARWIN_NATIVE_LOCATION_DOMAIN,verifyDarwinPilotNativeInputs} from '../../src/cloud/continuation-pilot-darwin-check.ts';
@@ -20,7 +21,10 @@ function authority(){
 type ArchitecturePhase = 'matrix-architecture'|'bun-process-arch'|'uname-os'|'uname-arch'|'bun-native-query'|'bun-native-translated'|
  'bun-workflow-image'|'bun-os-image'|'bun-image-spelling'|'bun-image-open-actual'|'bun-image-reopen-pinned'|
  'bun-image-stat'|'bun-image-filetype'|'bun-image-inode'|'bun-image-mode'|'bun-lipo-tool'|'bun-lipo-arch'|'fixture-lipo-tool'|'fixture-lipo-arch'|'helper-lipo-tool'|'helper-lipo-arch';
-let phase: 'runner'|ArchitecturePhase|'fixture'|'build'|'digest'|'positive'|'invalid-wire'|'missing-wrong-inode'|'unchanged-original'|'configuration'='runner';
+let phase: 'runner'|ArchitecturePhase|'before-fixture'|'fixture-toolchain'|'fixture-compile'|'fixture-provision'|
+ 'fixture-metadata'|'manifest-sign'|'manifest-gate'|'companion-build'|'companion-codesign'|'digest'|'positive'|
+ 'invalid-wire'|'missing-wrong-inode'|'unchanged-original'|'complete'='runner';
+let configuration:'not-attempted'|'home-invalid'|'initial-unavailable'|'pending'|'final-unavailable'|'changed'|'unchanged'='not-attempted';
 let imageRelation:'unchecked'|'same-spelling'|'different-spelling'='unchecked';
 const strictAbsoluteImage=(value:unknown):value is string=>typeof value==='string'&&value.startsWith('/')&&value.length<=4095&&
  value.slice(1).split('/').every(component=>/^[A-Za-z0-9._-]+$/.test(component)&&component!=='.'&&component!=='..');
@@ -138,25 +142,50 @@ async function main(){
    }finally{closeSync(reopened);}
   };
   nativeArch(actualBun,'bun');
-  phase='configuration';
-  const baseline=capture(['/bin/bash','tests/native/pilot_darwin_keychain_config_digest.sh']);
-  must(/^[a-f0-9]{64}\n$/.test(baseline));
+  phase='before-fixture';
+  // Match the independent outer user-domain digest: only the verified
+  // disposable runner HOME may be added to the scrubbed command environment.
+  // Native fixture, compiler and companion retain scratch HOME as before.
+  configuration='home-invalid';
+  const login=userInfo(),runnerHome=process.env.HOME;
+  must(login.uid===process.getuid?.()&&strictAbsoluteImage(runnerHome)&&runnerHome===login.homedir);
+  const homeStat=lstatSync(runnerHome,{bigint:true});
+  must(homeStat.isDirectory()&&homeStat.uid===BigInt(login.uid));
+  const digestConfig=()=>{
+   const current=lstatSync(runnerHome,{bigint:true});
+   must(current.isDirectory()&&current.uid===homeStat.uid&&current.dev===homeStat.dev&&current.ino===homeStat.ino);
+   const reply=launch(['/bin/bash','tests/native/pilot_darwin_keychain_config_digest.sh'],{HOME:runnerHome});
+   const digest=reply.stdout.toString();
+   // Nonsecret output has an exact digest shape; stderr is never emitted
+   // and warnings on a successful status cannot cause a false failure.
+   must(reply.exitCode===0&&/^[a-f0-9]{64}\n$/.test(digest));
+   return digest;
+  };
+  configuration='initial-unavailable';
+  const baseline=digestConfig();
+  configuration='pending';
+  let completed=false;
   try{
-   phase='fixture';
+   phase='fixture-toolchain';
    const fixture=join(dir,'fixture');
    const version=launch([env.DEVELOPER_DIR+'/usr/bin/xcodebuild','-version']);
    must(version.exitCode===0&&version.stdout.toString().split('\n')[0]==='Xcode 16.4');
    // Deprecation warnings from fixture Swift compilation are not published.
+   phase='fixture-compile';
    const compiled=Bun.spawnSync(['/usr/bin/xcrun','--sdk','macosx','swiftc','tests/native/pilot_darwin_keychain.swift','-o',fixture],
     {env,cwd:process.cwd(),stdout:'ignore',stderr:'ignore',timeout:100_000});
    must(compiled.exitCode===0);
    nativeArch(fixture,'fixture');
-   const raw:unknown=JSON.parse(capture([fixture,'--provision-readonly-wire-fixture'],{AKC_DISPOSABLE_DARWIN_FIXTURE:'private-readonly-wire-fixture-v1'}));
+   phase='fixture-provision';
+   const provisioned=capture([fixture,'--provision-readonly-wire-fixture'],{AKC_DISPOSABLE_DARWIN_FIXTURE:'private-readonly-wire-fixture-v1'});
+   phase='fixture-metadata';
+   const raw:unknown=JSON.parse(provisioned);
    exactFields(raw,['directory','directoryDevice','directoryInode','fileDevice','fileInode','siblingInode']);
    const {directory,directoryDevice,directoryInode,fileDevice,fileInode,siblingInode}=raw;
    must(typeof directory==='string'&&/^\/private\/tmp\/akc-pilot-native-[a-f0-9]{32}$/.test(directory)&&
     fileDevice===directoryDevice&&fileInode!==siblingInode&&[directoryDevice,directoryInode,fileDevice,fileInode,siblingInode].every(v=>typeof v==='string'&&/^\d+$/.test(v)));
    const uid=process.getuid?.()!,target=`darwin-${process.arch}`;
+   phase='manifest-sign';
    const root=authority(),checkpoint=authority(),witness=authority(),auth=authority(),main=authority(),rollout=authority(),genesis=authority();
    const manifest=root.sign(canonicalManifest({version:1,releaseId:'continuation-pilot-wire-fixture',
     webOrigin:'https://web-pilot-wire.example.invalid',apiOrigin:'https://api.web-pilot-wire.example.invalid',
@@ -171,8 +200,9 @@ async function main(){
     contract:INSTALLED_PILOT_CONTRACT,target,manifestDigest:wireHash(manifest),authOriginDigest:wireHash(authOriginAppendix),
     authPinDigest:wireHash(authAppendix),mainPinDigest:wireHash(commitAppendix),rolloutPinDigest:wireHash(rolloutAppendix),genesisPin:genesis.pin,issuedAt,expiresAt}));
    const artifact={manifest,authOriginAppendix,authAppendix,commitAppendix,rolloutAppendix,installation};
+   phase='manifest-gate';
    const gate=await verifyInstalledContinuationPilot(artifact,root.pin.publicKey,target);
-   phase='build';
+   phase='companion-build';
    const install=join(dir,'candidate'),material=join(dir,'public.json'),pin=join(dir,'root.pub');
    mkdirSync(install,{mode:0o700});
    writeFileSync(material,JSON.stringify(artifact),{mode:0o600,flag:'wx'});
@@ -184,6 +214,7 @@ async function main(){
     '--root-public-key',pin,'--outfile',helper],{env:{...env,...nativeEnv},cwd:process.cwd(),stdout:'pipe',stderr:'pipe',timeout:155_000});
    must(build.exitCode===0&&build.stdout.length===0&&build.stderr.length===0);
    nativeArch(helper,'helper');
+   phase='companion-codesign';
    must(launch(['/usr/bin/codesign','--force','--sign','-','--timestamp=none',helper]).exitCode===0);
    // Ad-hoc signing proves local code integrity, not publisher identity.
    // Use complete fd-based hash with no final symlink; retain and recheck file
@@ -266,11 +297,13 @@ async function main(){
    await invoke(json({...rollout.sign(json({...body,fileInode:siblingInode}))}),false);
    phase='unchanged-original';
    await invoke(expected.nativeInput,true);
+   completed=true;
+   phase='complete';
   }finally{
-   const previous=phase;
-   phase='configuration';
-   must(capture(['/bin/bash','tests/native/pilot_darwin_keychain_config_digest.sh'])===baseline);
-   phase=previous;
+   // Preserve the primary phase even if this independent read fails.
+   try{configuration=digestConfig()===baseline?'unchanged':'changed';}
+   catch{configuration='final-unavailable';}
+   if(completed)must(configuration==='unchanged');
   }
   process.stdout.write('PASS signed Darwin companion wire, exact hash/signature and scoped fixture identity\n');
  }finally{
@@ -278,4 +311,4 @@ async function main(){
   rmSync(dir,{recursive:true,force:true});
  }
 }
-main().catch(()=>{process.stderr.write('darwin_pilot_signed_wire_rehearsal_denied phase='+phase+' image_relation='+imageRelation+'\n');process.exitCode=1;});
+main().catch(()=>{process.stderr.write('darwin_pilot_signed_wire_rehearsal_denied primary_phase='+phase+' configuration='+configuration+' image_relation='+imageRelation+'\n');process.exitCode=1;});

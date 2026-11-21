@@ -176,3 +176,14 @@ Diagnostics report only fixed stages. The verified image is the only Bun
 file used for the architecture check and companion build. This tests
 one hosted fixture's process identity, not shipped installer provenance or
 a race-free generic executable launcher.
+
+The inner verification invokes the same independent user-domain hash script
+as the outer workflow, using the disposable runner account's validated
+HOME for those read-only calls only. It does not inherit the complete runner
+environment. Scratch HOME still scopes every compiler and native test
+process. Keeping these read-only calls in the runner home context avoids querying
+a different or unavailable user-domain configuration under scratch HOME. The inner
+test preserves its primary failure label separately from configuration
+status; an unavailable or changed final digest never counts as passing.
+An unchanged outer digest alone says nothing about whether provisioning or
+the companion ran, or whether the signed-wire acceptance passed.
