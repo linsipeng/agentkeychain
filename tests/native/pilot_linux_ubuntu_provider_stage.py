@@ -122,12 +122,15 @@ def run():
     need("ID=ubuntu" in os_release.splitlines() and "VERSION_CODENAME=noble" in os_release.splitlines())
     need(len(sys.argv) == 1 and os.environ.get("GITHUB_ACTIONS") == "true"
          and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("archive-only-v1", "private-peer-v1", "encrypted-session-v1", "collection-offer-v1", "private-display-v1"))
-    display_smoke = os.environ["AKC_UBUNTU_PROVIDER_STAGE"] == "private-display-v1"
-    verify_peer = not display_smoke and os.environ["AKC_UBUNTU_PROVIDER_STAGE"] != "archive-only-v1"
-    pins = tuple((name, "3.41.2-1build3", "gcr") for name in PROMPT_ARCHIVES) if display_smoke else PINS
-    encrypted = os.environ["AKC_UBUNTU_PROVIDER_STAGE"] in ("encrypted-session-v1", "collection-offer-v1")
-    collection_offer = os.environ["AKC_UBUNTU_PROVIDER_STAGE"] == "collection-offer-v1"
+         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") in ("archive-only-v1", "private-peer-v1", "encrypted-session-v1", "collection-offer-v1", "private-display-v1", "prompt-cancel-v1"))
+    mode = os.environ["AKC_UBUNTU_PROVIDER_STAGE"]
+    display_smoke = mode == "private-display-v1"
+    prompt_cancel = mode == "prompt-cancel-v1"
+    verify_peer = mode not in ("archive-only-v1", "private-display-v1")
+    prompt_pins = tuple((name, "3.41.2-1build3", "gcr") for name in PROMPT_ARCHIVES)
+    pins = prompt_pins if display_smoke else PINS + prompt_pins if prompt_cancel else PINS
+    collection_offer = mode == "collection-offer-v1" or prompt_cancel
+    encrypted = mode == "encrypted-session-v1" or collection_offer
     os.umask(0o077)
     with tempfile.TemporaryDirectory(prefix="akc-noble-stage-", dir="/tmp") as location:
         work = Path(location)
@@ -195,7 +198,7 @@ APT::Get::AllowUnauthenticated "false";
             filename = f"{name}_{version}_amd64.deb"
             need(re.fullmatch(r"[a-f0-9]{64}", digest) and
                  record.get("Filename") == f"pool/main/{source[0]}/{source}/{filename}")
-            if display_smoke:
+            if name in PROMPT_ARCHIVES:
                 need(digest == PROMPT_ARCHIVES[name])
             elif verify_peer:
                 need(digest == PEER_ARCHIVES[name])
@@ -208,16 +211,20 @@ APT::Get::AllowUnauthenticated "false";
                 "--max-time", "30", "--max-filesize", str(size), "--output", str(output),
                 "https://archive.ubuntu.com/ubuntu/" + record["Filename"])
             need(output.stat().st_size == size and hashlib.sha256(output.read_bytes()).hexdigest() == digest)
-            if display_smoke:
+            if name in PROMPT_ARCHIVES:
                 phase = "prompt-asset-" + name
                 member, leaf, dependencies = PROMPT_MEMBERS[name]
-                path = work / leaf
-                extract_member(cmd, output, member, path)
+                path = (library_dir if name == "libgcr-ui-3-1" and prompt_cancel else work) / leaf
+                asset = extract_member(cmd, output, member, path)
                 dynamic = cmd("readelf", "--dynamic", str(path)).decode("ascii")
                 need(tuple(re.findall(r"Shared library: \[([a-zA-Z0-9._+-]+)\]", dynamic)) == dependencies and
                      not re.search(r"\((?:RPATH|RUNPATH)\)", dynamic))
                 if name == "libgcr-ui-3-1":
                     need(re.findall(r"Library soname: \[([a-zA-Z0-9._+-]+)\]", dynamic) == [leaf])
+                    if prompt_cancel:
+                        staged_libraries[path] = asset
+                else:
+                    prompter_image, prompter_stat = path, asset
             elif name == "gnome-keyring":
                 phase = "member"
                 provider = extract_member(cmd, output, "./usr/bin/gnome-keyring-daemon", candidate)
@@ -265,14 +272,31 @@ APT::Get::AllowUnauthenticated "false";
         # Python -I excludes script siblings; load only this fixed reviewed file.
         import runpy
         lane = runpy.run_path(str(Path(__file__).with_name("pilot_linux_private_secret_bus.py")))
-        need(len(staged_libraries) == 2)
+        need(len(staged_libraries) == (3 if prompt_cancel else 2))
         candidate.chmod(0o500)
-        try:
-            lane["verify_private_provider"](candidate, provider, library_dir, staged_libraries,
-                                           encrypted=encrypted, collection_offer=collection_offer)
-        except Exception:
-            phase = "private-peer-" + lane["verify_private_provider"].__globals__["phase"]
-            raise ValueError("private provider peer denied") from None
+        def verify_provider(prompt=None):
+            global phase
+            try:
+                lane["verify_private_provider"](candidate, provider, library_dir, staged_libraries,
+                                               encrypted=encrypted, collection_offer=collection_offer, prompt=prompt)
+            except Exception:
+                phase = "private-peer-" + lane["verify_private_provider"].__globals__["phase"]
+                raise ValueError("private provider peer denied") from None
+        if prompt_cancel:
+            display = runpy.run_path(str(Path(__file__).with_name("pilot_linux_private_display.py")))
+            phase = "prompt-display-prerequisites"
+            prompter_image.chmod(0o500)
+            try:
+                with display["owned_private_display"](prompt=True) as (display_env, secret_display):
+                    verify_provider((prompter_image, prompter_stat, display_env,
+                                     lambda: display["screen_windows"](secret_display)))
+            except Exception:
+                if not phase.startswith("private-peer-"):
+                    phase = display["owned_private_display"].__wrapped__.__globals__["phase"]
+                raise ValueError("private prompt denied") from None
+            print("linux_private_gcr_prompt_visible_and_cancelled_not_storage")
+            return
+        verify_provider()
         if collection_offer:
             print("linux_private_secret_bus_collection_offer_verified_not_prompted_or_created")
             return

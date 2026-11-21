@@ -1,4 +1,5 @@
 """Exercise X11 authorization against one owned Xvfb; no graphical input."""
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import platform
@@ -61,11 +62,12 @@ def connect_own_display(process, executable, endpoint, endpoint_identity, cookie
         return status
 
 
-def verify_private_display():
+@contextmanager
+def owned_private_display(prompt=False):
     global phase
     need(platform.system() == "Linux" and platform.machine() == "x86_64" and os.getuid() == os.geteuid() != 0)
     need(os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") == "private-display-v1")
+         and os.environ.get("AKC_UBUNTU_PROVIDER_STAGE") == ("prompt-cancel-v1" if prompt else "private-display-v1"))
     os.umask(0o077)
     phase = "display-unix-capability"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM):
@@ -118,6 +120,9 @@ def verify_private_display():
             need(connect_own_display(child, identity(image), endpoint, peer, cookie) == 1)
             phase = "display-reject-empty-cookie"
             need(connect_own_display(child, identity(image), endpoint, peer, b"") == 0)
+            yield ({"DISPLAY": ":" + str(number), "XAUTHORITY": str(authority), "GDK_BACKEND": "x11",
+                    "NO_AT_BRIDGE": "1", "GSETTINGS_BACKEND": "memory"},
+                   (child, identity(image), endpoint, peer, cookie))
         finally:
             if child.poll() is None:
                 child.terminate()
@@ -128,6 +133,79 @@ def verify_private_display():
                     child.wait(timeout=2)
             need(shared_identity() == expected_shared)
             need(not os.path.lexists(endpoint) and not os.path.lexists(lock))
+
+
+def verify_private_display():
+    with owned_private_display():
+        pass
+
+
+def screen_windows(display):
+    # Read only normal X11/XRes metadata over a strictly pinned socket, without
+    # trusting client-controlled _NET_WM_PID or screenshot/title matches.
+    child, executable, endpoint, endpoint_identity, cookie = display
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(2)
+        need(child.poll() is None and identity(os.stat(f"/proc/{child.pid}/exe")) == executable)
+        need(identity(endpoint.lstat()) == endpoint_identity)
+        conn.connect(str(endpoint))
+        pid, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        need((pid, uid) == (child.pid, os.getuid()) and identity(endpoint.lstat()) == endpoint_identity)
+
+        def read(amount):
+            need(0 <= amount <= 65536)
+            result = bytearray()
+            while len(result) < amount:
+                data = conn.recv(amount - len(result))
+                need(data)
+                result.extend(data)
+            return result
+
+        conn.sendall(x11_setup(cookie))
+        status, _, major, minor, length = struct.unpack("<BBHHH", read(8))
+        need((status, major, minor) == (1, 11, 0))
+        setup = read(length * 4)
+        vendor, = struct.unpack_from("<H", setup, 16)
+        need(setup[20] == 1)
+        screen = 32 + ((vendor + 3) & ~3) + setup[21] * 8
+        root, = struct.unpack_from("<I", setup, screen)
+        sequence = 0
+
+        def reply(opcode, data=b"", minor=0):
+            nonlocal sequence
+            sequence += 1
+            need(len(data) % 4 == 0)
+            conn.sendall(struct.pack("<BBH", opcode, minor, 1 + len(data) // 4) + data)
+            header = read(32)
+            need(header[0] == 1 and struct.unpack_from("<H", header, 2)[0] == sequence)
+            return header, read(struct.unpack_from("<I", header, 4)[0] * 4)
+
+        query = b"X-Resource"
+        extension, _ = reply(98, struct.pack("<H2x", len(query)) + padded(query))
+        need(extension[8] == 1 and extension[9] >= 128)
+        opcode = extension[9]
+        tree, children = reply(15, struct.pack("<I", root))
+        count, = struct.unpack_from("<H", tree, 16)
+        need(count <= 32 and len(children) == count * 4)
+        result = []
+        for (window,) in struct.iter_unpack("<I", children):
+            attr_head, attributes = reply(3, struct.pack("<I", window))
+            need(len(attributes) == 12)
+            if attr_head[26] != 2:  # IsViewable
+                continue
+            result.append(window)
+        resolved = set()
+        for window in result:
+            head, body = reply(opcode, struct.pack("<III", 1, window, 2), minor=4)
+            ids, = struct.unpack_from("<I", head, 8)
+            need(ids == 1 and len(body) == 16)
+            resource, mask, length, local_pid = struct.unpack("<IIII", body)
+            # Xorg ConstructClientIdValue reports the client's resource base,
+            # not the queried window XID. The checked X server resolves the
+            # exact request to a single local PID; reject missing/extra IDs.
+            need(resource != 0 and mask == 2 and length == 4 and local_pid > 0)
+            resolved.add(local_pid)
+        return resolved
 
 
 if __name__ == "__main__":

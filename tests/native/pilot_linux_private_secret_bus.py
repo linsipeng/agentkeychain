@@ -54,6 +54,114 @@ COLLECTION_OFFER_POLICY = """
 <allow receive_interface="org.freedesktop.Secret.Service" receive_member="CreateCollection"
        receive_path="/org/freedesktop/secrets" receive_type="method_call" max_fds="0"/>
 """
+PROMPTER = "org.gnome.keyring.SystemPrompter"
+FIXTURE_CLIENT = "org.agentkeychain.PromptFixture"
+FIRST_PROMPT = "/org/freedesktop/secrets/prompt/p1"
+PROMPT_IFACE = "org.freedesktop.Secret.Prompt"
+
+
+def prompt_cancel_policy():
+    rules = [f'<allow own="{PROMPTER}"/>', f'<allow own="{FIXTURE_CLIENT}"/>']
+    routes = (
+        (FIXTURE_CLIENT, SERVICE, FIRST_PROMPT, PROMPT_IFACE, ("Prompt", "Dismiss")),
+        (SERVICE, PROMPTER, "/org/gnome/keyring/Prompter", "org.gnome.keyring.internal.Prompter",
+         ("BeginPrompting", "PerformPrompt", "StopPrompting")),
+        (PROMPTER, SERVICE, "/org/gnome/keyring/Prompt/p0", "org.gnome.keyring.internal.Prompter.Callback",
+         ("PromptReady", "PromptDone")),
+    )
+    for sender, destination, path, interface, members in routes:
+        for method in members:
+            rules += [
+                f'<allow send_destination="{destination}" send_path="{path}" send_interface="{interface}" '
+                f'send_member="{method}" send_type="method_call" max_fds="0"/>',
+                f'<allow receive_sender="{sender}" receive_path="{path}" receive_interface="{interface}" '
+                f'receive_member="{method}" receive_type="method_call" max_fds="0"/>',
+            ]
+    rules += [
+        f'<allow send_destination="{FIXTURE_CLIENT}" send_path="{FIRST_PROMPT}" send_interface="{PROMPT_IFACE}" '
+        'send_member="Completed" send_type="signal" send_broadcast="false" max_fds="0"/>',
+        f'<allow receive_sender="{SERVICE}" receive_path="{FIRST_PROMPT}" receive_interface="{PROMPT_IFACE}" '
+        'receive_member="Completed" receive_type="signal" max_fds="0"/>',
+    ]
+    # The existing requested-reply send rules apply; do not add any general
+    # methods. Only the official prompter and the exact fixture requester may
+    # receive the requested returns/errors needed for this one choreography.
+    for sender in (PROMPTER, FIXTURE_CLIENT):
+        for kind in ("method_return", "error"):
+            rules.append(f'<allow receive_sender="{sender}" receive_type="{kind}" '
+                         'receive_requested_reply="true" max_fds="0"/>')
+    return "\n".join(rules)
+
+
+def wait_owner(conn, name, process, image, snapshot):
+    for _ in range(60):
+        owned_image(process, image, snapshot)
+        try:
+            owner = call(conn, "GetNameOwner", name, "(s)")
+        except GLib.Error as error:
+            if Gio.DBusError.get_remote_error(error) != DBUS + ".Error.NameHasNoOwner":
+                raise
+        else:
+            need(re.fullmatch(r":[0-9]+\.[0-9]+", owner))
+            credentials = call(conn, "GetConnectionCredentials", owner, "(a{sv})")
+            need(credentials.get("UnixUserID") == os.getuid() and credentials.get("ProcessID") == process.pid)
+            return owner
+        time.sleep(0.05)
+    raise RuntimeError("fixture role owner unavailable")
+
+
+def show_then_cancel(bus, owner, offer, prompter_pid, windows):
+    global phase
+    need(offer == FIRST_PROMPT)
+    phase = "prompt-clean-screen"
+    need(not windows())
+    context = GLib.MainContext.default()
+    completed = []
+
+    def completion(_bus, sender, path, interface, signal_name, parameters, _data):
+        if (sender, path, interface, signal_name) == (owner, offer, PROMPT_IFACE, "Completed"):
+            completed.append(parameters)
+
+    subscription = bus.signal_subscribe(owner, PROMPT_IFACE, "Completed", offer, None,
+                                        Gio.DBusSignalFlags.NONE, completion, None)
+    try:
+        phase = "public-prompt-rpc"
+        bus.call_sync(owner, offer, PROMPT_IFACE, "Prompt", GLib.Variant("(s)", ("",)),
+                      GLib.VariantType.new("()"), Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+        phase = "prompt-visible-pinned-pid"
+        for _ in range(60):
+            context.iteration(False)
+            need(not completed)
+            visible = windows()
+            if visible:
+                need(visible == {prompter_pid})
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError("authenticated dialog not observed")
+        phase = "public-dismiss-rpc"
+        bus.call_sync(owner, offer, PROMPT_IFACE, "Dismiss", GLib.Variant("()", ()),
+                      GLib.VariantType.new("()"), Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+        phase = "prompt-cancel-result"
+        for _ in range(60):
+            context.iteration(False)
+            if completed:
+                break
+            time.sleep(0.05)
+        need(len(completed) == 1 and completed[0].get_type_string() == "(bv)")
+        variant = completed[0].get_child_value(1).get_variant()
+        need(completed[0].get_child_value(0).get_boolean() and
+             variant.get_type_string() == "o" and variant.get_string() == "/")
+        phase = "prompt-closed-screen"
+        for _ in range(60):
+            if not windows():
+                break
+            time.sleep(0.05)
+        else:
+            raise RuntimeError("fixture window still visible")
+    finally:
+        bus.signal_unsubscribe(subscription)
+
 COLLECTION_LABEL = "AgentKeychain disposable offer only"
 
 
@@ -63,6 +171,7 @@ def validate_collection_offer(reply):
     need(collection == "/")
     # GNOME 46.1 gkd_secret_prompt_constructed uses SECRET_PROMPT_PREFIX "/p%d".
     need(re.fullmatch(r"/org/freedesktop/secrets/prompt/p[1-9][0-9]{0,9}", prompt))
+    return prompt
 
 
 def verify_collection_offer(bus, unique_owner):
@@ -77,7 +186,7 @@ def verify_collection_offer(bus, unique_owner):
         phase = "collection-offer-rpc-" + session_rpc_failure(error)
         raise
     phase = "collection-offer-shape"
-    validate_collection_offer(reply)
+    return validate_collection_offer(reply)
 
 
 def require_no_fixture_keyring_files(data_home):
@@ -195,6 +304,20 @@ def owned_image(process, path, staged=None):
     need((current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino))
 
 
+def verify_mapped_libraries(process, staged_libraries):
+    maps = Path(f"/proc/{process.pid}/maps").read_text(encoding="ascii")
+    for path, expected in staged_libraries.items():
+        current = path.lstat()
+        need(stat.S_ISREG(current.st_mode) and current.st_uid == os.getuid() and
+             stat.S_IMODE(current.st_mode) == 0o400 and
+             (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino))
+        identity = (os.major(expected.st_dev), os.minor(expected.st_dev), expected.st_ino)
+        rows = [line.split(maxsplit=5) for line in maps.splitlines()]
+        need(any(len(row) == 6 and row[5] == str(path) and
+                 (*[int(v, 16) for v in row[3].split(":")], int(row[4])) == identity
+                 for row in rows))
+
+
 def call(bus, method, name, reply):
     return bus.call_sync(DBUS, "/org/freedesktop/DBus", DBUS, method,
                          GLib.Variant("(s)", (name,)), GLib.VariantType.new(reply),
@@ -218,7 +341,8 @@ def interrupted(_signum, _frame):
     raise RuntimeError("interrupted")
 
 
-def verify_private_provider(provider_path, staged_provider, library_dir, staged_libraries, encrypted=False, collection_offer=False):
+def verify_private_provider(provider_path, staged_provider, library_dir, staged_libraries, encrypted=False,
+                            collection_offer=False, prompt=None):
     global phase
     need(sys.platform == "linux" and os.getuid() == os.geteuid() != 0)
     os.umask(0o077)
@@ -249,6 +373,9 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
             policy = SESSION_POLICY if encrypted else ""
             if collection_offer:
                 policy += COLLECTION_OFFER_POLICY
+            if prompt:
+                need(collection_offer)
+                policy += prompt_cancel_policy()
             conf.write_text(BUS_CONFIG.format(endpoint, os.getuid(), policy), encoding="ascii")
             def start(argv, environment):
                 child = subprocess.Popen(argv, env=environment, cwd=root, stdin=subprocess.DEVNULL,
@@ -302,17 +429,8 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                 need(credentials.get("UnixUserID") == os.getuid() and credentials.get("ProcessID") == provider.pid)
                 owned_image(provider, provider_path, staged_provider)
                 phase = "provider-library-identity"
-                maps = Path(f"/proc/{provider.pid}/maps").read_text(encoding="ascii")
-                for path, expected in staged_libraries.items():
-                    current = path.lstat()
-                    need(stat.S_ISREG(current.st_mode) and current.st_uid == os.getuid() and
-                         stat.S_IMODE(current.st_mode) == 0o400 and
-                         (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino))
-                    identity = (os.major(expected.st_dev), os.minor(expected.st_dev), expected.st_ino)
-                    rows = [line.split(maxsplit=5) for line in maps.splitlines()]
-                    need(any(len(row) == 6 and row[5] == str(path) and
-                             (*[int(v, 16) for v in row[3].split(":")], int(row[4])) == identity
-                             for row in rows))
+                verify_mapped_libraries(provider, {path: row for path, row in staged_libraries.items()
+                                                   if path.name != "libgcr-ui-3.so.1"})
                 phase = "provider-owner-final"
                 owned_image(broker, BROKER)
                 need(call(conn, "GetNameOwner", SERVICE, "(s)") == owner)
@@ -338,7 +456,25 @@ def verify_private_provider(provider_path, staged_provider, library_dir, staged_
                     phase = "collection-offer-fresh-data"
                     require_no_fixture_keyring_files(env["XDG_DATA_HOME"])
                     need(call(conn, "GetNameOwner", SERVICE, "(s)") == owner)
-                    verify_collection_offer(conn, owner)
+                    if prompt:
+                        phase = "prompt-requester-role"
+                        result = conn.call_sync(DBUS, "/org/freedesktop/DBus", DBUS, "RequestName",
+                                               GLib.Variant("(su)", (FIXTURE_CLIENT, 4)), GLib.VariantType.new("(u)"),
+                                               Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+                        need(result.unpack() == (1,) and call(conn, "GetNameOwner", FIXTURE_CLIENT, "(s)") == conn.get_unique_name())
+                        phase = "prompter-role"
+                        image, snapshot, display_env, windows = prompt
+                        prompter = start([str(image)], {**env, **display_env, "DBUS_SESSION_BUS_ADDRESS": "unix:path=" + str(endpoint),
+                                                         "LD_LIBRARY_PATH": str(library_dir)})
+                        prompt_owner = wait_owner(conn, PROMPTER, prompter, image, snapshot)
+                        need(prompt_owner not in (owner, conn.get_unique_name()))
+                        phase = "prompter-library-identity"
+                        verify_mapped_libraries(prompter, staged_libraries)
+                    offer = verify_collection_offer(conn, owner)
+                    if prompt:
+                        show_then_cancel(conn, owner, offer, prompter.pid, windows)
+                        phase = "prompter-owner-after"
+                        need(wait_owner(conn, PROMPTER, prompter, image, snapshot) == prompt_owner)
                     phase = "collection-offer-owner"
                     owned_image(provider, provider_path, staged_provider)
                     owned_image(broker, BROKER)
